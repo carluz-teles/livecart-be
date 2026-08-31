@@ -106,6 +106,69 @@ func (m ModoDeReserva) PrecoParaOLojista() string {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// A CAPACIDADE DA CONTA — observada, não perguntada
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Se o ERP reserva ou não é configuração do LOJISTA, no ERP dele. O LiveCart
+// não liga, não desliga e não deveria fingir que decide. O que ele pode fazer é
+// SABER — e saber sem perguntar nada, porque a resposta chega sozinha em todo
+// webhook de estoque:
+//
+//	disponível < físico  ⇒  alguma coisa está reservada  ⇒  a conta RESERVA
+//
+// É prova positiva e de graça. Não gasta requisição, não depende de haver
+// pedido em aberto no instante em que o lojista abre a tela, e não expira: uma
+// conta que reservou uma vez tem o módulo ligado.
+//
+// O caminho contrário — "não vi reserva, logo não reserva" — NÃO é prova. Pode
+// não haver pedido aberto agora; e o saldo demora de 9 a 22 segundos para
+// refletir um pedido recém-criado (medido em 29/08/2026). Por isso a ausência
+// de sinal nunca derruba uma confirmação.
+
+// ChaveCapacidadeDeReserva é onde o veredito vive no metadata da integração.
+const ChaveCapacidadeDeReserva = "reserva_capacidade_confirmada"
+
+// CapacidadeConfirmada diz se JÁ foi observado que esta conta reserva.
+//
+// O Tiny não passa por aqui: lá o pedido de venda É a reserva, por desenho do
+// produto, e o que o lojista precisa conferir no painel do Tiny nós já dizemos
+// a ele. Exigir prova para o Tiny quebraria quem fatura hoje.
+func CapacidadeConfirmada(provider string, metadata map[string]any) bool {
+	if provider == "tiny" {
+		return true
+	}
+	if metadata == nil {
+		return false
+	}
+	v, _ := metadata[ChaveCapacidadeDeReserva].(bool)
+	return v
+}
+
+// ObservacaoDeReserva é o que uma leitura de saldo diz sobre a conta.
+type ObservacaoDeReserva int
+
+const (
+	// NadaAObservar: a leitura não decide nada. É o caso mais comum e não é
+	// notícia — sem pedido em aberto, disponível == físico é o esperado.
+	NadaAObservar ObservacaoDeReserva = iota
+	// ContaReserva: prova positiva. O ERP está segurando peça.
+	ContaReserva
+)
+
+// ObservarCapacidade lê um saldo e diz o que ele prova.
+//
+// Deliberadamente só sabe dizer "sim" ou "não sei". Um "não" precisaria
+// distinguir "a conta não reserva" de "não há nada reservado agora" e de "o ERP
+// ainda não refletiu o pedido de 5 segundos atrás" — e errar nessa distinção
+// derrubaria um lojista do modo nativo no meio de uma live.
+func ObservarCapacidade(fisico, disponivel int) ObservacaoDeReserva {
+	if fisico > 0 && disponivel < fisico {
+		return ContaReserva
+	}
+	return NadaAObservar
+}
+
 // ResultadoDaSonda é o que a sonda de capacidade descobriu sobre a conta.
 type ResultadoDaSonda struct {
 	// ReservaLigada diz se a conta reserva de verdade. Só é conclusivo quando

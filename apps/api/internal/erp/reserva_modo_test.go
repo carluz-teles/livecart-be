@@ -240,3 +240,77 @@ func TestMetadataMalformadoCaiNoPadraoDoProvider(t *testing.T) {
 		}
 	}
 }
+
+// ─── A CAPACIDADE É OBSERVADA, NÃO PERGUNTADA ───────────────────────────────
+//
+// Se o ERP reserva ou não é configuração do LOJISTA, no ERP dele: o LiveCart
+// não liga, não desliga e não deveria fingir que decide. O que ele pode é
+// SABER — e a resposta chega de graça em toda leitura de saldo.
+
+func TestDisponivelMenorQueFisicoProvaQueAContaReserva(t *testing.T) {
+	casos := []struct {
+		nome               string
+		fisico, disponivel int
+		quero              ObservacaoDeReserva
+		porque             string
+	}{
+		{"há peça reservada", 5, 3, ContaReserva,
+			"duas unidades estão presas em pedido: o ERP está segurando"},
+		{"nada reservado", 5, 5, NadaAObservar,
+			"pode simplesmente não haver pedido aberto agora — não prova nada"},
+		{"estoque zerado", 0, 0, NadaAObservar,
+			"sem peça não há o que reservar"},
+		{"disponível maior que o físico", 5, 7, NadaAObservar,
+			"número impossível; não vira prova de nada"},
+		{"disponível negativo", 5, -2, ContaReserva,
+			"saldo negativo é sintoma, mas ainda é menor que o físico"},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			if got := ObservarCapacidade(c.fisico, c.disponivel); got != c.quero {
+				t.Errorf("físico=%d disponível=%d → %v, queria %v (%s)",
+					c.fisico, c.disponivel, got, c.quero, c.porque)
+			}
+		})
+	}
+}
+
+// A ausência de reserva NUNCA derruba uma confirmação.
+//
+// "Não vi reserva agora" tem três causas indistinguíveis: a conta não reserva,
+// não há pedido aberto, ou o ERP ainda não refletiu o pedido de cinco segundos
+// atrás (medido: 9 a 22 s). Tratar as três como "não reserva" derrubaria um
+// lojista do modo nativo no meio de uma live.
+func TestObservacaoSoSabeDizerSimOuNaoSei(t *testing.T) {
+	for fisico := 0; fisico <= 5; fisico++ {
+		for disp := -2; disp <= 7; disp++ {
+			got := ObservarCapacidade(fisico, disp)
+			if got != ContaReserva && got != NadaAObservar {
+				t.Fatalf("físico=%d disp=%d devolveu %v — só existem 'sim' e 'não sei'",
+					fisico, disp, got)
+			}
+		}
+	}
+}
+
+// O TINY É ISENTO: lá o pedido de venda É a reserva, por desenho do produto.
+// Exigir prova dele quebraria quem fatura hoje.
+func TestTinyNaoPrecisaProvarCapacidade(t *testing.T) {
+	if !CapacidadeConfirmada("tiny", nil) {
+		t.Error("o Tiny passou a precisar de prova — o pedido dele JÁ é a reserva, " +
+			"e sem isso ele pararia de poder usar o modo nativo")
+	}
+	if CapacidadeConfirmada("bling", nil) {
+		t.Error("o Bling passou sem prova — é exatamente o caminho que vende a " +
+			"mesma peça duas vezes")
+	}
+	if !CapacidadeConfirmada("bling", map[string]any{ChaveCapacidadeDeReserva: true}) {
+		t.Error("a prova gravada não foi reconhecida")
+	}
+	// Metadata malformado não liga nada.
+	for _, lixo := range []any{"sim", 1, nil, "true"} {
+		if CapacidadeConfirmada("bling", map[string]any{ChaveCapacidadeDeReserva: lixo}) {
+			t.Errorf("metadata %v (%T) foi lido como prova", lixo, lixo)
+		}
+	}
+}

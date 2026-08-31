@@ -202,6 +202,13 @@ func (h *WebhookHandler) enfileirarEventoBling(
 			zap.Float64("saldo_virtual", d.SaldoVirtualTotal),
 			zap.String("operacao", d.Operacao),
 		)
+		// A prova chega de graça, aqui: disponível < físico significa que o ERP
+		// está segurando peça, logo a conta TEM a Reserva de estoque ligada.
+		// Guardar isso é o que permite a tela responder sem sondar e o modo
+		// nativo ser oferecido só a quem pode usá-lo.
+		h.service.observarCapacidadeDeReserva(ctx, integracao,
+			int(d.SaldoFisicoTotal), int(d.SaldoVirtualTotal))
+
 		h.service.despacharEstoqueBling(ctx, integracao, d, env)
 
 	case "product":
@@ -366,5 +373,40 @@ func (s *Service) observarSituacaoDoPedidoBling(
 	)
 	return s.ERP().ObserveOrderStatus(
 		ctx, integracao.StoreID, pedidoID, "", status, erp.StatusSourceWebhook, nil,
+	)
+}
+
+// observarCapacidadeDeReserva guarda a prova de que a conta reserva.
+//
+// Só grava quando a prova é POSITIVA, e só uma vez: a ausência de reserva num
+// instante não prova nada (pode não haver pedido aberto, e o saldo demora de 9
+// a 22 s para refletir um pedido novo), então ela nunca derruba o veredito.
+func (s *Service) observarCapacidadeDeReserva(
+	ctx context.Context, integracao *IntegrationRow, fisico, disponivel int,
+) {
+	if erp.ObservarCapacidade(fisico, disponivel) != erp.ContaReserva {
+		return
+	}
+	if erp.CapacidadeConfirmada(integracao.Provider, integracao.Metadata) {
+		return // já sabíamos
+	}
+
+	metadata := integracao.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata[erp.ChaveCapacidadeDeReserva] = true
+	if err := s.repo.UpdateMetadata(ctx, integracao.ID, metadata); err != nil {
+		logger.From(ctx, s.logger).Warn("não consegui guardar a capacidade de reserva observada",
+			zap.String("integration_id", integracao.ID), zap.Error(err))
+		return
+	}
+	integracao.Metadata = metadata
+
+	logger.From(ctx, s.logger).Info("capacidade de reserva CONFIRMADA por observação",
+		zap.String("integration_id", integracao.ID),
+		zap.String("provider", integracao.Provider),
+		zap.Int("saldo_fisico", fisico),
+		zap.Int("saldo_disponivel", disponivel),
 	)
 }

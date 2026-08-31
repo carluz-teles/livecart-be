@@ -6737,6 +6737,17 @@ func (s *Service) CreateSimulatedSessionOnAir(ctx context.Context, storeID, even
 // MODO DE RESERVA DE ESTOQUE
 // =============================================================================
 
+// explicacaoDaCapacidade conta ao lojista o que sabemos, e como sabemos.
+func explicacaoDaCapacidade(provider string, confirmada bool) string {
+	if provider == "tiny" {
+		return "no Tiny o pedido de venda É a reserva — confira o módulo na sua conta"
+	}
+	if confirmada {
+		return "já observamos este ERP segurando estoque"
+	}
+	return "ainda não observamos este ERP segurando estoque"
+}
+
 // comoLigarReservaNoBling é o passo a passo, com as palavras que aparecem na
 // tela do Bling. Genérico ("vá nas configurações") faria o lojista procurar.
 const comoLigarReservaNoBling = "No Bling: clique no ícone do perfil da sua empresa → " +
@@ -6772,6 +6783,25 @@ func (s *Service) DefinirModoDeReserva(ctx context.Context, input SetModoDeReser
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
+	// O MODO NATIVO EXIGE PROVA, e não um clique.
+	//
+	// Sem isto o aviso "sua escolha ainda não está valendo" era um bilhete numa
+	// porta destrancada: a tela avisava, o backend gravava assim mesmo, e na
+	// live o LiveCart parava de segurar a peça achando que o ERP a segurava.
+	// Ninguém segurava, e a mesma peça era vendida duas vezes.
+	//
+	// A prova é observada, não perguntada: disponível < físico em qualquer
+	// leitura de saldo. E o Tiny está isento — lá o pedido de venda É a reserva,
+	// por desenho do produto; o que o lojista precisa conferir no painel do Tiny
+	// nós já dizemos a ele, e não há nada que possamos fazer por ele.
+	if input.Modo == erp.ReservaNativaDoERP &&
+		!erp.CapacidadeConfirmada(integracao.Provider, integracao.Metadata) {
+		return nil, httpx.DomainError(422, httpx.CodeValidationFailed,
+			"ainda não observamos este ERP segurando estoque, então não dá para "+
+				"delegar a reserva a ele — o LiveCart venderia a mesma peça duas vezes. "+
+				comoLigarReservaNoBling)
+	}
+
 	metadata[erp.ChaveModoDeReserva] = string(input.Modo)
 	if err := s.repo.UpdateMetadata(ctx, integracao.ID, metadata); err != nil {
 		return nil, fmt.Errorf("gravando o modo de reserva: %w", err)
@@ -6789,7 +6819,23 @@ func (s *Service) DefinirModoDeReserva(ctx context.Context, input SetModoDeReser
 // retratoDoModoDeReserva junta a escolha do lojista com a capacidade medida.
 func (s *Service) retratoDoModoDeReserva(ctx context.Context, integracao *IntegrationRow) *ModoDeReservaResponse {
 	escolhido := erp.ModoDeReservaDaIntegracao(integracao.Provider, integracao.Metadata)
-	sonda := s.sondarCapacidadeDeReserva(ctx, integracao)
+
+	// O veredito vem do que já foi OBSERVADO, e não de uma sondagem ao vivo.
+	//
+	// Sondar aqui era duas coisas ruins ao mesmo tempo: custava até dez leituras
+	// do ERP no caminho crítico de abrir um diálogo (9,8 s medidos, o navegador
+	// desistia), e devolvia "não sei" sempre que nenhum produto tivesse reserva
+	// naquele instante — que é o estado normal fora de live. Ou seja: gastava
+	// caro para quase nunca responder.
+	//
+	// A resposta certa chega sozinha, de graça, em todo webhook de estoque:
+	// disponível < físico prova que a conta reserva. Ver ObservarCapacidade.
+	confirmada := erp.CapacidadeConfirmada(integracao.Provider, integracao.Metadata)
+	sonda := erp.ResultadoDaSonda{
+		ReservaLigada: confirmada,
+		Conclusiva:    confirmada,
+		Explicacao:    explicacaoDaCapacidade(integracao.Provider, confirmada),
+	}
 	efetivo, motivo := erp.EscolherModo(escolhido, sonda)
 
 	out := &ModoDeReservaResponse{
@@ -6808,111 +6854,17 @@ func (s *Service) retratoDoModoDeReserva(ctx context.Context, integracao *Integr
 	return out
 }
 
-// sondarCapacidadeDeReserva descobre EMPIRICAMENTE se a conta do ERP reserva.
+// A SONDA AO VIVO FOI REMOVIDA, e a remoção é a correção.
 //
-// O sinal é a diferença entre o saldo físico e o disponível de um produto que
-// tem unidade reservada. Deliberadamente NÃO escreve nada: uma sonda que criasse
-// um pedido para descobrir a resposta mexeria no ERP real do lojista sem ele
-// pedir — e o Bling não tem sandbox.
+// Ela lia até dez produtos do ERP no caminho crítico de abrir um diálogo — 9,8
+// segundos medidos em staging, com o navegador desistindo quatro vezes — e
+// respondia "não sei" sempre que nenhum produto tivesse reserva naquele
+// instante, que é o estado normal fora de live. Gastava caro para quase nunca
+// responder.
 //
-// Devolve inconclusivo em qualquer dúvida. "Não sei" é resposta legítima, e
-// tratá-la como "não reserva" faria o lojista escolher o modo errado.
-// PrazoDaSonda é o teto de tempo da sondagem de reserva.
+// A resposta chega sozinha, de graça: disponível < físico em qualquer leitura
+// de saldo prova que a conta reserva. Ver erp.ObservarCapacidade e
+// observarCapacidadeDeReserva, no bling_webhook.go.
 //
-// Existe porque a primeira versão não tinha nenhum: ela lia até dez produtos um
-// a um, cada leitura passando pelo limitador de 2 req/s do Bling, e o endpoint
-// levava 9,8 SEGUNDOS. Medido em staging em 31/08/2026 — o navegador desistia
-// (HTTP 499) quatro vezes seguidas e o lojista via "Não consegui ler a
-// configuração agora", que descreve o sintoma e esconde a causa.
-//
-// Estourar o prazo NÃO é erro: "não sei" já é uma das três respostas que a
-// sonda sabe dar, e a tela já sabe mostrá-la.
-const PrazoDaSonda = 2500 * time.Millisecond
-
-func (s *Service) sondarCapacidadeDeReserva(ctx context.Context, integracao *IntegrationRow) erp.ResultadoDaSonda {
-	ctx, cancelar := context.WithTimeout(ctx, PrazoDaSonda)
-	defer cancelar()
-
-	prov, err := s.createProviderFromRow(ctx, integracao)
-	if err != nil {
-		return erp.ResultadoDaSonda{Explicacao: "não consegui falar com o ERP agora"}
-	}
-	leitor, ok := prov.(providers.ERPStockDetailReader)
-	if !ok {
-		return erp.ResultadoDaSonda{Explicacao: "este ERP não expõe saldo detalhado"}
-	}
-
-	amostra, err := s.repo.ListERPLinkedProductsSample(ctx, integracao.StoreID, integracao.Provider, 10)
-	if err != nil || len(amostra) == 0 {
-		return erp.ResultadoDaSonda{
-			Explicacao: "nenhum produto vinculado ao ERP para observar",
-		}
-	}
-	ids := make([]string, 0, len(amostra))
-	for _, p := range amostra {
-		ids = append(ids, p.ExternalID)
-	}
-
-	// Basta UM produto com reserva para provar que a conta reserva. O contrário
-	// não vale: nenhum produto com reserva pode significar só que ninguém tem
-	// pedido em aberto agora.
-	//
-	// EM LOTE quando o ERP sabe — no Bling são os dez produtos numa requisição
-	// só, contra dez requisições enfileiradas no limitador. É a diferença entre
-	// o diálogo abrir na hora e o navegador desistir.
-	if lote, temLote := prov.(providers.ERPStockBatchReader); temLote {
-		saldos, err := lote.GetProductStockBatch(ctx, ids)
-		if err != nil {
-			return sondaInconclusiva(ctx)
-		}
-		for _, d := range saldos {
-			if d.Reserved > 0 {
-				return erp.SondaDeReserva{
-					SaldoFisico:            d.Balance,
-					SaldoDisponivel:        d.Available,
-					UnidadesEmPedidoAberto: d.Reserved,
-				}.Avaliar()
-			}
-		}
-		return sondaSemReservaVisivel()
-	}
-
-	for _, id := range ids {
-		d, err := leitor.GetProductStockDetail(ctx, id)
-		if err != nil {
-			// Prazo estourado encerra a varredura: insistir só empurraria o
-			// endpoint de volta para o tempo que o navegador não espera.
-			if ctx.Err() != nil {
-				return sondaInconclusiva(ctx)
-			}
-			continue
-		}
-		if d.Reserved > 0 {
-			return erp.SondaDeReserva{
-				SaldoFisico:            d.Balance,
-				SaldoDisponivel:        d.Available,
-				UnidadesEmPedidoAberto: d.Reserved,
-			}.Avaliar()
-		}
-	}
-	if ctx.Err() != nil {
-		return sondaInconclusiva(ctx)
-	}
-	return sondaSemReservaVisivel()
-}
-
-func sondaInconclusiva(ctx context.Context) erp.ResultadoDaSonda {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return erp.ResultadoDaSonda{
-			Explicacao: "o ERP demorou demais para responder agora — abra de novo daqui a pouco",
-		}
-	}
-	return erp.ResultadoDaSonda{Explicacao: "não consegui ler o saldo no ERP agora"}
-}
-
-func sondaSemReservaVisivel() erp.ResultadoDaSonda {
-	return erp.ResultadoDaSonda{
-		Explicacao: "nenhum dos produtos lidos tem unidade reservada — pode ser que a conta " +
-			"não reserve, ou simplesmente que não há pedido em aberto agora",
-	}
-}
+// Não deixei a função aqui "por precaução": código morto que custa dez leituras
+// do ERP é armadilha para quem for chamá-lo sem ler este comentário.
