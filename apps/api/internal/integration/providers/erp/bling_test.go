@@ -890,3 +890,86 @@ func TestPedidoSemCampoSituacaoEhErro(t *testing.T) {
 		t.Error("devolveu 'Em aberto' para um pedido cuja situação não veio")
 	}
 }
+
+// O BLING RECUSA UM PUT QUE NÃO MUDA NADA.
+//
+//	400 VALIDATION_ERROR [Informações idênticas a última venda salva,
+//	                      altere alguma informação caso deseje prosseguir (code 3)]
+//
+// Medido em staging em 31/08/2026, num PAGAMENTO. O fluxo reconcilia a grade
+// antes de aprovar — sempre, de propósito, porque é a rede que pega o
+// comentário que caiu entre a última leitura e a liberação do estado. No Tiny
+// esse PUT é idempotente; aqui ele derrubou a finalização inteira e a venda
+// paga não chegou ao ERP.
+func TestPutIdenticoNaoEhEnviado(t *testing.T) {
+	itens := []providers.ERPOrderItem{
+		{ProductID: "16698953100", Quantity: 2, UnitPrice: 1000, Name: "A", Note: providers.LiveCartItemMarker},
+	}
+
+	var metodos []string
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+		metodos = append(metodos, r.Method)
+		// O pedido JÁ tem exatamente essa grade — com os campos calculados que
+		// o Bling devolve e que nunca enviamos.
+		respJSON(`{"data":{"id":1,"situacao":{"id":6,"valor":0},
+		  "itens":[{"id":999,"unidade":"un","aliquotaIPI":0,
+		            "produto":{"id":16698953100},"quantidade":2,"valor":10,
+		            "descricao":"A","descricaoDetalhada":"[LiveCart]"}],
+		  "parcelas":[{"id":7,"valor":20}]}}`)(w, r)
+	})
+
+	if err := b.UpdateOrderItems(context.Background(), "1", itens); err != nil {
+		t.Fatalf("grade idêntica devia ser no-op, veio erro: %v", err)
+	}
+	for _, m := range metodos {
+		if m == http.MethodPut {
+			t.Error("mandou o PUT com a grade idêntica — o Bling recusa com code 3 e " +
+				"derruba a finalização da venda paga")
+		}
+	}
+	if len(metodos) != 1 || metodos[0] != http.MethodGet {
+		t.Errorf("requisições = %v, quero só o GET que a comparação já precisava", metodos)
+	}
+}
+
+// E uma grade DIFERENTE continua sendo escrita — a comparação não pode virar
+// um "nunca escreve".
+func TestGradeDiferenteAindaEhEnviada(t *testing.T) {
+	casos := []struct {
+		nome  string
+		itens []providers.ERPOrderItem
+	}{
+		{"quantidade mudou", []providers.ERPOrderItem{
+			{ProductID: "16698953100", Quantity: 3, UnitPrice: 1000, Name: "A"}}},
+		{"preço mudou", []providers.ERPOrderItem{
+			{ProductID: "16698953100", Quantity: 2, UnitPrice: 1500, Name: "A"}}},
+		{"produto mudou", []providers.ERPOrderItem{
+			{ProductID: "16698952209", Quantity: 2, UnitPrice: 1000, Name: "A"}}},
+		{"item a mais", []providers.ERPOrderItem{
+			{ProductID: "16698953100", Quantity: 2, UnitPrice: 1000, Name: "A"},
+			{ProductID: "16698952209", Quantity: 1, UnitPrice: 500, Name: "B"}}},
+		{"grade vazia", nil},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			var viuPut bool
+			b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					viuPut = true
+				}
+				respJSON(`{"data":{"id":1,"situacao":{"id":6,"valor":0},
+				  "itens":[{"id":999,"produto":{"id":16698953100},"quantidade":2,"valor":10,
+				            "descricao":"A","descricaoDetalhada":"[LiveCart]"}],
+				  "parcelas":[{"id":7,"valor":20}]}}`)(w, r)
+			})
+			if err := b.UpdateOrderItems(context.Background(), "1", c.itens); err != nil {
+				t.Fatalf("erro: %v", err)
+			}
+			if !viuPut {
+				t.Error("a grade mudou e o PUT não foi enviado — o pedido ficaria " +
+					"diferente do carrinho que a compradora pagou")
+			}
+		})
+	}
+}

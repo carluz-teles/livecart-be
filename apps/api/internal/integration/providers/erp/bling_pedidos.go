@@ -292,6 +292,27 @@ func (b *Bling) UpdateOrderItems(ctx context.Context, orderID string, itens []pr
 		}
 		novos = append(novos, m)
 	}
+
+	// O BLING RECUSA UM PUT QUE NÃO MUDA NADA.
+	//
+	//	400 VALIDATION_ERROR [Informações idênticas a última venda salva,
+	//	                      altere alguma informação caso deseje prosseguir (code 3)]
+	//
+	// Medido em staging em 31/08/2026, num pagamento: o fluxo reconcilia a
+	// grade antes de aprovar — SEMPRE, de propósito, porque é a rede que pega o
+	// comentário que caiu entre a última leitura e a liberação do estado. No
+	// Tiny esse PUT é idempotente e não custa nada. Aqui ele derruba a
+	// finalização inteira: três tentativas, três 400, e a venda paga não chega
+	// ao ERP.
+	//
+	// Comparar antes de escrever é a resposta, e ela sai de graça: o corpo do
+	// PUT vem do GET que este método já faz. Nada a mudar não é erro, é o
+	// desfecho certo — o pedido já é o carrinho. De quebra economiza uma
+	// escrita do teto de 3 req/s a cada reconciliação que não tinha o que
+	// reconciliar, que numa live é a maioria delas.
+	if gradeIgual(cru["itens"], novos) {
+		return nil
+	}
 	cru["itens"] = novos
 
 	// A grade nova muda o TOTAL, e o Bling valida que a soma das parcelas bate
@@ -301,6 +322,44 @@ func (b *Bling) UpdateOrderItems(ctx context.Context, orderID string, itens []pr
 	limparReadOnly(cru)
 
 	return b.escrever(ctx, http.MethodPut, "/pedidos/vendas/"+url.PathEscape(orderID), cru, nil)
+}
+
+// gradeIgual diz se a grade que o pedido JÁ TEM é a que se ia escrever.
+//
+// Compara só o que este método escreve — produto, quantidade e valor —, e não o
+// documento inteiro: o eco do GET traz campos que o Bling calcula (id da linha,
+// unidade, comissão, aliquotaIPI) e que nunca são enviados. Exigir igualdade
+// deles faria a comparação nunca casar, e o PUT inútil voltaria.
+//
+// A ordem importa e é comparada como vem: a grade é sempre reconstruída do
+// banco na mesma ordem, então uma diferença de ordem é diferença de verdade.
+func gradeIgual(atual, novos any) bool {
+	a, ok1 := atual.([]any)
+	n, ok2 := novos.([]any)
+	if !ok1 || !ok2 || len(a) != len(n) {
+		return false
+	}
+	for i := range n {
+		ma, ok1 := a[i].(map[string]any)
+		mn, ok2 := n[i].(map[string]any)
+		if !ok1 || !ok2 {
+			return false
+		}
+		if idDoProduto(ma) != idDoProduto(mn) ||
+			numeroDoCru(ma["quantidade"]) != numeroDoCru(mn["quantidade"]) ||
+			centavos(numeroDoCru(ma["valor"])) != centavos(numeroDoCru(mn["valor"])) {
+			return false
+		}
+	}
+	return true
+}
+
+func idDoProduto(item map[string]any) int64 {
+	p, ok := item["produto"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	return int64(numeroDoCru(p["id"]))
 }
 
 // limparReadOnly tira do corpo os campos que o spec marca `readOnly`.
@@ -341,7 +400,17 @@ func numeroDoCru(v any) float64 {
 	switch n := v.(type) {
 	case float64:
 		return n
+	case float32:
+		return float64(n)
 	case int:
+		return float64(n)
+	// int64 estava faltando, e a falta era invisível até a comparação de grade
+	// precisar dela: o eco do GET decodifica em float64, mas a grade que NÓS
+	// montamos usa int64 no id do produto. O id novo virava 0, nenhuma grade
+	// jamais era considerada igual, e o PUT inútil continuava indo.
+	case int64:
+		return float64(n)
+	case int32:
 		return float64(n)
 	case json.Number:
 		f, _ := n.Float64()
