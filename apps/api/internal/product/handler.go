@@ -7,15 +7,17 @@ import (
 
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
+	"livecart/apps/api/lib/storage"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Handler struct {
-	service *Service
+	service  *Service
+	s3Client *storage.S3Client
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+func NewHandler(service *Service, s3Client *storage.S3Client) *Handler {
+	return &Handler{service: service, s3Client: s3Client}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -23,11 +25,68 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
 	g.Post("/", h.Create)
+	g.Post("/upload-image", h.UploadImage)
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
 	g.Delete("/:id", h.Delete)
 	g.Post("/:id/images", h.AddImage)
 	g.Delete("/:id/images/:imageId", h.DeleteImage)
+}
+
+// UploadImage stores an uploaded image file in S3 and returns its permanent
+// public URL, to be used as a product's imageUrl. Mirrors the store-logo upload
+// but returns a public URL (products serve imageUrl as-is, everywhere) instead
+// of a short-lived presigned one.
+// @Summary      Upload a product image file
+// @Tags         products
+// @Accept       multipart/form-data
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        file formData file true "Image file (JPG, PNG, GIF, WebP; max 5MB)"
+// @Success      200 {object} httpx.Envelope{data=UploadProductImageResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/products/upload-image [post]
+// @Security     BearerAuth
+func (h *Handler) UploadImage(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	if storeID == "" {
+		return httpx.ErrUnprocessable("invalid store ID")
+	}
+	if h.s3Client == nil {
+		return httpx.ErrInternal("storage not configured")
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		return httpx.ErrBadRequest("file is required")
+	}
+	if file.Size > 5*1024*1024 {
+		return httpx.ErrBadRequest("file too large, maximum size is 5MB")
+	}
+	contentType := file.Header.Get("Content-Type")
+	validTypes := map[string]bool{
+		"image/jpeg": true,
+		"image/jpg":  true,
+		"image/png":  true,
+		"image/gif":  true,
+		"image/webp": true,
+	}
+	if !validTypes[contentType] {
+		return httpx.ErrBadRequest("invalid file type, accepted: JPG, PNG, GIF, WebP")
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		return httpx.ErrInternal("failed to read file")
+	}
+	defer src.Close()
+
+	key, err := h.s3Client.UploadFile(c.UserContext(), src, file.Filename, contentType, "products/"+storeID)
+	if err != nil {
+		return httpx.ErrInternal("failed to upload file")
+	}
+
+	return httpx.OK(c, UploadProductImageResponse{URL: h.s3Client.GetPublicURL(key)})
 }
 
 // AddImage attaches one image URL to a variant gallery.

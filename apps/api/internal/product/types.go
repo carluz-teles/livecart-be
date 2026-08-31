@@ -167,6 +167,12 @@ type AddProductImageResponse struct {
 	Position int    `json:"position"`
 }
 
+// UploadProductImageResponse carries the permanent public URL of an uploaded
+// product image file, to be stored as the product/variant imageUrl.
+type UploadProductImageResponse struct {
+	URL string `json:"url"`
+}
+
 // UpdateProductRequest represents the request body for updating a product.
 type UpdateProductRequest struct {
 	Name     string             `json:"name"`

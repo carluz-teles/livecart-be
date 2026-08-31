@@ -946,7 +946,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	productRepo := product.NewRepository(queries, pool)
 	productSvc := product.NewService(productRepo, log)
-	productHandler := product.NewHandler(productSvc)
+	productHandler := product.NewHandler(productSvc, s3Client)
 	productHandler.RegisterRoutes(storeScoped)
 
 	productGroupRepo := productgroup.NewRepository(queries, pool)
