@@ -981,3 +981,17 @@ type WebhookEvent struct {
 	ErrorMessage   pgtype.Text        `json:"error_message"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
+
+type Catalog struct {
+	ID        pgtype.UUID        `json:"id"`
+	StoreID   pgtype.UUID        `json:"store_id"`
+	Name      string             `json:"name"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CatalogProduct struct {
+	CatalogID pgtype.UUID `json:"catalog_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Position  int32       `json:"position"`
+}

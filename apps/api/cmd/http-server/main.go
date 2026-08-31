@@ -39,6 +39,7 @@ import (
 
 	"livecart/apps/api/internal/billing"
 	"livecart/apps/api/internal/cart"
+	"livecart/apps/api/internal/catalog"
 	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/coupon"
 	couponlisteners "livecart/apps/api/internal/coupon/listeners"
@@ -961,6 +962,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	liveHandler := live.NewHandler(liveSvc, validate)
 	liveHandler.RegisterRoutes(storeScoped)
+
+	catalogSvc := catalog.NewService(catalog.NewRepository(queries, pool), log)
+	catalogHandler := catalog.NewHandler(catalogSvc)
+	catalogHandler.RegisterRoutes(storeScoped)
+	catalogHandler.RegisterPublicRoutes(app)
 
 	orderRepo := order.NewRepository(pool)
 	orderSvc := order.NewService(orderRepo, log)
