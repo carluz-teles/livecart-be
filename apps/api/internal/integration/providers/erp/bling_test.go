@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1168,5 +1169,45 @@ func TestFormaDeFinalidadeDePagamentoNaoServeParaVenda(t *testing.T) {
 	if got == 1 {
 		t.Error("escolheu forma de finalidade 1 (só pagamentos) para um pedido de venda — " +
 			"o lançamento iria para o lugar errado")
+	}
+}
+
+// Um pedido apagado no Bling responde 404. Isso é RESPOSTA, não falha: quem
+// pergunta precisa poder dizer "perguntei e não existe" em vez de "não
+// consegui perguntar". Sem a sentinela, o webhook do pedido tratava as duas
+// como erro e enchia o log de produção de `falha ao observar a situação`.
+func TestBlingPedidoApagadoRespondeNaoExisteENaoFalha(t *testing.T) {
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"type":"NOT_FOUND","message":"Pedido não encontrado"}}`))
+	})
+
+	_, err := b.GetOrderSituacao(context.Background(), "42")
+	if !errors.Is(err, providers.ErrOrderNotFound) {
+		t.Fatalf("erro = %v, queria embrulhar providers.ErrOrderNotFound", err)
+	}
+	// A causa original tem de sobreviver: quem depurar precisa do corpo.
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("a mensagem perdeu o status original: %v", err)
+	}
+}
+
+// 404 é a ÚNICA recusa que vira "não existe". Um 400 continua sendo recusa de
+// validação — confundir os dois faria um pedido rejeitado passar por apagado, e
+// o carrinho seguiria apontando para um pedido que nunca nasceu.
+func TestBlingSo404ViraNaoExiste(t *testing.T) {
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"VALIDATION_ERROR","message":"campo inválido"}}`))
+	})
+
+	_, err := b.GetOrderSituacao(context.Background(), "42")
+	if errors.Is(err, providers.ErrOrderNotFound) {
+		t.Fatalf("400 virou 'não existe': %v", err)
+	}
+	if !errors.Is(err, providers.ErrProvenUndelivered) {
+		t.Errorf("400 deveria seguir sendo recusa comprovada: %v", err)
 	}
 }

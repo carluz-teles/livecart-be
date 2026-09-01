@@ -234,6 +234,11 @@ func (b *Bling) pedido(ctx context.Context, orderID string) (*blingPedido, map[s
 		Data json.RawMessage `json:"data"`
 	}
 	if err := b.get(ctx, "/pedidos/vendas/"+url.PathEscape(orderID), nil, &env); err != nil {
+		// 404 é RESPOSTA, não falha: o pedido foi apagado no Bling, ou nunca
+		// foi desta conta. Quem chama precisa poder tratar isso sem gritar.
+		if status, ok := StatusDoErroBling(err); ok && status == http.StatusNotFound {
+			return nil, nil, fmt.Errorf("%w: %w", providers.ErrOrderNotFound, err)
+		}
 		return nil, nil, err
 	}
 	var tipado blingPedido

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -752,12 +753,36 @@ func blingErro(corpo []byte) string {
 	return s
 }
 
+// blingHTTPErro carrega o STATUS junto da mensagem.
+//
+// Sem ele, distinguir "404, não existe" de "400, recusado" exigiria procurar
+// número em texto de erro — que muda quando alguém reescreve a frase. O status
+// é o fato; a frase é a apresentação.
+type blingHTTPErro struct {
+	status int
+	err    error
+}
+
+func (e *blingHTTPErro) Error() string { return e.err.Error() }
+func (e *blingHTTPErro) Unwrap() error { return e.err }
+func (e *blingHTTPErro) Status() int   { return e.status }
+
+// StatusDoErroBling devolve o status HTTP que o Bling respondeu, se houver.
+func StatusDoErroBling(err error) (int, bool) {
+	var he *blingHTTPErro
+	if errors.As(err, &he) {
+		return he.status, true
+	}
+	return 0, false
+}
+
 func blingErroDeStatus(status int, corpo []byte, requestID string) error {
 	msg := blingErro(corpo)
-	base := fmt.Errorf("bling: HTTP %d — %s", status, msg)
+	var base error = fmt.Errorf("bling: HTTP %d — %s", status, msg)
 	if requestID != "" {
 		base = fmt.Errorf("%w (x-amzn-RequestId: %s)", base, requestID)
 	}
+	base = &blingHTTPErro{status: status, err: base}
 
 	switch {
 	case status == http.StatusUnauthorized:
