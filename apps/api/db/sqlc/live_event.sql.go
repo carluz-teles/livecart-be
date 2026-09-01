@@ -61,7 +61,7 @@ INSERT INTO live_events (
     description
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at, catalog_id
 `
 
 type CreateLiveEventFullParams struct {
@@ -135,6 +135,7 @@ func (q *Queries) CreateLiveEventFull(ctx context.Context, arg CreateLiveEventFu
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }
@@ -144,7 +145,7 @@ const endLiveEvent = `-- name: EndLiveEvent :one
 UPDATE live_events
 SET status = 'ended', updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at, catalog_id
 `
 
 type EndLiveEventParams struct {
@@ -179,6 +180,7 @@ func (q *Queries) EndLiveEvent(ctx context.Context, arg EndLiveEventParams) (Liv
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }
@@ -227,7 +229,7 @@ func (q *Queries) GetActiveTimedEventByMediaID(ctx context.Context, platformLive
 }
 
 const getEventByPlatformLiveID = `-- name: GetEventByPlatformLiveID :one
-SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at
+SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at, e.catalog_id
 FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 JOIN live_session_platforms lsp ON lsp.session_id = s.id
@@ -277,12 +279,13 @@ func (q *Queries) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }
 
 const getEventBySessionID = `-- name: GetEventBySessionID :one
-SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at FROM live_events e
+SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at, e.catalog_id FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 WHERE s.id = $1
 `
@@ -310,6 +313,7 @@ func (q *Queries) GetEventBySessionID(ctx context.Context, id pgtype.UUID) (Live
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }
@@ -382,7 +386,7 @@ func (q *Queries) GetEventCartSettings(ctx context.Context, id pgtype.UUID) (Get
 const getLiveEventByID = `-- name: GetLiveEventByID :one
 
 
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events WHERE id = $1
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at, catalog_id FROM live_events WHERE id = $1
 `
 
 // =============================================================================
@@ -416,12 +420,13 @@ func (q *Queries) GetLiveEventByID(ctx context.Context, id pgtype.UUID) (LiveEve
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }
 
 const getLiveEventByIDAndStore = `-- name: GetLiveEventByIDAndStore :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events WHERE id = $1 AND store_id = $2
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at, catalog_id FROM live_events WHERE id = $1 AND store_id = $2
 `
 
 type GetLiveEventByIDAndStoreParams struct {
@@ -452,13 +457,14 @@ func (q *Queries) GetLiveEventByIDAndStore(ctx context.Context, arg GetLiveEvent
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }
 
 const getLiveEventWithCounts = `-- name: GetLiveEventWithCounts :one
 SELECT
-    e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at,
+    e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at, e.catalog_id,
     (SELECT COUNT(*)::int FROM event_upsells WHERE event_id = e.id) AS upsell_count
 FROM live_events e
 WHERE e.id = $1 AND e.store_id = $2
@@ -489,6 +495,7 @@ type GetLiveEventWithCountsRow struct {
 	EndsAt                        pgtype.Timestamptz `json:"ends_at"`
 	CartExtendedExpirationMinutes pgtype.Int4        `json:"cart_extended_expiration_minutes"`
 	StartsAt                      pgtype.Timestamptz `json:"starts_at"`
+	CatalogID                     pgtype.UUID        `json:"catalog_id"`
 	UpsellCount                   int32              `json:"upsell_count"`
 }
 
@@ -520,6 +527,7 @@ func (q *Queries) GetLiveEventWithCounts(ctx context.Context, arg GetLiveEventWi
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 		&i.UpsellCount,
 	)
 	return i, err
@@ -665,7 +673,7 @@ func (q *Queries) ListEventsReadyToStart(ctx context.Context, limit int32) ([]Li
 }
 
 const listLiveEventsByStore = `-- name: ListLiveEventsByStore :many
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at, catalog_id FROM live_events
 WHERE store_id = $1
 ORDER BY created_at DESC
 `
@@ -699,6 +707,7 @@ func (q *Queries) ListLiveEventsByStore(ctx context.Context, storeID pgtype.UUID
 			&i.EndsAt,
 			&i.CartExtendedExpirationMinutes,
 			&i.StartsAt,
+			&i.CatalogID,
 		); err != nil {
 			return nil, err
 		}
@@ -742,7 +751,7 @@ SET
     scheduled_at = $5,
     updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at, catalog_id
 `
 
 type UpdateLiveEventDetailsParams struct {
@@ -782,6 +791,7 @@ func (q *Queries) UpdateLiveEventDetails(ctx context.Context, arg UpdateLiveEven
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }
@@ -790,7 +800,7 @@ const updateLiveEventTitle = `-- name: UpdateLiveEventTitle :one
 UPDATE live_events
 SET title = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at, catalog_id
 `
 
 type UpdateLiveEventTitleParams struct {
@@ -821,6 +831,7 @@ func (q *Queries) UpdateLiveEventTitle(ctx context.Context, arg UpdateLiveEventT
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
+		&i.CatalogID,
 	)
 	return i, err
 }

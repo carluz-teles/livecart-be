@@ -2333,6 +2333,13 @@ func (t *Tiny) GetOrderSituacao(ctx context.Context, orderID string) (int, error
 		return 0, fmt.Errorf("reading order situation: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
+		// 404 é RESPOSTA, não falha: o lojista apagou o pedido no Tiny. Quem
+		// pergunta precisa poder registrar "não existe" e parar de perguntar —
+		// sem isso a varredura repete o mesmo pedido a cada ciclo, para sempre.
+		if resp.StatusCode == http.StatusNotFound {
+			return providers.SituacaoDesconhecida, fmt.Errorf("%w: pedido %s: %s",
+				providers.ErrOrderNotFound, orderID, tinyErrorDetail(body))
+		}
 		return 0, fmt.Errorf("read order situation failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 	var out struct {

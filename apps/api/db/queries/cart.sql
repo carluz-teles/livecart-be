@@ -1445,35 +1445,6 @@ WHERE p.external_id = sqlc.arg(external_product_id)
       )
   AND c.status NOT IN ('expired', 'cancelled')
   AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
-  AND ci.quantity > ci.waitlisted_quantity; com
---    dois ERPs são dois espaços de numeração independentes com larguras que se
---    sobrepõem, e o defeito passa a ser real.
---
--- 3. A JANELA DE ATRASO. `external_order_id IS NULL` assume que, existindo o
---    pedido, o ERP já o desconta. MEDIDO contra o Bling em 29/08/2026: o evento
---    `virtual_stock.updated` chega de 9 a 22 SEGUNDOS depois do `order.created`.
---    Nessa janela o pedido existe (a soma antiga já não conta a unidade) e o
---    saldo lido ainda não a desconta — ninguém conta, e o portão sobe com
---    estoque que já tem dono.
---
---    Por isso um pedido RECÉM-CRIADO continua contando: `erp_op_started_at`
---    dentro da janela significa "o ERP pode ainda não ter acordado".
-SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
-FROM cart_items ci
-JOIN carts c ON c.id = ci.cart_id
-JOIN products p ON p.id = ci.product_id
-WHERE p.external_id = sqlc.arg(external_product_id)
-  AND p.external_source = sqlc.arg(external_source)
-  AND p.store_id = sqlc.arg(store_id)
-  AND (
-        -- sem pedido no ERP: ele não sabe da promessa
-        c.external_order_id IS NULL OR c.external_order_id = ''
-        -- ou com pedido RECÉM-criado, dentro da janela de atraso medida
-     OR (c.erp_op_started_at IS NOT NULL
-         AND c.erp_op_started_at > now() - make_interval(secs => sqlc.arg(janela_segundos)::float))
-      )
-  AND c.status NOT IN ('expired', 'cancelled')
-  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
   AND ci.quantity > ci.waitlisted_quantity;
 
 -- name: SetCartItemQuantityFromERP :exec

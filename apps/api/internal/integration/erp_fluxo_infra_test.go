@@ -292,6 +292,7 @@ type scriptedERP struct {
 	markerOrders   map[string]string // marcador -> orderID (FindOrderIDByMarker)
 	prefixo        string            // isola os ids de pedido deste roteiro
 	situacoes      map[string]int    // pedido -> situação que o GET devolve
+	sumidos        map[string]bool   // pedido -> o ERP responde 404 (apagado lá)
 	// bloqueiaProximosPuts faz os N próximos PUT /itens recusarem por estoque
 	// lançado — é como o ERP real anuncia que alguém lançou pelo painel.
 	bloqueiaProximosPuts int
@@ -313,6 +314,7 @@ func newScriptedERP() *scriptedERP {
 		provenFailures: map[string]int{},
 		markerOrders:   map[string]string{},
 		situacoes:      map[string]int{},
+		sumidos:        map[string]bool{},
 	}
 }
 
@@ -434,6 +436,9 @@ func (f *scriptedERP) GetOrderSituacao(ctx context.Context, orderID string) (int
 	f.record("GetSituacao:" + orderID)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.sumidos[orderID] {
+		return providers.SituacaoDesconhecida, fmt.Errorf("%w: pedido %s", providers.ErrOrderNotFound, orderID)
+	}
 	if s, ok := f.situacoes[orderID]; ok {
 		return s, nil
 	}

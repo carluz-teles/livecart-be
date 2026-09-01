@@ -187,6 +187,21 @@ type CartPayment struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
+// Named, reusable collection of products used to group a live catalog for buyers. Display grouping only — does not affect sellable-product resolution.
+type Catalog struct {
+	ID        pgtype.UUID        `json:"id"`
+	StoreID   pgtype.UUID        `json:"store_id"`
+	Name      string             `json:"name"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CatalogProduct struct {
+	CatalogID pgtype.UUID `json:"catalog_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Position  int32       `json:"position"`
+}
+
 type Coupon struct {
 	ID               pgtype.UUID        `json:"id"`
 	EventID          pgtype.UUID        `json:"event_id"`
@@ -442,6 +457,8 @@ type LiveEvent struct {
 	CartExtendedExpirationMinutes pgtype.Int4 `json:"cart_extended_expiration_minutes"`
 	// D21: inicio da JANELA COMERCIAL da campanha. Nao e a data de publicacao da midia (essa e live_sessions.publish_at). Escrita SEMPRE em par com scheduled_at, que continua sendo a coluna que EffectiveStatus le.
 	StartsAt pgtype.Timestamptz `json:"starts_at"`
+	// Optional catalog shown on the buyer catalog page for this event. NULL = no catalog associated.
+	CatalogID pgtype.UUID `json:"catalog_id"`
 }
 
 type LiveSession struct {
@@ -980,18 +997,4 @@ type WebhookEvent struct {
 	ProcessedAt    pgtype.Timestamptz `json:"processed_at"`
 	ErrorMessage   pgtype.Text        `json:"error_message"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-}
-
-type Catalog struct {
-	ID        pgtype.UUID        `json:"id"`
-	StoreID   pgtype.UUID        `json:"store_id"`
-	Name      string             `json:"name"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
-}
-
-type CatalogProduct struct {
-	CatalogID pgtype.UUID `json:"catalog_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-	Position  int32       `json:"position"`
 }

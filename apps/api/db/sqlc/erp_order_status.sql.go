@@ -112,7 +112,7 @@ SELECT c.id AS cart_id,
 FROM carts c
 JOIN live_events e ON e.id = c.event_id
 WHERE (c.erp_order_status IS NULL
-       OR c.erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue'))
+       OR c.erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue', 'nao_encontrado'))
   AND c.external_order_id IS NOT NULL
   AND c.external_order_id <> ''
   AND COALESCE(c.erp_order_status_at, c.created_at) < NOW() - $1::interval

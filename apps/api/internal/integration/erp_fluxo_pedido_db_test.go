@@ -631,3 +631,49 @@ func extIDDoProduto(t *testing.T, productID string) string {
 	}
 	return ext
 }
+
+// O PEDIDO APAGADO NO ERP TEM DE SAIR DA VARREDURA.
+//
+// Medido em produção 01/09/2026, loja cantodaart: 44 pedidos que o lojista
+// apagou no Tiny sendo perguntados DE HORA EM HORA, indefinidamente — 30 deles
+// no mesmo minuto, contra um teto de 30 req/min POR CONTA que é o mesmo da
+// live. 88 leituras em 66 minutos, todas respondendo `404 Pedido não
+// encontrado`, nenhuma concluindo nada.
+//
+// A causa era um `continue`: o 404 não registrava fato nenhum, então o pedido
+// continuava "parado há tempo demais" e voltava no ciclo seguinte. Para sempre.
+func TestVarreduraParaDePerguntarPorPedidoApagadoNoERP(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+	ctx := context.Background()
+
+	if err := svc.EnsureERPOrderForCart(ctx, fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("criando: %v", err)
+	}
+	_, orderID, _, _ := cartERPState(t, fx.cartID)
+
+	// O lojista apagou o pedido no ERP.
+	fake.sumidos[orderID] = true
+
+	svc.RunERPOrderStatusSweep(ctx, 0, 100)
+
+	_, _, atual, _ := cartERPState(t, fx.cartID)
+	if atual != string(providers.ERPOrderStatusNaoEncontrado) {
+		t.Fatalf("situação = %q, quero %q — sem registrar o fato a varredura nunca para",
+			atual, providers.ERPOrderStatusNaoEncontrado)
+	}
+
+	// ═══ A PARTE QUE IMPORTA ═══
+	// A segunda varredura não pode perguntar de novo. É isto que a produção
+	// fazia 44 vezes por hora.
+	antes := len(fake.callsWithPrefix("GetSituacao:" + orderID))
+	svc.RunERPOrderStatusSweep(ctx, 0, 100)
+	depois := len(fake.callsWithPrefix("GetSituacao:" + orderID))
+
+	if depois != antes {
+		t.Errorf("a segunda varredura perguntou de novo (%d → %d): o pedido não saiu da lista de atrasados",
+			antes, depois)
+	}
+}
