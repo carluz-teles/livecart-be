@@ -328,3 +328,50 @@ func TestOrigemConfirmadaSemAfirmacaoNaoESolta(t *testing.T) {
 		t.Error("o ERP recebeu o cancelamento de um pedido que podia ter pagamento")
 	}
 }
+
+// A JUNÇÃO NÃO PODE CANCELAR O PEDIDO DO ANFITRIÃO.
+//
+// Produção 01/09/2026, cantodaart, junção do #1349 no #1252:
+//
+//	20:29:29.260  ERP order cancelled   cart d5b1c091(#1349)  order 848127017
+//	20:29:29.262  orders joined         host f44fc692(#1252)  released 848241852
+//
+// A intenção registrada era soltar o 848241852 (origem). O cancelamento saiu no
+// 848127017 — o do ANFITRIÃO, que acabara de receber a grade somada dos dois.
+// O Tiny avisou 'cancelado' pelo webhook, o LiveCart cancelou o carrinho, e a
+// compradora terminou com quatro itens e nenhum pedido.
+//
+// A causa: o vínculo da junção já está gravado quando o cancelamento roda, e
+// GetCartERPOrderState resolve carrinho juntado para o anfitrião
+// (COALESCE(joined_to_cart_id, id)). Cancelar "o pedido DO CARRINHO" de origem
+// passou a significar cancelar o do anfitrião.
+func TestJuncaoCancelaAOrigemENuncaOAnfitriao(t *testing.T) {
+	svc, repo, erp := montarFusao(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	dest, origem := doisCarrinhosDeEventosDiferentes(t, svc, repo)
+
+	pedidoDoAnfitriao := repo.carrinho(dest).externalOrderID
+	pedidoDaOrigem := repo.carrinho(origem).externalOrderID
+	if pedidoDoAnfitriao == "" || pedidoDaOrigem == "" || pedidoDoAnfitriao == pedidoDaOrigem {
+		t.Fatalf("cenário inválido: anfitrião=%q origem=%q", pedidoDoAnfitriao, pedidoDaOrigem)
+	}
+
+	orfaos := fundir(repo, dest, origem)
+	// O VÍNCULO, que é o que faltava nos outros testes: daqui em diante o
+	// carrinho de origem responde pelo pedido do anfitrião.
+	repo.juntarAoAnfitriao(origem, dest)
+	erp.sequencia = nil
+
+	if _, err := svc.MergeERPOrdersIntoCart(ctx, dest, "loja-1", orfaos); err != nil {
+		t.Fatalf("fusão: %v", err)
+	}
+
+	if erp.cancelou(pedidoDoAnfitriao) {
+		t.Errorf("cancelou o pedido do ANFITRIÃO (%s) — é o que carrega a compra "+
+			"dos dois e tem de sobreviver; sequência: %v", pedidoDoAnfitriao, erp.sequencia)
+	}
+	if !erp.cancelou(pedidoDaOrigem) {
+		t.Errorf("não cancelou o pedido de ORIGEM (%s) — ele segue reservando a "+
+			"mesma peça que o anfitrião; sequência: %v", pedidoDaOrigem, erp.sequencia)
+	}
+}
