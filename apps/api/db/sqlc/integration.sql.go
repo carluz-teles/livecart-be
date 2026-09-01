@@ -354,6 +354,14 @@ LIMIT 1
 // literal: com Bling conectado, aqueles devolviam not-found e QUATRO deles
 // tratavam isso como "loja sem ERP", devolvendo nil em silêncio — a live rodava
 // inteira sem criar um pedido e sem uma linha de log.
+// O ORDER BY não é enfeite. `LIMIT 1` sozinho deixa o Postgres devolver
+// qualquer uma das linhas, e ele pode devolver uma DIFERENTE a cada chamada —
+// plano novo, página no cache, autovacuum. Numa loja com dois ERPs ativos isso
+// faz o mesmo carrinho criar o pedido num ERP e tentar confirmá-lo no outro.
+//
+// Enquanto o CHECK só aceitava 'tiny' o estado era impossível. A migration
+// 000145 abriu para 'bling' e, no instante em que abriu, tornou-o alcançável.
+// A mais ANTIGA vence: é a que já tem pedidos vivos lá dentro.
 func (q *Queries) GetActiveERPIntegration(ctx context.Context, storeID pgtype.UUID) (Integration, error) {
 	row := q.db.QueryRow(ctx, getActiveERPIntegration, storeID)
 	var i Integration

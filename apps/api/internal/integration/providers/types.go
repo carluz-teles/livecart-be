@@ -299,6 +299,14 @@ type ERPInvoiceProvider interface {
 // NFe" UI state instead of surfacing a generic error.
 var ErrInvoiceNotFound = errors.New("invoice not found")
 
+// ErrOrderNotFound é o ERP dizendo que o pedido NÃO EXISTE MAIS (HTTP 404).
+//
+// Não é falha: é resposta. O lojista apagou o pedido no ERP, ou ele nunca foi
+// desta conta. Quem lê situação usa isto para distinguir "não consegui
+// perguntar" de "perguntei e não existe" — a segunda não merece erro no log,
+// e a primeira sim.
+var ErrOrderNotFound = errors.New("pedido não existe no ERP")
+
 // ERPStockReader é a leitura de saldo de UM produto. Já era resolvida por type
 // assertion antes de existir com nome; nomeá-la torna o contrato explícito.
 type ERPStockReader interface {

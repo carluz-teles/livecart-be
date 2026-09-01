@@ -52,6 +52,19 @@ const (
 	ERPOrderStatusEntregue         ERPOrderStatus = "entregue"
 	ERPOrderStatusCancelado        ERPOrderStatus = "cancelado"
 	ERPOrderStatusNaoEntregue      ERPOrderStatus = "nao_entregue"
+
+	// ERPOrderStatusNaoEncontrado é o pedido que NÃO EXISTE MAIS no ERP.
+	//
+	// Não é uma situação que o ERP relate — é a AUSÊNCIA do pedido, e por isso
+	// ele de propósito não entra em `situacaoPorStatus`: não há número que o
+	// represente, e inventar um faria um webhook poder alegá-lo.
+	//
+	// Ele existe para a varredura poder PARAR. Sem um registro terminal, um
+	// pedido apagado pelo lojista no ERP volta à lista de atrasados a cada
+	// ciclo, para sempre: medido em produção, 44 pedidos da mesma loja sendo
+	// perguntados de hora em hora, 30 deles no mesmo minuto — contra um teto de
+	// 30 req/min por conta.
+	ERPOrderStatusNaoEncontrado ERPOrderStatus = "nao_encontrado"
 )
 
 // situacaoPorStatus é a única tabela; as duas funções abaixo a leem nos dois
@@ -99,7 +112,8 @@ func ParseERPOrderStatus(codigo string) (ERPOrderStatus, bool) {
 // Terminal diz se o pedido chegou a um estágio de onde não sai sozinho. Usado
 // para parar de reconciliar pedidos que já acabaram.
 func (s ERPOrderStatus) Terminal() bool {
-	return s == ERPOrderStatusEntregue || s == ERPOrderStatusCancelado || s == ERPOrderStatusNaoEntregue
+	return s == ERPOrderStatusEntregue || s == ERPOrderStatusCancelado ||
+		s == ERPOrderStatusNaoEntregue || s == ERPOrderStatusNaoEncontrado
 }
 
 // FechadoParaNovosItens diz se o pedido já virou documento fiscal e por isso não

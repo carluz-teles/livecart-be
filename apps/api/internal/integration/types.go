@@ -784,6 +784,16 @@ type VipActivation struct {
 type SetModoDeReservaRequest struct {
 	// Modo: "nativa" (o ERP reserva) ou "local" (o contador do LiveCart segura).
 	Modo string `json:"modo"`
+	// ConfirmoQueOERPReserva é o lojista dizendo "eu liguei a Reserva no meu
+	// ERP". Obrigatório para escolher 'nativa' enquanto o LiveCart ainda não
+	// observou a conta segurando peça.
+	//
+	// É declaração, e não prova — e é assim que tem de ser: ligar a Reserva é
+	// configuração do lojista, no ERP dele, e o LiveCart não liga, não desliga
+	// e não consegue perguntar. Exigir prova ANTES de deixar escolher criava um
+	// beco: sem modo nativo o pedido não nasce no comentário, sem pedido não há
+	// reserva para observar, e sem observação o botão ficava trancado.
+	ConfirmoQueOERPReserva bool `json:"confirmoQueOErpReserva"`
 }
 
 func (r SetModoDeReservaRequest) Validate() error {
@@ -797,6 +807,8 @@ func (r SetModoDeReservaRequest) Validate() error {
 type SetModoDeReservaInput struct {
 	IntegrationID string
 	Modo          erp.ModoDeReserva
+	// ConfirmoQueOERPReserva: ver o comentário no Request.
+	ConfirmoQueOERPReserva bool
 }
 
 func (r SetModoDeReservaRequest) ToInput(integrationID string) (SetModoDeReservaInput, error) {
@@ -804,7 +816,11 @@ func (r SetModoDeReservaRequest) ToInput(integrationID string) (SetModoDeReserva
 	if !m.Valido() {
 		return SetModoDeReservaInput{}, httpx.ErrUnprocessable("modo de reserva inválido: " + r.Modo)
 	}
-	return SetModoDeReservaInput{IntegrationID: integrationID, Modo: m}, nil
+	return SetModoDeReservaInput{
+		IntegrationID:          integrationID,
+		Modo:                   m,
+		ConfirmoQueOERPReserva: r.ConfirmoQueOERPReserva,
+	}, nil
 }
 
 // ModoDeReservaResponse é o retrato que a tela desenha.

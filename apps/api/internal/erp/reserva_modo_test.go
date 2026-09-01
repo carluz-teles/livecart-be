@@ -314,3 +314,36 @@ func TestTinyNaoPrecisaProvarCapacidade(t *testing.T) {
 		}
 	}
 }
+
+// A DECLARAÇÃO DO LOJISTA vale enquanto não houve observação.
+//
+// A primeira versão do portão EXIGIA prova observada, e criava um beco: sem
+// modo nativo o pedido não nasce no comentário; sem pedido não há reserva para
+// observar; sem observação o botão fica trancado. Medido em produção em
+// 01/09/2026 — a conta tinha zero pedidos abertos, disponível igual ao físico em
+// todos os produtos, e o lojista não conseguia escolher o modo que ele sabia
+// estar correto.
+//
+// Ligar a Reserva é configuração DELE, no ERP DELE. Bloquear a escolha era
+// decidir por ele uma coisa que não é nossa.
+func TestDeclaracaoNaoSeConfundeComObservacao(t *testing.T) {
+	// São chaves DIFERENTES de propósito: uma é o que vimos, a outra é o que
+	// nos disseram. Guardá-las no mesmo lugar apagaria a diferença — e a
+	// diferença é justamente o que se quer poder auditar depois de um oversell.
+	if ChaveCapacidadeDeReserva == ChaveDeclaracaoDeReserva {
+		t.Fatal("a declaração do lojista está sendo gravada como se fosse observação")
+	}
+
+	// Declarar NÃO marca a capacidade como confirmada.
+	comDeclaracao := map[string]any{ChaveDeclaracaoDeReserva: "2026-09-01T12:00:00Z"}
+	if CapacidadeConfirmada("bling", comDeclaracao) {
+		t.Error("uma declaração virou prova — o LiveCart passaria a afirmar que " +
+			"observou algo que ninguém observou")
+	}
+
+	// E a observação continua sendo a única coisa que confirma.
+	comObservacao := map[string]any{ChaveCapacidadeDeReserva: true}
+	if !CapacidadeConfirmada("bling", comObservacao) {
+		t.Error("a observação deixou de confirmar")
+	}
+}

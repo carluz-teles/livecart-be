@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -340,6 +341,31 @@ func (s *Service) despacharPedidoBling(
 func (s *Service) observarSituacaoDoPedidoBling(
 	ctx context.Context, integracao *IntegrationRow, pedidoID, evento string,
 ) error {
+	log := logger.From(ctx, s.logger).With(
+		zap.String("external_order_id", pedidoID),
+		zap.String("bling_event", evento),
+	)
+
+	// ═══ A PERGUNTA DE GRAÇA VEM ANTES DA CARA ═══
+	//
+	// O webhook do Bling é POR CONTA, não por pedido nosso: chega evento de
+	// TODO pedido do lojista — os que ele digita à mão, os do site dele, os de
+	// marketplace. Ler a situação de um pedido que não é nosso gasta uma
+	// requisição do teto de 3 req/s da conta e não conclui nada.
+	//
+	// Durante uma live esse teto é o mesmo que cria os pedidos da venda. Cada
+	// leitura desperdiçada aqui é uma escrita que falta lá.
+	//
+	// O vínculo está no nosso banco, indexado. Perguntar a ele é grátis.
+	cartID, err := s.CartIDByExternalOrder(ctx, integracao.StoreID, pedidoID)
+	if err != nil {
+		return fmt.Errorf("resolvendo o carrinho do pedido %s: %w", pedidoID, err)
+	}
+	if cartID == "" {
+		log.Debug("bling: pedido não é de nenhum carrinho desta loja; nada a observar")
+		return nil
+	}
+
 	prov, err := s.createProviderFromRow(ctx, integracao)
 	if err != nil {
 		return fmt.Errorf("criando o provider: %w", err)
@@ -352,6 +378,19 @@ func (s *Service) observarSituacaoDoPedidoBling(
 	}
 
 	canonico, err := leitor.GetOrderSituacao(ctx, pedidoID)
+	if errors.Is(err, providers.ErrOrderNotFound) {
+		// O pedido ERA nosso e sumiu do ERP: o lojista apagou lá. Não é falha
+		// nossa e não há situação para observar — mas é fato operacional, e o
+		// carrinho continua apontando para um pedido que não existe mais.
+		//
+		// NÃO desfazemos o vínculo aqui de propósito: limpá-lo faria o próximo
+		// evento do carrinho criar um pedido NOVO no ERP, e um apagão acidental
+		// no Bling viraria duplicata silenciosa. Quem decide refazer é o
+		// lojista, pela tela.
+		log.Warn("bling: o pedido deste carrinho não existe mais no ERP (apagado lá)",
+			zap.String("cart_id", cartID))
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("lendo a situação do pedido %s: %w", pedidoID, err)
 	}

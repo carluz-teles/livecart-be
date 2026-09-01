@@ -216,18 +216,20 @@ func TestActivateEternalCartsAnnulsExpiry(t *testing.T) {
 	}
 }
 
-// ─── Juntar compras num pedido pago (26/08/2026) ────────────────────────────
+// ─── O PAGAMENTO FECHA O CARRINHO ETERNO (01/09/2026) ───────────────────────
 //
-// "Carrinho com pagamento APROVADO também devemos juntar. Se foi faturado aí sim
-// não pode mais juntar pedidos."
+// Regra do lojista, por extenso:
 //
-// O pedido pago segue aberto até virar nota: a compradora pagou na live de
-// segunda, pede mais uma coisa na quinta, e sai uma caixa só. Depois do
-// faturamento a nota existe, e somar item nela seria emitir nota errada — então
-// a compra de quinta abre um pedido NOVO.
+//   "O cliente VIP junta todos os carrinhos entre eventos, mas apenas se não
+//    está PAGO. Se está pago deverá separar. O carrinho VIP nunca expira."
 //
-// O ERP não impõe esse limite (em 26/08/2026 aceitou, com 204, editar os itens
-// de um pedido "Faturada"). Quem recusa é esta query.
+// Isto REVERTE a regra de 26/08 ("pagou na segunda, pediu na quinta, sai numa
+// caixa só"), que valia até o faturamento. Ela custou caro em produção: em
+// 01/09/2026 a compradora tatianimossini teve 17 unidades novas caindo dentro
+// de um carrinho já quitado, que respondia "este pedido já está pago" e não
+// tinha por onde cobrar os R$ 1.369,30.
+//
+// Acumular é comportamento de carrinho ABERTO. O dinheiro fecha a compra.
 
 // marcarPago encena o pagamento no carrinho, como as queries de pagamento fazem.
 func marcarPago(t *testing.T, cartID string) {
@@ -248,7 +250,7 @@ func marcarSituacaoERP(t *testing.T, cartID, situacao string) {
 	}
 }
 
-func TestVipCartPagoAindaRecebeCompraDeOutroEvento(t *testing.T) {
+func TestVipCartPagoAbreCarrinhoNovo(t *testing.T) {
 	requireDB(t)
 	storeID := seedStore(t)
 	evSegunda := seedEventInStore(t, storeID)
@@ -257,74 +259,75 @@ func TestVipCartPagoAindaRecebeCompraDeOutroEvento(t *testing.T) {
 
 	segunda, _ := getOrCreateVip(t, storeID, evSegunda, comprador)
 	marcarPago(t, segunda.ID)
-	marcarSituacaoERP(t, segunda.ID, "aprovado")
-
-	quinta, criou := getOrCreateVip(t, storeID, evQuinta, comprador)
-	if criou {
-		t.Error("abriu carrinho novo para uma compra que devia entrar no pedido pago")
-	}
-	if quinta.ID != segunda.ID {
-		t.Errorf("a compra de quinta caiu em %s e o pedido pago é %s — o lojista "+
-			"queria uma caixa só", quinta.ID, segunda.ID)
-	}
-}
-
-func TestVipCartFaturadoNaoRecebeMaisCompra(t *testing.T) {
-	requireDB(t)
-	storeID := seedStore(t)
-	evSegunda := seedEventInStore(t, storeID)
-	evQuinta := seedEventInStore(t, storeID)
-	comprador := fmt.Sprintf("@ana%d", time.Now().UnixNano())
-
-	segunda, _ := getOrCreateVip(t, storeID, evSegunda, comprador)
-	marcarPago(t, segunda.ID)
-	marcarSituacaoERP(t, segunda.ID, "faturado")
 
 	quinta, criou := getOrCreateVip(t, storeID, evQuinta, comprador)
 	if !criou {
-		t.Error("não abriu carrinho novo depois da nota emitida")
+		t.Error("não abriu carrinho novo depois do pagamento")
 	}
 	if quinta.ID == segunda.ID {
-		t.Error("somou item num pedido já faturado — seria emitir nota errada")
+		t.Error("a compra nova caiu no carrinho JÁ PAGO — é o caso da tatianimossini: " +
+			"o link responde 'já está pago' e o saldo fica sem como ser cobrado")
 	}
 }
 
-// Toda situação pós-faturamento fecha a porta; as anteriores não.
-func TestPortaDeJuncaoPorSituacaoDoERP(t *testing.T) {
+// O carrinho novo do VIP continua ETERNO. Separar por pagamento não pode custar
+// a expiração — senão o VIP vira comprador comum na segunda compra.
+func TestVipCartNovoDepoisDoPagamentoContinuaEterno(t *testing.T) {
 	requireDB(t)
-	casos := []struct {
-		situacao string
-		junta    bool
-	}{
-		{"aberto", true},
-		{"aprovado", true},
-		{"preparando_envio", false}, // a nota já saiu quando o pedido entra em preparo
-		{"dados_incompletos", true},
-		{"faturado", false},
-		{"pronto_envio", false},
-		{"enviado", false},
-		{"entregue", false},
-		{"nao_entregue", false},
-		{"cancelado", false},
+	storeID := seedStore(t)
+	ev1 := seedEventInStore(t, storeID)
+	ev2 := seedEventInStore(t, storeID)
+	comprador := fmt.Sprintf("@joana%d", time.Now().UnixNano())
+
+	primeiro, _ := getOrCreateVip(t, storeID, ev1, comprador)
+	marcarPago(t, primeiro.ID)
+	segundo, _ := getOrCreateVip(t, storeID, ev2, comprador)
+
+	var neverExpires bool
+	var expiresAt *time.Time
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT never_expires, expires_at FROM carts WHERE id=$1::uuid`, segundo.ID).
+		Scan(&neverExpires, &expiresAt); err != nil {
+		t.Fatalf("ler cart: %v", err)
 	}
-	for _, c := range casos {
-		t.Run(c.situacao, func(t *testing.T) {
-			requireDB(t)
+	if !neverExpires {
+		t.Error("o carrinho novo do VIP nasceu mortal")
+	}
+	if expiresAt != nil {
+		t.Errorf("o carrinho novo do VIP nasceu com prazo: %v", expiresAt)
+	}
+}
+
+// A SITUAÇÃO DO ERP NÃO DECIDE MAIS NADA AQUI.
+//
+// A porta antiga era o faturamento, e por isso a consulta filtrava por
+// erp_order_status. Com o pagamento no comando, aquele filtro saiu — e tinha de
+// sair: `carts_one_eternal_per_store_buyer` não o conhece, então uma consulta
+// que filtrasse a mais devolveria ErrNoRows para uma linha que o índice ainda
+// considera viva, e o INSERT seguinte violaria a unique.
+//
+// Este teste guarda essa equivalência: com o carrinho ABERTO, nenhuma situação
+// do ERP separa. Se alguém reintroduzir o filtro, ele cai.
+func TestSituacaoDoERPNaoSeparaCarrinhoAberto(t *testing.T) {
+	requireDB(t)
+	for _, situacao := range []string{
+		"aberto", "aprovado", "dados_incompletos", "preparando_envio",
+		"faturado", "pronto_envio", "enviado", "entregue", "nao_entregue",
+	} {
+		t.Run(situacao, func(t *testing.T) {
 			storeID := seedStore(t)
 			ev1 := seedEventInStore(t, storeID)
 			ev2 := seedEventInStore(t, storeID)
-			comprador := fmt.Sprintf("@c%s%d", c.situacao, time.Now().UnixNano())
+			comprador := fmt.Sprintf("@c%s%d", situacao, time.Now().UnixNano())
 
 			primeiro, _ := getOrCreateVip(t, storeID, ev1, comprador)
-			marcarPago(t, primeiro.ID)
-			marcarSituacaoERP(t, primeiro.ID, c.situacao)
+			marcarSituacaoERP(t, primeiro.ID, situacao) // sem pagar
 
 			segundo, _ := getOrCreateVip(t, storeID, ev2, comprador)
-			juntou := segundo.ID == primeiro.ID
-			if juntou != c.junta {
-				verbo := map[bool]string{true: "juntou", false: "não juntou"}
-				t.Errorf("situação %q: %s, e a regra diz que devia %s",
-					c.situacao, verbo[juntou], verbo[c.junta])
+			if segundo.ID != primeiro.ID {
+				t.Errorf("situação %q separou um carrinho ABERTO — quem separa é o "+
+					"pagamento, e o filtro por situação descasa esta consulta do índice",
+					situacao)
 			}
 		})
 	}

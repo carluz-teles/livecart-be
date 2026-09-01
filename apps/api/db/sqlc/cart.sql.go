@@ -1865,11 +1865,8 @@ const getEternalCartByStoreAndHandleForUpdate = `-- name: GetEternalCartByStoreA
 SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number FROM carts
 WHERE store_id = $1 AND platform_handle = $2
   AND never_expires
-  AND status IN ('pending', 'active', 'checkout', 'paid')
-  AND (payment_status IS NULL OR payment_status <> 'refunded')
-  AND (erp_order_status IS NULL OR erp_order_status NOT IN (
-        'preparando_envio', 'faturado', 'pronto_envio', 'enviado', 'entregue',
-        'nao_entregue', 'cancelado'))
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
 ORDER BY created_at DESC
 LIMIT 1
 FOR UPDATE
@@ -1884,22 +1881,34 @@ type GetEternalCartByStoreAndHandleForUpdateParams struct {
 // É isto que faz a compra do VIP num evento novo cair no MESMO carrinho de um
 // evento anterior. FOR UPDATE serializa dois comentários concorrentes do VIP.
 //
-// O carrinho PAGO continua sendo o mesmo carrinho, e essa é a regra que o
-// lojista pediu por extenso: pagou na live de segunda, pediu mais uma coisa na
-// quinta, sai numa caixa só — um frete, uma nota. Enquanto o pedido não virou
-// documento fiscal ele ainda recebe item, e o que entrou depois do pagamento
-// fica separado por cart_items.paid_at (ver migration 000140).
+// O PAGAMENTO É O PORTÃO. Regra do lojista, 01/09/2026:
 //
-// O FATURAMENTO é o portão. Depois dele a nota existe, e somar item seria emitir
-// nota errada — então a compra de quinta abre um pedido NOVO. Note que o ERP não
-// impõe esse limite: em 26/08/2026 ele aceitou (204) editar os itens de um
-// pedido "Faturada". A recusa é nossa.
+//	"O cliente VIP junta todos os carrinhos entre eventos, mas apenas se não
+//	 está PAGO. Se está pago deverá separar. O carrinho VIP nunca expira."
 //
-// 'preparando_envio' está na lista de fechados apesar do nome e apesar de a
-// lista do enum o colocar ANTES de 'faturado': na operação o pedido só entra em
-// preparo depois de a nota sair. Ver ERPOrderStatus.FechadoParaNovosItens.
+// Ou seja: acumular é o comportamento de carrinho ABERTO. Assim que o dinheiro
+// entra, aquela compra está fechada e a próxima começa do zero.
 //
-// Estornado fica de fora pelo motivo oposto: não há venda a que somar.
+// ═══ POR QUE O FILTRO É IDÊNTICO AO DO ÍNDICE ═══
+//
+// `carts_one_eternal_per_store_buyer` é UNIQUE parcial sobre (store_id,
+// platform_handle) com exatamente este WHERE. Ele é quem garante "um eterno por
+// comprador", e a criação do carrinho novo depende dele para não estourar.
+//
+// Se esta consulta filtrar MAIS que o índice, ela devolve ErrNoRows para uma
+// linha que o índice ainda considera viva — e o INSERT seguinte viola a unique.
+// Se filtrar MENOS, ela devolve um carrinho que o índice já liberou. Os dois
+// lados precisam dizer a mesma frase, e por isso este WHERE é uma cópia.
+//
+// Foi uma divergência dessas que quebrou a tatianimossini em 01/09/2026: o
+// índice já excluía pago, esta consulta ainda incluía `'paid'`, e 17 unidades
+// novas caíram dentro de um carrinho quitado — que respondia "já está pago" e
+// não tinha como cobrar os R$ 1.369,30.
+//
+// O filtro por situação do ERP saiu junto, e não por descuido: com pago fora,
+// um carrinho aberto não chega a estar faturado pelo caminho normal. Mantê-lo
+// só criaria de novo o descompasso com o índice — o caso "faturado sem
+// pagamento" devolveria ErrNoRows e o INSERT bateria na unique.
 func (q *Queries) GetEternalCartByStoreAndHandleForUpdate(ctx context.Context, arg GetEternalCartByStoreAndHandleForUpdateParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getEternalCartByStoreAndHandleForUpdate, arg.StoreID, arg.PlatformHandle)
 	var i Cart
@@ -2811,6 +2820,96 @@ func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]
 	return items, nil
 }
 
+const listCartsParaSimuladorDePagamento = `-- name: ListCartsParaSimuladorDePagamento :many
+SELECT
+    c.id,
+    c.short_id,
+    c.platform_handle,
+    c.status,
+    c.payment_status,
+    c.created_at,
+    e.id      AS event_id,
+    e.title   AS event_title,
+    COALESCE(e.pix_discount_percent, 0)::int AS pix_discount_percent,
+    COALESCE(c.coupon_code, '')              AS coupon_code,
+    COALESCE(c.coupon_discount_cents, 0)::bigint AS coupon_discount_cents,
+    COALESCE(c.shipping_cost_cents, 0)::bigint   AS shipping_cost_cents,
+    COALESCE((
+        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+        FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
+    ), 0)::bigint AS subtotal_cents,
+    COALESCE((
+        SELECT SUM(ci.quantity - ci.waitlisted_quantity)
+        FROM cart_items ci WHERE ci.cart_id = c.id
+    ), 0)::int AS itens
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+  AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity)
+ORDER BY c.created_at DESC
+LIMIT 50
+`
+
+type ListCartsParaSimuladorDePagamentoRow struct {
+	ID                  pgtype.UUID        `json:"id"`
+	ShortID             int32              `json:"short_id"`
+	PlatformHandle      string             `json:"platform_handle"`
+	Status              string             `json:"status"`
+	PaymentStatus       pgtype.Text        `json:"payment_status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	EventID             pgtype.UUID        `json:"event_id"`
+	EventTitle          pgtype.Text        `json:"event_title"`
+	PixDiscountPercent  int32              `json:"pix_discount_percent"`
+	CouponCode          string             `json:"coupon_code"`
+	CouponDiscountCents int64              `json:"coupon_discount_cents"`
+	ShippingCostCents   int64              `json:"shipping_cost_cents"`
+	SubtotalCents       int64              `json:"subtotal_cents"`
+	Itens               int32              `json:"itens"`
+}
+
+// Carrinhos que o simulador de pagamentos de staging pode pagar.
+//
+// Traz a conta do dinheiro montada, e não só o id, porque o simulador precisa
+// cobrar EXATAMENTE o que o checkout cobraria. Recalcular isso no Go a partir
+// de várias leituras daria duas fórmulas para o mesmo número — que é o defeito
+// que este projeto já pagou caro para aprender.
+func (q *Queries) ListCartsParaSimuladorDePagamento(ctx context.Context, storeID pgtype.UUID) ([]ListCartsParaSimuladorDePagamentoRow, error) {
+	rows, err := q.db.Query(ctx, listCartsParaSimuladorDePagamento, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartsParaSimuladorDePagamentoRow{}
+	for rows.Next() {
+		var i ListCartsParaSimuladorDePagamentoRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ShortID,
+			&i.PlatformHandle,
+			&i.Status,
+			&i.PaymentStatus,
+			&i.CreatedAt,
+			&i.EventID,
+			&i.EventTitle,
+			&i.PixDiscountPercent,
+			&i.CouponCode,
+			&i.CouponDiscountCents,
+			&i.ShippingCostCents,
+			&i.SubtotalCents,
+			&i.Itens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCartsWithTotalByEvent = `-- name: ListCartsWithTotalByEvent :many
 SELECT
     c.id,
@@ -3623,6 +3722,36 @@ func (q *Queries) MakeCartEternal(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const markCartRefunded = `-- name: MarkCartRefunded :one
+UPDATE carts
+SET payment_status = 'refunded', updated_at = now()
+WHERE id = $1 AND payment_status = 'paid'
+RETURNING id, event_id, COALESCE(checkout_id, '') AS checkout_id
+`
+
+type MarkCartRefundedRow struct {
+	ID         pgtype.UUID `json:"id"`
+	EventID    pgtype.UUID `json:"event_id"`
+	CheckoutID string      `json:"checkout_id"`
+}
+
+// Estorno MANUAL: o lojista está dizendo que devolveu o dinheiro.
+//
+// Só um carrinho PAGO pode ser estornado — o guard vive aqui, e não no Go, para
+// duas abas clicando junto não emitirem dois fatos. Zero linhas significa
+// "não estava pago", e o chamador recusa em vez de fingir sucesso.
+//
+// paid_at e checkout_id ficam INTACTOS de propósito: o pagamento aconteceu, e
+// apagar a hora e o identificador dele apagaria a única trilha de quando o
+// dinheiro entrou e por onde. Estorno não desfaz a história; acrescenta um
+// capítulo.
+func (q *Queries) MarkCartRefunded(ctx context.Context, id pgtype.UUID) (MarkCartRefundedRow, error) {
+	row := q.db.QueryRow(ctx, markCartRefunded, id)
+	var i MarkCartRefundedRow
+	err := row.Scan(&i.ID, &i.EventID, &i.CheckoutID)
+	return i, err
+}
+
 const moveCartItemEventsToCart = `-- name: MoveCartItemEventsToCart :exec
 UPDATE cart_item_events SET cart_id = $1
 WHERE cart_id = $2
@@ -4232,9 +4361,26 @@ WHERE p.external_id = $1
   AND p.store_id = $3
   AND (
         c.external_order_id IS NULL OR c.external_order_id = ''
+     -- Pedido CANCELADO não segura nada. Olhar só a EXISTÊNCIA do id foi o
+     -- defeito: em 31/08/2026 o lojista cancelou dois pedidos no Bling, o ERP
+     -- devolveu as peças (saldo_virtual voltou de 3 para 5), os carrinhos
+     -- continuaram vivos — e esta soma devolveu ZERO porque o id ainda estava
+     -- lá. O saldo cru entrou no portão e o contador ficou 2 unidades acima do
+     -- que existe fisicamente.
+     --
+     -- Status desconhecido ou vazio conta como NÃO refletido de propósito: é o
+     -- lado que oferece de menos, e oferecer de menos é recuperável.
+     --
+     -- 'nao_encontrado' é da MESMA família, e por um motivo que não é óbvio:
+     -- ele é terminal para a VARREDURA (não adianta perguntar de novo por um
+     -- pedido apagado), mas o saldo do ERP continua NÃO descontando aquela
+     -- venda — o pedido sumiu, e com ele a baixa. Deixá-lo fora desta lista
+     -- faria a promessa parar de contar e o portão SUBIR com peça que já tem
+     -- dono, que é exatamente o −13 de 26/08.
      OR c.erp_order_status IS NULL
      OR c.erp_order_status = ''
      OR c.erp_order_status = 'cancelado'
+     OR c.erp_order_status = 'nao_encontrado'
      OR $4::bool
       )
   AND c.status NOT IN ('expired', 'cancelled')
@@ -4249,6 +4395,30 @@ type SumPromisedNotYetReflectedParams struct {
 	ContaComPedido    bool        `json:"conta_com_pedido"`
 }
 
+// As unidades prometidas que o SALDO LIDO do ERP ainda NÃO desconta.
+//
+// Quem decide isso é o MODO DE RESERVA, e não o relógio.
+//
+// Havia aqui uma janela de 45 segundos: um carrinho com pedido criado há menos
+// disso continuava sendo contado, na ideia de cobrir o atraso entre o pedido
+// existir e o ERP refleti-lo. Ela estava errada, e o erro era garantido em vez
+// de eventual — numa live TODO carrinho está dentro dos 45 s, então TODA
+// reserva era descontada duas vezes: uma pelo ERP (que já a tirou do
+// `disponivel`) e outra por esta soma.
+//
+// Medido em staging em 31/08/2026, com o Bling em reserva nativa:
+//
+//	erp_available 3 · promised_without_order 2 · admissible 1   ← devia ser 3
+//	erp_available 2 · promised_without_order 3 · admissible 0   ← devia ser 2
+//
+// A regra certa é a que a mensagem de log já anunciava, "units promised BEFORE
+// the order existed":
+//
+//	reserva NATIVA  → o `disponivel` já desconta o pedido; conta só carrinho
+//	                  SEM pedido no ERP
+//	reserva LOCAL   → o ERP não sabe de nada nosso; conta tudo que está vivo
+//
+// `conta_com_pedido` é esse interruptor. O chamador o deriva do modo efetivo.
 func (q *Queries) SumPromisedNotYetReflected(ctx context.Context, arg SumPromisedNotYetReflectedParams) (int32, error) {
 	row := q.db.QueryRow(ctx, sumPromisedNotYetReflected,
 		arg.ExternalProductID,
@@ -4350,6 +4520,11 @@ WITH atual AS (
 ), tomado AS (
     SELECT id, LEAST(GREATEST(stock, 0), $2::int) AS qtd FROM atual
 ), aplicado AS (
+    -- ` + "`" + `erp_seq` + "`" + ` sobe porque este É um movimento nosso, e o espelho decide se a
+    -- leitura dele venceu comparando esse contador. Sem isto a retomada era
+    -- INVISÍVEL ao CAS: um saldo lido antes dela era aplicado depois, apagando
+    -- o débito e inflando o portão — a mesma família do 7 unidades medido em
+    -- 31/08/2026 num produto com 5 peças.
     UPDATE products p SET stock = p.stock - t.qtd, erp_seq = p.erp_seq + 1
     FROM tomado t WHERE p.id = t.id
     RETURNING 1
@@ -5637,95 +5812,5 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 		&i.SessionID,
 		&i.PaidQuantity,
 	)
-	return i, err
-}
-
-const listCartsParaSimuladorDePagamento = `-- name: ListCartsParaSimuladorDePagamento :many
-SELECT
-    c.id,
-    c.short_id,
-    c.platform_handle,
-    c.status,
-    c.payment_status,
-    c.created_at,
-    e.id      AS event_id,
-    e.title   AS event_title,
-    COALESCE(e.pix_discount_percent, 0)::int AS pix_discount_percent,
-    COALESCE(c.coupon_code, '')              AS coupon_code,
-    COALESCE(c.coupon_discount_cents, 0)::bigint AS coupon_discount_cents,
-    COALESCE(c.shipping_cost_cents, 0)::bigint   AS shipping_cost_cents,
-    COALESCE((
-        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
-        FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
-    ), 0)::bigint AS subtotal_cents,
-    COALESCE((
-        SELECT SUM(ci.quantity - ci.waitlisted_quantity)
-        FROM cart_items ci WHERE ci.cart_id = c.id
-    ), 0)::int AS itens
-FROM carts c
-JOIN live_events e ON e.id = c.event_id
-WHERE e.store_id = $1
-  AND c.status NOT IN ('expired', 'cancelled')
-  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
-  AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity)
-ORDER BY c.created_at DESC
-LIMIT 50
-`
-
-type ListCartsParaSimuladorDePagamentoRow struct {
-	ID                  pgtype.UUID        `json:"id"`
-	ShortID             int32              `json:"short_id"`
-	PlatformHandle      string             `json:"platform_handle"`
-	Status              string             `json:"status"`
-	PaymentStatus       pgtype.Text        `json:"payment_status"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	EventID             pgtype.UUID        `json:"event_id"`
-	EventTitle          pgtype.Text        `json:"event_title"`
-	PixDiscountPercent  int32              `json:"pix_discount_percent"`
-	CouponCode          string             `json:"coupon_code"`
-	CouponDiscountCents int64              `json:"coupon_discount_cents"`
-	ShippingCostCents   int64              `json:"shipping_cost_cents"`
-	SubtotalCents       int64              `json:"subtotal_cents"`
-	Itens               int32              `json:"itens"`
-}
-
-func (q *Queries) ListCartsParaSimuladorDePagamento(ctx context.Context, storeID pgtype.UUID) ([]ListCartsParaSimuladorDePagamentoRow, error) {
-	rows, err := q.db.Query(ctx, listCartsParaSimuladorDePagamento, storeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListCartsParaSimuladorDePagamentoRow
-	for rows.Next() {
-		var i ListCartsParaSimuladorDePagamentoRow
-		if err := rows.Scan(
-			&i.ID, &i.ShortID, &i.PlatformHandle, &i.Status, &i.PaymentStatus, &i.CreatedAt,
-			&i.EventID, &i.EventTitle, &i.PixDiscountPercent, &i.CouponCode,
-			&i.CouponDiscountCents, &i.ShippingCostCents, &i.SubtotalCents, &i.Itens,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	return items, rows.Err()
-}
-
-const markCartRefunded = `-- name: MarkCartRefunded :one
-UPDATE carts
-SET payment_status = 'refunded', updated_at = now()
-WHERE id = $1 AND payment_status = 'paid'
-RETURNING id, event_id, COALESCE(checkout_id, '') AS checkout_id
-`
-
-type MarkCartRefundedRow struct {
-	ID         pgtype.UUID `json:"id"`
-	EventID    pgtype.UUID `json:"event_id"`
-	CheckoutID string      `json:"checkout_id"`
-}
-
-func (q *Queries) MarkCartRefunded(ctx context.Context, id pgtype.UUID) (MarkCartRefundedRow, error) {
-	row := q.db.QueryRow(ctx, markCartRefunded, id)
-	var i MarkCartRefundedRow
-	err := row.Scan(&i.ID, &i.EventID, &i.CheckoutID)
 	return i, err
 }

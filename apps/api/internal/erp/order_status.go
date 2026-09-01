@@ -16,6 +16,7 @@ package erp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -348,6 +349,29 @@ func (s *Service) RunERPOrderStatusSweep(ctx context.Context, staleAfter time.Du
 			situacao, err = erpProvider.GetOrderSituacao(ctx, p.ExternalOrderID)
 			return err
 		})
+		// O ERP RESPONDEU: o pedido não existe mais. Registrar isso é o que
+		// faz a varredura PARAR — `nao_encontrado` é terminal, então o pedido
+		// sai da lista de atrasados.
+		//
+		// Sem este registro nada muda de estado, o pedido segue "parado há
+		// tempo demais" e volta no ciclo seguinte. Medido em produção: 44
+		// pedidos de uma loja, perguntados de hora em hora indefinidamente, 30
+		// deles no mesmo minuto — contra um teto de 30 req/min POR CONTA que é
+		// o mesmo da live.
+		//
+		// O vínculo com o pedido NÃO é desfeito: limpá-lo faria o carrinho
+		// criar um pedido novo no ERP, e um apagão acidental viraria duplicata.
+		if errors.Is(readErr, providers.ErrOrderNotFound) {
+			logger.From(itemCtx, s.logger).Warn("o pedido deste carrinho não existe mais no ERP (apagado lá)",
+				zap.String("cart_id", p.CartID),
+				zap.String("external_order_id", p.ExternalOrderID))
+			if err := s.ObserveOrderStatus(itemCtx, p.StoreID, p.ExternalOrderID, "",
+				providers.ERPOrderStatusNaoEncontrado, StatusSourceSweep, nil); err != nil {
+				logger.From(itemCtx, s.logger).Warn("sweep failed to record the missing ERP order",
+					zap.String("cart_id", p.CartID), zap.Error(err))
+			}
+			continue
+		}
 		if readErr != nil {
 			logger.From(itemCtx, s.logger).Warn("sweep could not read ERP order situation",
 				zap.String("cart_id", p.CartID),
