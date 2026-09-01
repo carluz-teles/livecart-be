@@ -375,6 +375,20 @@ func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaApli
 	ja := jaAplicada
 	for tentativa := 1; tentativa <= 3; tentativa++ {
 		aplicada, err := s.umaPassadaDeMutacao(ctx, cartID, storeID, ja)
+		if errors.Is(err, providers.ErrOrderNotFound) {
+			// O PEDIDO FOI APAGADO NO ERP, POR MÃO HUMANA.
+			//
+			// Só aqui isso é seguro de tratar sozinho: o ERP RESPONDEU que o
+			// pedido não existe, e um pedido que não existe não reserva peça
+			// nem carrega venda. Soltar o vínculo e criar outro não duplica
+			// nada — é o único caminho que não deixa o carrinho morto.
+			//
+			// Sem isto o comprador fica travado para SEMPRE: em produção
+			// 01/09/2026 um vendedor apagou o pedido do carrinho #1324 e toda
+			// tentativa de somar item batia em 404, sem erro visível para
+			// ninguém. Só destravou porque um humano foi ao banco.
+			return s.recriarPedidoSumido(ctx, cartID, storeID)
+		}
 		if err != nil || aplicada == nil {
 			return err // erro, ou perdeu o CAS e outro está cuidando
 		}
@@ -387,6 +401,43 @@ func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaApli
 	logger.From(ctx, s.logger).Info("grid still moving after re-checking; the next comment continues",
 		zap.String("cart_id", cartID),
 	)
+	return nil
+}
+
+// recriarPedidoSumido solta o vínculo com um pedido que o ERP diz não existir e
+// deixa a criação normal fazer o resto.
+//
+// A ordem importa: o vínculo sai ANTES da criação. Se saísse depois, uma falha
+// no meio deixaria o carrinho apontando para o pedido morto de novo — que é
+// exatamente o estado do qual estamos tentando sair.
+//
+// O estado vai para 'none' porque é dali que a criação parte. Não é regressão:
+// regredir é perigoso quando a chamada em voo pode ter sucedido no servidor, e
+// aqui o servidor acabou de afirmar o contrário.
+func (s *Service) recriarPedidoSumido(ctx context.Context, cartID, storeID string) error {
+	log := logger.From(ctx, s.logger).With(zap.String("cart_id", cartID))
+
+	if err := s.repo.UpdateCartExternalOrderID(ctx, cartID, ""); err != nil {
+		return fmt.Errorf("soltando o vínculo do pedido sumido do carrinho %s: %w", cartID, err)
+	}
+	// O estado de partida é LIDO, não presumido: o `defer` de umaPassadaDeMutacao
+	// já devolveu o carrinho ao estado de repouso ('open') antes de o erro chegar
+	// até aqui. Um CAS a partir de 'mutating' perderia sempre, em silêncio, e a
+	// criação abaixo recusaria por não encontrar 'none'.
+	st, stErr := s.repo.GetCartERPOrderState(ctx, cartID)
+	if stErr != nil {
+		return fmt.Errorf("lendo o estado do carrinho %s depois do pedido sumir: %w", cartID, stErr)
+	}
+	if st.State != OrderStateNone {
+		if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, OrderStateNone); err != nil {
+			return fmt.Errorf("devolvendo o carrinho %s para 'none' depois do pedido sumir: %w", cartID, err)
+		}
+	}
+	log.Warn("o pedido deste carrinho não existe mais no ERP; criando outro no lugar")
+
+	if err := s.EnsureERPOrderDuranteALive(ctx, cartID, storeID); err != nil {
+		return fmt.Errorf("recriando o pedido do carrinho %s depois de ele sumir do ERP: %w", cartID, err)
+	}
 	return nil
 }
 

@@ -2061,6 +2061,10 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 		if bloqueioPorNotaFiscal(body) {
 			return providers.ErrPedidoComNotaFiscal
 		}
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: pedido %s: %s",
+				providers.ErrOrderNotFound, orderID, tinyErrorDetail(body))
+		}
 		return fmt.Errorf("update order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 	logger.From(ctx, t.Logger).Info("tiny order items updated",
@@ -2285,6 +2289,13 @@ func (t *Tiny) GetOrderItems(ctx context.Context, orderID string) ([]providers.E
 		return nil, fmt.Errorf("reading order items: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
+		// 404 aqui é o pedido APAGADO no ERP. Sem a sentinela ele sobe como
+		// falha genérica e trava o carrinho do comprador para sempre — foi o
+		// que prendeu o #1324 em produção 01/09/2026.
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: pedido %s: %s",
+				providers.ErrOrderNotFound, orderID, tinyErrorDetail(body))
+		}
 		return nil, fmt.Errorf("read order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 	var out struct {

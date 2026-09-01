@@ -417,6 +417,9 @@ func (f *scriptedERP) GetOrderItems(ctx context.Context, orderID string) ([]prov
 	f.record("GetItens:" + orderID)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.sumidos[orderID] {
+		return nil, fmt.Errorf("%w: pedido %s", providers.ErrOrderNotFound, orderID)
+	}
 	out := make([]providers.ERPOrderItem, len(f.ultimaGrade))
 	copy(out, f.ultimaGrade)
 	return out, nil

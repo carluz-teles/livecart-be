@@ -677,3 +677,83 @@ func TestVarreduraParaDePerguntarPorPedidoApagadoNoERP(t *testing.T) {
 			antes, depois)
 	}
 }
+
+// O PEDIDO APAGADO NO ERP NÃO PODE TRAVAR O COMPRADOR.
+//
+// Produção 01/09/2026: um vendedor apagou sem querer o pedido do carrinho
+// #1324 no Tiny. A partir dali toda tentativa de somar item batia em
+// `404 Pedido não encontrado` na releitura que antecede a escrita — e a
+// compradora simplesmente não conseguia mais comprar. Sem erro visível para o
+// lojista, sem nada no painel. Só destravou porque um humano foi ao banco
+// soltar o vínculo na mão.
+//
+// 404 é o ERP AFIRMANDO que o pedido não existe. Um pedido que não existe não
+// reserva peça nem carrega venda, então soltar o vínculo e criar outro não
+// duplica coisa alguma — é o único caminho que não deixa o carrinho morto.
+func TestPedidoApagadoNoERPNaoTravaOCarrinho(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 2, 0)
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+	ctx := context.Background()
+
+	if err := svc.EnsureERPOrderForCart(ctx, fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("criando: %v", err)
+	}
+	_, pedidoAntigo, _, _ := cartERPState(t, fx.cartID)
+
+	// O lojista apaga o pedido no ERP.
+	fake.sumidos[pedidoAntigo] = true
+
+	// A próxima mutação — um item somado — encontra o 404.
+	if err := svc.ERP().MutateERPOrderItems(ctx, fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("a mutação devia se recuperar do pedido apagado, e falhou: %v", err)
+	}
+
+	estado, pedidoNovo, _, _ := cartERPState(t, fx.cartID)
+	if pedidoNovo == "" {
+		t.Fatal("o carrinho ficou SEM pedido — é o estado travado que o comprador via")
+	}
+	if pedidoNovo == pedidoAntigo {
+		t.Errorf("continuou apontando para o pedido apagado %q", pedidoAntigo)
+	}
+	if estado != "open" {
+		t.Errorf("estado = %q, quero 'open' — o carrinho precisa aceitar a próxima compra", estado)
+	}
+}
+
+// O LOJISTA EDITANDO PELA TELA DE PEDIDOS TAMBÉM CRIA O PEDIDO NO ERP.
+//
+// AdjustStockReservationDelta — o caminho de toda edição do lojista — devolvia
+// `nil` quando o carrinho ainda não tinha pedido. Nil é SUCESSO: a tela
+// respondia "ok" a cada item e no ERP não aparecia nada.
+//
+// Medido em produção 01/09/2026, carrinho #1324: quatro edições seguidas do
+// lojista, todas gravadas no LiveCart, nenhuma no Tiny, nenhum erro em lugar
+// nenhum. Só o comentário da live e a promoção de fila criavam pedido.
+func TestEdicaoDoLojistaCriaOPedidoQuandoAindaNaoExiste(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+	ctx := context.Background()
+
+	estado, pedido, _, _ := cartERPState(t, fx.cartID)
+	if pedido != "" || estado != "none" {
+		t.Fatalf("o carrinho devia começar sem pedido: estado=%q pedido=%q", estado, pedido)
+	}
+
+	// O lojista soma uma unidade pela tela de Pedidos.
+	if _, err := svc.AdjustStockReservationDelta(ctx, fx.storeID, fx.cartID, fx.eventID,
+		fx.productID, 1, 1000, "@lojista", StockOpUnspecified); err != nil {
+		t.Fatalf("edição do lojista falhou: %v", err)
+	}
+
+	estado, pedido, _, _ = cartERPState(t, fx.cartID)
+	if pedido == "" {
+		t.Fatal("o lojista somou item e nenhum pedido nasceu no ERP — é o silêncio do #1324")
+	}
+	if estado != "open" {
+		t.Errorf("estado = %q, quero 'open'", estado)
+	}
+}

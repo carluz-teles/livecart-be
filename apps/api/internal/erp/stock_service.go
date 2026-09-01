@@ -216,9 +216,27 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	// carrinho inteiro e o ERP converge. Duas edições concorrentes do mesmo
 	// carrinho terminam no mesmo lugar por construção.
 	st, stErr := s.repo.GetCartERPOrderState(ctx, cartID)
-	if stErr != nil || st.State == OrderStateNone || st.State == OrderStateCancelled {
-		// Sem pedido ainda (ou já cancelado): nada a espelhar no ERP. O contador
-		// local mandou, que é o que o comprador enxerga.
+	switch {
+	case stErr != nil || st.State == OrderStateCancelled:
+		// Cancelado não ressuscita, e sem estado não há o que espelhar.
+		return "", nil
+	case st.State == OrderStateNone:
+		// SEM PEDIDO AINDA: nasce aqui.
+		//
+		// Isto devolvia `nil` — sucesso — e não mandava nada. O lojista montava
+		// o pedido pela tela de Pedidos, via "ok" a cada item, e no ERP não
+		// aparecia nada. Medido em produção 01/09/2026: quatro edições seguidas
+		// no carrinho #1324, todas gravadas aqui, nenhuma no Tiny, nenhum erro.
+		//
+		// Só o comentário e a promoção de fila criavam pedido; o caminho do
+		// lojista não estava entre eles. Agora está, e pela MESMA porta — a que
+		// o modo de reserva pode fechar. No modo local o carrinho segue sem
+		// pedido até o pagamento, e aí este ramo continua sendo um no-op
+		// legítimo, não um silêncio.
+		if err := s.EnsureERPOrderDuranteALive(ctx, cartID, storeID); err != nil {
+			rollbackLocal()
+			return "", fmt.Errorf("creating sales order for cart %s: %w", cartID, err)
+		}
 		return "", nil
 	}
 	if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
