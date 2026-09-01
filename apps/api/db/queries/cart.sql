@@ -12,30 +12,39 @@ RETURNING *;
 -- É isto que faz a compra do VIP num evento novo cair no MESMO carrinho de um
 -- evento anterior. FOR UPDATE serializa dois comentários concorrentes do VIP.
 --
--- O carrinho PAGO continua sendo o mesmo carrinho, e essa é a regra que o
--- lojista pediu por extenso: pagou na live de segunda, pediu mais uma coisa na
--- quinta, sai numa caixa só — um frete, uma nota. Enquanto o pedido não virou
--- documento fiscal ele ainda recebe item, e o que entrou depois do pagamento
--- fica separado por cart_items.paid_at (ver migration 000140).
+-- O PAGAMENTO É O PORTÃO. Regra do lojista, 01/09/2026:
 --
--- O FATURAMENTO é o portão. Depois dele a nota existe, e somar item seria emitir
--- nota errada — então a compra de quinta abre um pedido NOVO. Note que o ERP não
--- impõe esse limite: em 26/08/2026 ele aceitou (204) editar os itens de um
--- pedido "Faturada". A recusa é nossa.
+--   "O cliente VIP junta todos os carrinhos entre eventos, mas apenas se não
+--    está PAGO. Se está pago deverá separar. O carrinho VIP nunca expira."
 --
--- 'preparando_envio' está na lista de fechados apesar do nome e apesar de a
--- lista do enum o colocar ANTES de 'faturado': na operação o pedido só entra em
--- preparo depois de a nota sair. Ver ERPOrderStatus.FechadoParaNovosItens.
+-- Ou seja: acumular é o comportamento de carrinho ABERTO. Assim que o dinheiro
+-- entra, aquela compra está fechada e a próxima começa do zero.
 --
--- Estornado fica de fora pelo motivo oposto: não há venda a que somar.
+-- ═══ POR QUE O FILTRO É IDÊNTICO AO DO ÍNDICE ═══
+--
+-- `carts_one_eternal_per_store_buyer` é UNIQUE parcial sobre (store_id,
+-- platform_handle) com exatamente este WHERE. Ele é quem garante "um eterno por
+-- comprador", e a criação do carrinho novo depende dele para não estourar.
+--
+-- Se esta consulta filtrar MAIS que o índice, ela devolve ErrNoRows para uma
+-- linha que o índice ainda considera viva — e o INSERT seguinte viola a unique.
+-- Se filtrar MENOS, ela devolve um carrinho que o índice já liberou. Os dois
+-- lados precisam dizer a mesma frase, e por isso este WHERE é uma cópia.
+--
+-- Foi uma divergência dessas que quebrou a tatianimossini em 01/09/2026: o
+-- índice já excluía pago, esta consulta ainda incluía `'paid'`, e 17 unidades
+-- novas caíram dentro de um carrinho quitado — que respondia "já está pago" e
+-- não tinha como cobrar os R$ 1.369,30.
+--
+-- O filtro por situação do ERP saiu junto, e não por descuido: com pago fora,
+-- um carrinho aberto não chega a estar faturado pelo caminho normal. Mantê-lo
+-- só criaria de novo o descompasso com o índice — o caso "faturado sem
+-- pagamento" devolveria ErrNoRows e o INSERT bateria na unique.
 SELECT * FROM carts
 WHERE store_id = $1 AND platform_handle = $2
   AND never_expires
-  AND status IN ('pending', 'active', 'checkout', 'paid')
-  AND (payment_status IS NULL OR payment_status <> 'refunded')
-  AND (erp_order_status IS NULL OR erp_order_status NOT IN (
-        'preparando_envio', 'faturado', 'pronto_envio', 'enviado', 'entregue',
-        'nao_entregue', 'cancelado'))
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
 ORDER BY created_at DESC
 LIMIT 1
 FOR UPDATE;
