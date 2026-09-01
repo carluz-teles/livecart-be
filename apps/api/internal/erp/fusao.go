@@ -31,6 +31,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -127,14 +128,64 @@ func (s *Service) MergeERPOrdersIntoCart(ctx context.Context, destCartID, storeI
 //
 // Sem a afirmação explícita de que não há dinheiro, vai pelo caminho comum.
 func (s *Service) soltarPedidoDaFusao(ctx context.Context, o ERPOrderMerge, storeID string) error {
-	if o.SemDinheiro {
-		st, err := s.repo.GetCartERPOrderState(ctx, o.SourceCartID)
-		if err != nil {
-			return fmt.Errorf("lendo o estado do pedido de origem: %w", err)
-		}
-		if st != nil && st.State == OrderStateConfirmed {
-			return s.soltarPedidoConfirmado(ctx, o.SourceCartID, storeID, "join")
-		}
+	if o.ExternalOrderID == "" {
+		return nil
+	}
+
+	// ═══ O CARRINHO JÁ NÃO RESPONDE PELO PRÓPRIO PEDIDO ═══
+	//
+	// Quando isto roda, o vínculo da junção JÁ está gravado — e
+	// GetCartERPOrderState resolve um carrinho juntado para o ANFITRIÃO, de
+	// propósito, para que as escritas seguintes caiam no pedido certo
+	// (`COALESCE(orig.joined_to_cart_id, orig.id)`).
+	//
+	// Consequência: qualquer caminho que cancele "o pedido DO CARRINHO" de
+	// origem cancela, na verdade, o pedido do anfitrião — justamente o que tem
+	// de SOBREVIVER, porque acabou de receber a grade somada dos dois.
+	//
+	// Medido em produção 01/09/2026, junção do #1349 no #1252: a intenção
+	// registrada era soltar o 848241852 (origem) e o cancelamento saiu no
+	// 848127017 (anfitrião). O anfitrião levou os 4 itens e morreu; o webhook
+	// do Tiny voltou 'cancelado', o LiveCart cancelou o carrinho, e a
+	// compradora terminou sem pedido nenhum.
+	//
+	// A defesa é comparar: se o carrinho resolve para um pedido DIFERENTE do
+	// que nos mandaram soltar, ele está juntado e o caminho por carrinho está
+	// proibido.
+	st, err := s.repo.GetCartERPOrderState(ctx, o.SourceCartID)
+	if err != nil {
+		return fmt.Errorf("lendo o estado do pedido de origem: %w", err)
+	}
+	if st == nil || st.ExternalOrderID != o.ExternalOrderID {
+		return s.cancelarPedidoAvulsoNoERP(ctx, storeID, o.SourceCartID, o.ExternalOrderID)
+	}
+
+	if o.SemDinheiro && st.State == OrderStateConfirmed {
+		return s.soltarPedidoConfirmado(ctx, o.SourceCartID, storeID, "join")
 	}
 	return s.CancelERPOrderForCart(ctx, o.SourceCartID, storeID)
+}
+
+// cancelarPedidoAvulsoNoERP cancela um pedido pelo ID, sem passar pela máquina
+// de estados do carrinho.
+//
+// É o caminho do pedido ÓRFÃO: o carrinho de origem já foi desligado dele (a
+// junção zera external_order_id e põe o estado em 'none'), então não há
+// transição a fazer — e tentar fazê-la leria o pedido do anfitrião.
+func (s *Service) cancelarPedidoAvulsoNoERP(ctx context.Context, storeID, cartID, orderID string) error {
+	erpProvider, err := s.providerFor(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+		return erpProvider.SetOrderSituacao(ctx, orderID, providers.SituacaoCancelada)
+	}); err != nil {
+		return fmt.Errorf("cancelling order %s: %w", orderID, err)
+	}
+	s.collab.EmitERPOrderCancelled(ctx, storeID, cartID, orderID, "join")
+	logger.From(ctx, s.logger).Info("pedido de origem da junção cancelado pelo id",
+		zap.String("cart_id", cartID),
+		zap.String("external_order_id", orderID),
+	)
+	return nil
 }

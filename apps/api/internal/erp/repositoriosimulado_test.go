@@ -17,6 +17,10 @@ import (
 )
 
 type carrinhoSimulado struct {
+	// juntadoA reproduz `carts.joined_to_cart_id`. O banco real resolve o
+	// estado por COALESCE(joined_to_cart_id, id) — sem isto aqui, o duplo
+	// mente sobre qual pedido o carrinho responde.
+	juntadoA        string
 	state           string
 	externalOrderID string
 	stockLaunched   bool
@@ -76,6 +80,16 @@ func (r *repoSimulado) criarCarrinho(id string, itens ...NonWaitlistedCartItem) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.carrinhos[id] = &carrinhoSimulado{state: OrderStateNone, itens: itens}
+}
+
+// juntarAoAnfitriao encena `carts.joined_to_cart_id`: daqui em diante o
+// carrinho responde pelo pedido do anfitrião, como no banco real.
+func (r *repoSimulado) juntarAoAnfitriao(origem, anfitriao string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.carrinhos[origem]; ok {
+		c.juntadoA = anfitriao
+	}
 }
 
 func (r *repoSimulado) carrinho(id string) carrinhoSimulado {
@@ -143,6 +157,13 @@ func (r *repoSimulado) GetCartERPOrderState(_ context.Context, cartID string) (*
 	c, ok := r.carrinhos[cartID]
 	if !ok {
 		return nil, pgx.ErrNoRows
+	}
+	// COALESCE(joined_to_cart_id, id): carrinho juntado responde pelo pedido do
+	// ANFITRIÃO. É a linha que o defeito de 01/09/2026 explorou.
+	if c.juntadoA != "" {
+		if h, ok := r.carrinhos[c.juntadoA]; ok {
+			c = h
+		}
 	}
 	return &CartERPOrderState{
 		State:           c.state,
