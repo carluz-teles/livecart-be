@@ -4361,9 +4361,17 @@ WHERE p.external_id = $1
      --
      -- Status desconhecido ou vazio conta como NÃO refletido de propósito: é o
      -- lado que oferece de menos, e oferecer de menos é recuperável.
+     --
+     -- 'nao_encontrado' é da MESMA família, e por um motivo que não é óbvio:
+     -- ele é terminal para a VARREDURA (não adianta perguntar de novo por um
+     -- pedido apagado), mas o saldo do ERP continua NÃO descontando aquela
+     -- venda — o pedido sumiu, e com ele a baixa. Deixá-lo fora desta lista
+     -- faria a promessa parar de contar e o portão SUBIR com peça que já tem
+     -- dono, que é exatamente o −13 de 26/08.
      OR c.erp_order_status IS NULL
      OR c.erp_order_status = ''
      OR c.erp_order_status = 'cancelado'
+     OR c.erp_order_status = 'nao_encontrado'
      OR $4::bool
       )
   AND c.status NOT IN ('expired', 'cancelled')

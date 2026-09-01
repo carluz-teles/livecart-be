@@ -196,6 +196,30 @@ func TestPromessaNaoRefletida(t *testing.T) {
 				"nada, então toda unidade viva precisa sair do saldo lido", nova)
 		}
 	})
+
+	// PEDIDO APAGADO NO ERP CONTINUA CONTANDO — e este é o caso que engana.
+	//
+	// 'nao_encontrado' é TERMINAL para a varredura: não adianta perguntar de
+	// novo por um pedido que o lojista apagou. É fácil concluir daí que ele
+	// também está resolvido para a promessa — e é o contrário. O pedido sumiu,
+	// e com ele a baixa: o saldo do ERP NÃO desconta aquela venda.
+	//
+	// Deixá-lo de fora faria a promessa parar de contar, o portão subir com
+	// peça que já tem dono, e a live vender o que não existe.
+	t.Run("reserva NATIVA: pedido APAGADO no ERP volta a contar", func(t *testing.T) {
+		agora := time.Now()
+		carrinhoPrometendoComSituacao(t, eventoBling, prodBling, 5,
+			"PEDIDO-APAGADO", &agora, "nao_encontrado")
+
+		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if nova != 8 { // as 3 sem pedido + as 5 do pedido apagado
+			t.Errorf("soma = %d, queria 8 — o pedido sumiu do ERP, logo o saldo de lá "+
+				"NÃO desconta essas 5 unidades; tratá-las como refletidas infla o portão", nova)
+		}
+	})
 }
 
 // A NOVA QUERY NÃO PODE DIVERGIR DA QUE RODA EM PRODUÇÃO.
