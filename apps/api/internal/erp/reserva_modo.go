@@ -126,8 +126,16 @@ func (m ModoDeReserva) PrecoParaOLojista() string {
 // refletir um pedido recém-criado (medido em 29/08/2026). Por isso a ausência
 // de sinal nunca derruba uma confirmação.
 
-// ChaveCapacidadeDeReserva é onde o veredito vive no metadata da integração.
+// ChaveCapacidadeDeReserva é onde o veredito OBSERVADO vive no metadata.
 const ChaveCapacidadeDeReserva = "reserva_capacidade_confirmada"
+
+// ChaveDeclaracaoDeReserva guarda QUANDO o lojista declarou que ligou a Reserva
+// no ERP, para o caso de o LiveCart ainda não ter observado.
+//
+// Declaração não é prova, e o nome diz isso. Ela existe porque a configuração é
+// do lojista e nós não conseguimos consultá-la — mas fica datada: se aparecer
+// oversell, dá para saber quem afirmou o quê e quando.
+const ChaveDeclaracaoDeReserva = "reserva_declarada_em"
 
 // CapacidadeConfirmada diz se JÁ foi observado que esta conta reserva.
 //

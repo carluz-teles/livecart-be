@@ -6788,23 +6788,36 @@ func (s *Service) DefinirModoDeReserva(ctx context.Context, input SetModoDeReser
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
-	// O MODO NATIVO EXIGE PROVA, e não um clique.
+	// O MODO NATIVO PEDE UMA DECLARAÇÃO, e não uma prova.
 	//
-	// Sem isto o aviso "sua escolha ainda não está valendo" era um bilhete numa
-	// porta destrancada: a tela avisava, o backend gravava assim mesmo, e na
-	// live o LiveCart parava de segurar a peça achando que o ERP a segurava.
-	// Ninguém segurava, e a mesma peça era vendida duas vezes.
+	// A primeira versão disto EXIGIA prova observada, e criava um beco sem
+	// saída: sem modo nativo o pedido não nasce no comentário; sem pedido não
+	// há reserva para observar; sem observação o botão fica trancado. Medido em
+	// produção em 01/09/2026 — a conta tinha zero pedidos abertos, disponível
+	// igual ao físico em todos os produtos, e o lojista não conseguia escolher
+	// o modo que ele sabia estar correto.
 	//
-	// A prova é observada, não perguntada: disponível < físico em qualquer
-	// leitura de saldo. E o Tiny está isento — lá o pedido de venda É a reserva,
-	// por desenho do produto; o que o lojista precisa conferir no painel do Tiny
-	// nós já dizemos a ele, e não há nada que possamos fazer por ele.
+	// Ligar a Reserva de estoque é configuração do LOJISTA, no ERP dele. O
+	// LiveCart não liga, não desliga e não consegue perguntar. Bloquear a
+	// escolha era decidir por ele uma coisa que não é nossa.
+	//
+	// O que continua valendo é que a escolha seja CONSCIENTE: sem observação, o
+	// lojista precisa declarar que ligou. A declaração fica gravada com data —
+	// se der oversell, dá para saber quem afirmou o quê e quando.
 	if input.Modo == erp.ReservaNativaDoERP &&
-		!erp.CapacidadeConfirmada(integracao.Provider, integracao.Metadata) {
+		!erp.CapacidadeConfirmada(integracao.Provider, integracao.Metadata) &&
+		!input.ConfirmoQueOERPReserva {
 		return nil, httpx.DomainError(422, httpx.CodeValidationFailed,
-			"ainda não observamos este ERP segurando estoque, então não dá para "+
-				"delegar a reserva a ele — o LiveCart venderia a mesma peça duas vezes. "+
-				comoLigarReservaNoBling)
+			"ainda não vimos este ERP segurando estoque. Se a Reserva já está ligada "+
+				"na sua conta, confirme para prosseguir — o LiveCart vai parar de "+
+				"segurar a peça e passar a contar com o ERP. "+comoLigarReservaNoBling)
+	}
+	if input.Modo == erp.ReservaNativaDoERP && input.ConfirmoQueOERPReserva {
+		metadata[erp.ChaveDeclaracaoDeReserva] = time.Now().UTC().Format(time.RFC3339)
+		logger.From(ctx, s.logger).Warn("modo nativo escolhido por DECLARAÇÃO do lojista, sem observação",
+			zap.String("integration_id", integracao.ID),
+			zap.String("provider", integracao.Provider),
+		)
 	}
 
 	metadata[erp.ChaveModoDeReserva] = string(input.Modo)
