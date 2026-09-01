@@ -6,14 +6,55 @@ import (
 
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
+	"livecart/apps/api/lib/storage"
 )
 
 type Handler struct {
-	service *Service
+	service  *Service
+	s3Client *storage.S3Client
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+func NewHandler(service *Service, s3Client *storage.S3Client) *Handler {
+	return &Handler{service: service, s3Client: s3Client}
+}
+
+// presignItemImages rewrites every product-image field on an order response to a
+// fresh presigned GET URL. Product images live in a private bucket as keys; the
+// helper passes external ERP URLs and empty strings through unchanged. Nil-safe
+// on both the client and the individual *string pointers.
+func (h *Handler) presignOrderResponse(c *fiber.Ctx, r *OrderResponse) {
+	if h.s3Client == nil || r == nil {
+		return
+	}
+	ctx := c.UserContext()
+	for i := range r.Items {
+		if r.Items[i].ProductImage != nil {
+			s := h.s3Client.PresignImageURL(ctx, *r.Items[i].ProductImage)
+			r.Items[i].ProductImage = &s
+		}
+	}
+	for i := range r.ItemsPreview {
+		if r.ItemsPreview[i].ProductImage != nil {
+			s := h.s3Client.PresignImageURL(ctx, *r.ItemsPreview[i].ProductImage)
+			r.ItemsPreview[i].ProductImage = &s
+		}
+	}
+}
+
+// presignDetailResponse presigns the embedded order images plus the detail-only
+// waitlist item images.
+func (h *Handler) presignDetailResponse(c *fiber.Ctx, r *OrderDetailResponse) {
+	if h.s3Client == nil || r == nil {
+		return
+	}
+	h.presignOrderResponse(c, &r.OrderResponse)
+	ctx := c.UserContext()
+	for i := range r.Waitlist {
+		if r.Waitlist[i].ProductImage != nil {
+			s := h.s3Client.PresignImageURL(ctx, *r.Waitlist[i].ProductImage)
+			r.Waitlist[i].ProductImage = &s
+		}
+	}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -77,7 +118,11 @@ func (h *Handler) List(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewListOrdersResponse(output))
+	resp := NewListOrdersResponse(output)
+	for i := range resp.Data {
+		h.presignOrderResponse(c, &resp.Data[i])
+	}
+	return httpx.OK(c, resp)
 }
 
 // GetByID godoc
@@ -96,7 +141,9 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewOrderDetailResponse(*output))
+	resp := NewOrderDetailResponse(*output)
+	h.presignDetailResponse(c, &resp)
+	return httpx.OK(c, resp)
 }
 
 // Update godoc
@@ -127,7 +174,9 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewOrderResponse(*output))
+	resp := NewOrderResponse(*output)
+	h.presignOrderResponse(c, &resp)
+	return httpx.OK(c, resp)
 }
 
 // GetUpsell godoc
@@ -145,6 +194,21 @@ func (h *Handler) GetUpsell(c *fiber.Ctx) error {
 	output, err := h.service.GetUpsellSummary(c.UserContext(), c.Params("id"), httpx.GetStoreID(c))
 	if err != nil {
 		return err
+	}
+	if h.s3Client != nil && output != nil {
+		ctx := c.UserContext()
+		for i := range output.InitialItems {
+			if output.InitialItems[i].ImageURL != nil {
+				s := h.s3Client.PresignImageURL(ctx, *output.InitialItems[i].ImageURL)
+				output.InitialItems[i].ImageURL = &s
+			}
+		}
+		for i := range output.Mutations {
+			if output.Mutations[i].ImageURL != nil {
+				s := h.s3Client.PresignImageURL(ctx, *output.Mutations[i].ImageURL)
+				output.Mutations[i].ImageURL = &s
+			}
+		}
 	}
 	return httpx.OK(c, output)
 }
@@ -273,7 +337,9 @@ func (h *Handler) Cancel(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewOrderDetailResponse(*output))
+	resp := NewOrderDetailResponse(*output)
+	h.presignDetailResponse(c, &resp)
+	return httpx.OK(c, resp)
 }
 
 // RetryERPFinalisation godoc
@@ -306,7 +372,9 @@ func (h *Handler) RetryERPFinalisation(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewOrderDetailResponse(*output))
+	resp := NewOrderDetailResponse(*output)
+	h.presignDetailResponse(c, &resp)
+	return httpx.OK(c, resp)
 }
 
 // SyncInvoice godoc
@@ -339,7 +407,9 @@ func (h *Handler) SyncInvoice(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewOrderDetailResponse(*output))
+	resp := NewOrderDetailResponse(*output)
+	h.presignDetailResponse(c, &resp)
+	return httpx.OK(c, resp)
 }
 
 func parseOrderFilters(c *fiber.Ctx) OrderFilters {

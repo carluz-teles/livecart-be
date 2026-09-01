@@ -40,7 +40,7 @@ func appDePedidos(t *testing.T, storeID string, editor order.CartItemEditor) (*f
 		c.Locals("store_id", storeID)
 		return c.Next()
 	})
-	order.NewHandler(svc).RegisterRoutes(app)
+	order.NewHandler(svc, nil).RegisterRoutes(app)
 	return app, falso
 }
 

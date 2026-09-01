@@ -12,6 +12,7 @@ import (
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
+	"livecart/apps/api/lib/storage"
 )
 
 // Local alias so the handler doesn't have to drag the full sqlc package
@@ -23,14 +24,15 @@ type sqlcOrderEvent = sqlc.OrderEvent
 // handler. ShortId is decorative (human-friendly), the security boundary is
 // the token compared in constant time against the persisted value.
 type Handler struct {
-	repo    *Repository
-	service *Service
-	pool    *pgxpool.Pool
-	logger  *zap.Logger
+	repo     *Repository
+	service  *Service
+	pool     *pgxpool.Pool
+	logger   *zap.Logger
+	s3Client *storage.S3Client
 }
 
-func NewHandler(repo *Repository, service *Service, pool *pgxpool.Pool, logger *zap.Logger) *Handler {
-	return &Handler{repo: repo, service: service, pool: pool, logger: logger.Named("postcheckout-handler")}
+func NewHandler(repo *Repository, service *Service, pool *pgxpool.Pool, logger *zap.Logger, s3Client *storage.S3Client) *Handler {
+	return &Handler{repo: repo, service: service, pool: pool, logger: logger.Named("postcheckout-handler"), s3Client: s3Client}
 }
 
 // RegisterPublicRoutes mounts the unauthenticated routes under /api/public/.
@@ -165,6 +167,15 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 	}
 
 	resp := toPublicResponse(snapshot)
+	// Product images are private-bucket keys; presign so the receipt page can
+	// render them. ERP/external URLs pass through unchanged.
+	if h.s3Client != nil {
+		for i := range resp.Items {
+			if resp.Items[i].ProductImageURL != "" {
+				resp.Items[i].ProductImageURL = h.s3Client.PresignImageURL(c.Context(), resp.Items[i].ProductImageURL)
+			}
+		}
+	}
 	resp.Events = make([]PublicOrderEvent, 0, len(events))
 	for _, ev := range events {
 		// `receipt_sent` is an internal exactly-once marker for the receipt email

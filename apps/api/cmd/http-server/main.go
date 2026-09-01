@@ -894,7 +894,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// because the read path doesn't depend on payment providers — it only
 	// reads carts that already have a tracking_token populated by the
 	// post-checkout flow.
-	postCheckoutHandler := postcheckout.NewHandler(postcheckout.NewRepository(queries), postCheckoutSvc, pool, log)
+	postCheckoutHandler := postcheckout.NewHandler(postcheckout.NewRepository(queries), postCheckoutSvc, pool, log, s3Client)
 	postCheckoutHandler.RegisterPublicRoutes(app)
 
 	// Protected routes (user-scoped)
@@ -997,7 +997,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		orderSvc.SetManualPaymentConfirmer(paymentSvc)
 	}
 	orderSvc.SetBlockedHandleChecker(customerSvc)
-	orderHandler := order.NewHandler(orderSvc)
+	orderHandler := order.NewHandler(orderSvc, s3Client)
 
 	// Order materialisation reactor: listens to cart.paid and materialises the
 	// immutable Order snapshot. Independent of billing/ERP — keyed by cart_id.
