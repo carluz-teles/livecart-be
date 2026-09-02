@@ -1225,12 +1225,21 @@ func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, li
 		return nil, err
 	}
 
+	// LEFT JOIN, e não INNER: o comentário SEM produto é o que mais importa nesta
+	// lista — é a venda perdida, e um JOIN interno o eliminaria justamente por
+	// não ter casado com nada.
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, session_id, platform_comment_id, platform_user_id, platform_handle,
-		       text, COALESCE(has_purchase_intent, false), hidden, created_at
-		FROM live_comments
-		WHERE event_id = $1 AND deleted_at IS NULL
-		ORDER BY created_at
+		SELECT lc.id, lc.session_id, lc.platform_comment_id, lc.platform_user_id,
+		       lc.platform_handle, lc.text, COALESCE(lc.has_purchase_intent, false),
+		       lc.hidden, lc.created_at,
+		       COALESCE(lc.result, '')          AS result,
+		       COALESCE(p.name, '')             AS product_name,
+		       COALESCE(p.keyword, '')          AS product_keyword,
+		       COALESCE(lc.matched_quantity, 0) AS quantity
+		FROM live_comments lc
+		LEFT JOIN products p ON p.id = lc.matched_product_id
+		WHERE lc.event_id = $1 AND lc.deleted_at IS NULL
+		ORDER BY lc.created_at
 		LIMIT $2 OFFSET $3
 	`, uid, limit, offset)
 	if err != nil {
@@ -1244,7 +1253,8 @@ func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, li
 		var id, sessionID pgtype.UUID
 		var createdAt pgtype.Timestamptz
 		if err := rows.Scan(&id, &sessionID, &c.PlatformCommentID, &c.PlatformUserID,
-			&c.PlatformHandle, &c.Text, &c.HasPurchaseIntent, &c.Hidden, &createdAt); err != nil {
+			&c.PlatformHandle, &c.Text, &c.HasPurchaseIntent, &c.Hidden, &createdAt,
+			&c.Result, &c.ProductName, &c.ProductKeyword, &c.Quantity); err != nil {
 			return nil, fmt.Errorf("scanning comment row: %w", err)
 		}
 		c.ID = id.String()

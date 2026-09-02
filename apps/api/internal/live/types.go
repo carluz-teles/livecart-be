@@ -516,6 +516,19 @@ type CommentRow struct {
 	// actions) so the UI's hide button can toggle hide ↔ unhide.
 	Hidden    bool
 	CreatedAt time.Time
+	// Result é o desfecho apurado pelo motor da live: added_to_cart,
+	// waitlisted, out_of_stock, no_product, blocked, no_intent…
+	//
+	// `HasPurchaseIntent` é binário e não basta: ele diz que a compradora QUIS
+	// comprar, não se ela conseguiu. Um "quero o 9999" com produto inexistente
+	// e um "1825 QUERO" que virou item ficavam idênticos na tela — e o primeiro
+	// é uma venda perdida.
+	Result string
+	// Vazios quando o comentário não casou com produto — o caso mais
+	// informativo dos dois para quem revisa a live depois.
+	ProductName    string
+	ProductKeyword string
+	Quantity       int
 }
 
 // CommentModerationResponse is a comment returned to the moderation UI, including
@@ -528,6 +541,11 @@ type CommentModerationResponse struct {
 	HasPurchaseIntent bool      `json:"hasPurchaseIntent"`
 	Hidden            bool      `json:"hidden"`
 	CreatedAt         time.Time `json:"createdAt"`
+	// O desfecho cru; o front traduz para cor e frase.
+	Result         string `json:"result"`
+	ProductName    string `json:"productName,omitempty"`
+	ProductKeyword string `json:"productKeyword,omitempty"`
+	Quantity       int    `json:"quantity,omitempty"`
 }
 
 // ListCommentsResponse wraps the moderation comment list.

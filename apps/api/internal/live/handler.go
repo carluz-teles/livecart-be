@@ -1053,6 +1053,10 @@ func (h *Handler) ListComments(c *fiber.Ctx) error {
 			HasPurchaseIntent: cm.HasPurchaseIntent,
 			Hidden:            cm.Hidden,
 			CreatedAt:         cm.CreatedAt,
+			Result:            cm.Result,
+			ProductName:       cm.ProductName,
+			ProductKeyword:    cm.ProductKeyword,
+			Quantity:          cm.Quantity,
 		}
 	}
 
