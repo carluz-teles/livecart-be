@@ -303,7 +303,7 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	}
 
 	// Get customer comments for this event
-	commentRows, err := s.repo.GetCustomerComments(ctx, row.EventID, row.PlatformUserID)
+	commentRows, err := s.repo.GetCustomerComments(ctx, id, row.PlatformUserID)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to get customer comments", zap.Error(err))
 		commentRows = []CommentRow{}
@@ -312,9 +312,13 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	comments := make([]CommentOutput, len(commentRows))
 	for i, c := range commentRows {
 		comments[i] = CommentOutput{
-			ID:        c.ID,
-			Text:      c.Text,
-			CreatedAt: c.CreatedAt,
+			Result:         c.Result,
+			ProductName:    c.ProductName,
+			ProductKeyword: c.ProductKeyword,
+			Quantity:       c.Quantity,
+			ID:             c.ID,
+			Text:           c.Text,
+			CreatedAt:      c.CreatedAt,
 		}
 	}
 

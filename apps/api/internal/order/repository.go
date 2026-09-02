@@ -715,15 +715,71 @@ func (r *Repository) UpdatePaymentStatus(ctx context.Context, id string, payment
 	return nil
 }
 
-func (r *Repository) GetCustomerComments(ctx context.Context, eventID string, platformUserID string) ([]CommentRow, error) {
+// GetCustomerComments devolve o que a compradora disse na live DESTE pedido,
+// com o desfecho de cada fala.
+//
+// ═══ O DESFECHO É O PONTO ═══
+//
+// A versão anterior trazia `id, text, created_at` e nada mais. A linha do tempo
+// mostrava "@fulana comentou: 2074" e parava — três coisas muito diferentes
+// ficavam com a mesma cara: virou item, foi para a fila, não casou com produto
+// nenhum. A última é a que o lojista precisa ver, e era a mais invisível.
+//
+// `result`, `matched_product_id` e `matched_quantity` já estavam na tabela
+// desde sempre. Só nunca tinham sido lidos.
+//
+// ═══ POR QUE A JANELA, E NÃO O EVENTO ═══
+//
+// Casar por `event_id` perde o carrinho ETERNO do VIP, que existe justamente
+// para atravessar eventos: as compras de segunda e de quinta moram no mesmo
+// carrinho, e só as de um dos dois apareceriam. A janela do carrinho — do
+// nascimento até o pagamento (ou agora, se ainda aberto) — cobre os dois casos
+// com uma regra só, porque um comprador tem no máximo um carrinho vivo por vez
+// naquela loja.
+//
+// Comentário APAGADO ou ESCONDIDO fica de fora: o Instagram permite remover, e
+// mostrar o que já não existe do lado de lá é mostrar prova que ninguém pode
+// conferir.
+func (r *Repository) GetCustomerComments(ctx context.Context, cartID, platformUserID string) ([]CommentRow, error) {
 	query := `
-		SELECT id, text, created_at
-		FROM live_comments
-		WHERE event_id = $1 AND platform_user_id = $2
-		ORDER BY created_at
+		WITH janela AS (
+			SELECT le.store_id,
+			       -- A folga de dois minutos existe por uma razão exata: o
+			       -- comentário que CRIA o carrinho acontece ANTES dele. O
+			       -- motor lê a fala, resolve o produto e só então grava o
+			       -- carrinho — cortar em created_at deixa de fora justamente
+			       -- a fala que originou o pedido, que é a primeira que o
+			       -- lojista procura.
+			       --
+			       -- Dois minutos cobrem a assincronia e o desvio de relógio
+			       -- sem alcançar uma compra anterior: a compra anterior
+			       -- terminou no pagamento dela, e ninguém paga e volta a
+			       -- comentar em menos de dois minutos.
+			       c.created_at - interval '2 minutes' AS inicio,
+			       COALESCE(c.paid_at, now()) AS fim
+			FROM carts c
+			JOIN live_events le ON le.id = c.event_id
+			WHERE c.id = $1::uuid
+		)
+		SELECT lc.id,
+		       lc.text,
+		       lc.created_at,
+		       COALESCE(lc.result, '')      AS result,
+		       COALESCE(p.name, '')         AS product_name,
+		       COALESCE(p.keyword, '')      AS product_keyword,
+		       COALESCE(lc.matched_quantity, 0) AS quantity
+		FROM live_comments lc
+		JOIN live_events e ON e.id = lc.event_id
+		JOIN janela j ON j.store_id = e.store_id
+		LEFT JOIN products p ON p.id = lc.matched_product_id
+		WHERE lc.platform_user_id = $2
+		  AND lc.deleted_at IS NULL
+		  AND lc.hidden = false
+		  AND lc.created_at BETWEEN j.inicio AND j.fim
+		ORDER BY lc.created_at
 	`
 
-	rows, err := r.db.Query(ctx, query, eventID, platformUserID)
+	rows, err := r.db.Query(ctx, query, cartID, platformUserID)
 	if err != nil {
 		return nil, fmt.Errorf("getting customer comments: %w", err)
 	}
@@ -732,14 +788,14 @@ func (r *Repository) GetCustomerComments(ctx context.Context, eventID string, pl
 	var comments []CommentRow
 	for rows.Next() {
 		var c CommentRow
-		err := rows.Scan(&c.ID, &c.Text, &c.CreatedAt)
-		if err != nil {
+		if err := rows.Scan(&c.ID, &c.Text, &c.CreatedAt, &c.Result,
+			&c.ProductName, &c.ProductKeyword, &c.Quantity); err != nil {
 			return nil, fmt.Errorf("scanning comment row: %w", err)
 		}
 		comments = append(comments, c)
 	}
 
-	return comments, nil
+	return comments, rows.Err()
 }
 
 // GetProductOrderBreakdown agrupa os carrinhos que CONTÊM o produto por
