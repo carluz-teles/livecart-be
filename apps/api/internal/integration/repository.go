@@ -1139,6 +1139,40 @@ func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCom
 	return uuidToString(row.ID), nil
 }
 
+// MarcarItemPendenteNoERP marca que a escrita desta linha no ERP falhou.
+//
+// A marca é o que separa as duas histórias que o reflexo confundia: "o lojista
+// removeu o item do pedido" e "a nossa escrita nunca chegou lá". Enquanto ela
+// estiver posta, RemoveCartItemFromERP não apaga a linha.
+func (r *Repository) MarcarItemPendenteNoERP(ctx context.Context, cartID, productID string) error {
+	cart, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	prod, err := parseUUID(productID)
+	if err != nil {
+		return err
+	}
+	return r.queries.MarcarItemPendenteNoERP(ctx, sqlc.MarcarItemPendenteNoERPParams{
+		CartID: cart, ProductID: prod,
+	})
+}
+
+// ConfirmarItemNoERP limpa a marca: o ERP conhece a linha.
+func (r *Repository) ConfirmarItemNoERP(ctx context.Context, cartID, productID string) error {
+	cart, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	prod, err := parseUUID(productID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ConfirmarItemNoERP(ctx, sqlc.ConfirmarItemNoERPParams{
+		CartID: cart, ProductID: prod,
+	})
+}
+
 // UpdateLiveCommentResult updates the result of processing a live comment.
 func (r *Repository) UpdateLiveCommentResult(ctx context.Context, commentID string, hasPurchaseIntent bool, matchedProductID string, matchedQuantity int, result string) error {
 	id, err := parseUUID(commentID)

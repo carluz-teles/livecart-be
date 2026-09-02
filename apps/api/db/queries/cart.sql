@@ -1485,10 +1485,58 @@ SET quantity   = EXCLUDED.quantity + cart_items.waitlisted_quantity,
 -- Só quando NÃO há parcela em fila: uma linha com fila representa gente
 -- esperando, e apagá-la por causa de uma edição no painel do ERP mataria a
 -- espera de alguém que nunca chegou a estar no pedido.
+--
+-- ⚠ E só quando a linha NÃO está pendente de escrita.
+--
+-- "Não está no pedido do ERP" tem duas causas, e elas pedem o oposto uma da
+-- outra: o lojista removeu (apagar aqui é o certo) ou a NOSSA escrita falhou
+-- (apagar aqui destrói uma compra que a compradora já teve confirmada).
+--
+-- Em 01/09/2026 a @dany.lifestyle comentou 2091, recebeu a DM "Novo item
+-- adicionado", a escrita morreu num 429, e no dia seguinte o reflexo apagou a
+-- linha — 8 mudanças de uma vez, sem registrar nada. `erp_pending_since` é o
+-- que separa os dois casos, e enquanto ela estiver marcada a linha fica.
 DELETE FROM cart_items
 WHERE cart_id = sqlc.arg(cart_id)::uuid
   AND product_id = sqlc.arg(product_id)::uuid
-  AND waitlisted_quantity = 0;
+  AND waitlisted_quantity = 0
+  AND erp_pending_since IS NULL;
+
+-- name: MarcarItemPendenteNoERP :exec
+-- Marca que a escrita desta linha no ERP falhou.
+--
+-- Idempotente por construção: a marca guarda a PRIMEIRA falha (COALESCE), para
+-- "há quanto tempo isto está pendente" continuar respondendo a verdade depois
+-- de várias tentativas.
+UPDATE cart_items
+SET erp_pending_since = COALESCE(erp_pending_since, now())
+WHERE cart_id = sqlc.arg(cart_id)::uuid
+  AND product_id = sqlc.arg(product_id)::uuid;
+
+-- name: ConfirmarItemNoERP :exec
+-- Limpa a marca: o ERP conhece esta linha.
+UPDATE cart_items
+SET erp_pending_since = NULL
+WHERE cart_id = sqlc.arg(cart_id)::uuid
+  AND product_id = sqlc.arg(product_id)::uuid
+  AND erp_pending_since IS NOT NULL;
+
+-- name: ListarItensPendentesNoERP :many
+-- As linhas que o ERP não conhece, mais velhas que a carência.
+--
+-- Alimenta o reenvio: a compradora só recebe o aviso quando a linha existir dos
+-- dois lados, então quanto mais rápido isto converge, menos gente fica sem
+-- resposta.
+SELECT ci.cart_id, ci.product_id, ci.quantity, ci.erp_pending_since,
+       COALESCE(c.store_id, e.store_id) AS store_id
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN live_events e ON e.id = c.event_id
+WHERE ci.erp_pending_since IS NOT NULL
+  AND ci.erp_pending_since < now() - sqlc.arg(carencia)::interval
+  AND c.status NOT IN ('expired', 'cancelled')
+ORDER BY ci.erp_pending_since
+LIMIT sqlc.arg(max_rows);
 
 -- name: CartIsTerminated :one
 -- O carrinho chegou a um fim de onde não sai sozinho.

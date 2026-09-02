@@ -377,6 +377,25 @@ func (q *Queries) CloseMergedCart(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const confirmarItemNoERP = `-- name: ConfirmarItemNoERP :exec
+UPDATE cart_items
+SET erp_pending_since = NULL
+WHERE cart_id = $1::uuid
+  AND product_id = $2::uuid
+  AND erp_pending_since IS NOT NULL
+`
+
+type ConfirmarItemNoERPParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+// Limpa a marca: o ERP conhece esta linha.
+func (q *Queries) ConfirmarItemNoERP(ctx context.Context, arg ConfirmarItemNoERPParams) error {
+	_, err := q.db.Exec(ctx, confirmarItemNoERP, arg.CartID, arg.ProductID)
+	return err
+}
+
 const countCartsByEvent = `-- name: CountCartsByEvent :one
 SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'active'
 `
@@ -497,7 +516,7 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 const createCartItem = `-- name: CreateCartItem :one
 INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity, erp_pending_since
 `
 
 type CreateCartItemParams struct {
@@ -528,6 +547,7 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		&i.WaitlistedQuantity,
 		&i.SessionID,
 		&i.PaidQuantity,
+		&i.ErpPendingSince,
 	)
 	return i, err
 }
@@ -1733,7 +1753,7 @@ func (q *Queries) GetCartGMVCents(ctx context.Context, cartID pgtype.UUID) (int6
 }
 
 const getCartItem = `-- name: GetCartItem :one
-SELECT id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity FROM cart_items WHERE id = $1
+SELECT id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity, erp_pending_since FROM cart_items WHERE id = $1
 `
 
 func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, error) {
@@ -1748,6 +1768,7 @@ func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, er
 		&i.WaitlistedQuantity,
 		&i.SessionID,
 		&i.PaidQuantity,
+		&i.ErpPendingSince,
 	)
 	return i, err
 }
@@ -2440,23 +2461,24 @@ func (q *Queries) ListCartItemEventsForCart(ctx context.Context, cartID pgtype.U
 }
 
 const listCartItems = `-- name: ListCartItems :many
-SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, ci.session_id, ci.paid_quantity, p.name AS product_name, p.image_url AS product_image_url
+SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, ci.session_id, ci.paid_quantity, ci.erp_pending_since, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1
 `
 
 type ListCartItemsRow struct {
-	ID                 pgtype.UUID `json:"id"`
-	CartID             pgtype.UUID `json:"cart_id"`
-	ProductID          pgtype.UUID `json:"product_id"`
-	Quantity           pgtype.Int4 `json:"quantity"`
-	UnitPrice          pgtype.Int8 `json:"unit_price"`
-	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
-	SessionID          pgtype.UUID `json:"session_id"`
-	PaidQuantity       int32       `json:"paid_quantity"`
-	ProductName        string      `json:"product_name"`
-	ProductImageUrl    pgtype.Text `json:"product_image_url"`
+	ID                 pgtype.UUID        `json:"id"`
+	CartID             pgtype.UUID        `json:"cart_id"`
+	ProductID          pgtype.UUID        `json:"product_id"`
+	Quantity           pgtype.Int4        `json:"quantity"`
+	UnitPrice          pgtype.Int8        `json:"unit_price"`
+	WaitlistedQuantity int32              `json:"waitlisted_quantity"`
+	SessionID          pgtype.UUID        `json:"session_id"`
+	PaidQuantity       int32              `json:"paid_quantity"`
+	ErpPendingSince    pgtype.Timestamptz `json:"erp_pending_since"`
+	ProductName        string             `json:"product_name"`
+	ProductImageUrl    pgtype.Text        `json:"product_image_url"`
 }
 
 func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]ListCartItemsRow, error) {
@@ -2477,6 +2499,7 @@ func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]List
 			&i.WaitlistedQuantity,
 			&i.SessionID,
 			&i.PaidQuantity,
+			&i.ErpPendingSince,
 			&i.ProductName,
 			&i.ProductImageUrl,
 		); err != nil {
@@ -3711,6 +3734,63 @@ func (q *Queries) ListStuckERPOrderOps(ctx context.Context, olderThanSeconds int
 	return items, nil
 }
 
+const listarItensPendentesNoERP = `-- name: ListarItensPendentesNoERP :many
+SELECT ci.cart_id, ci.product_id, ci.quantity, ci.erp_pending_since,
+       COALESCE(c.store_id, e.store_id) AS store_id
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN live_events e ON e.id = c.event_id
+WHERE ci.erp_pending_since IS NOT NULL
+  AND ci.erp_pending_since < now() - $1::interval
+  AND c.status NOT IN ('expired', 'cancelled')
+ORDER BY ci.erp_pending_since
+LIMIT $2
+`
+
+type ListarItensPendentesNoERPParams struct {
+	Carencia pgtype.Interval `json:"carencia"`
+	MaxRows  int32           `json:"max_rows"`
+}
+
+type ListarItensPendentesNoERPRow struct {
+	CartID          pgtype.UUID        `json:"cart_id"`
+	ProductID       pgtype.UUID        `json:"product_id"`
+	Quantity        pgtype.Int4        `json:"quantity"`
+	ErpPendingSince pgtype.Timestamptz `json:"erp_pending_since"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+}
+
+// As linhas que o ERP não conhece, mais velhas que a carência.
+//
+// Alimenta o reenvio: a compradora só recebe o aviso quando a linha existir dos
+// dois lados, então quanto mais rápido isto converge, menos gente fica sem
+// resposta.
+func (q *Queries) ListarItensPendentesNoERP(ctx context.Context, arg ListarItensPendentesNoERPParams) ([]ListarItensPendentesNoERPRow, error) {
+	rows, err := q.db.Query(ctx, listarItensPendentesNoERP, arg.Carencia, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListarItensPendentesNoERPRow{}
+	for rows.Next() {
+		var i ListarItensPendentesNoERPRow
+		if err := rows.Scan(
+			&i.CartID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.ErpPendingSince,
+			&i.StoreID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const makeCartEternal = `-- name: MakeCartEternal :exec
 UPDATE carts SET never_expires = true, expires_at = NULL WHERE id = $1
 `
@@ -3719,6 +3799,28 @@ UPDATE carts SET never_expires = true, expires_at = NULL WHERE id = $1
 // virar no-op; never_expires é a defesa explícita nos guards.
 func (q *Queries) MakeCartEternal(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, makeCartEternal, id)
+	return err
+}
+
+const marcarItemPendenteNoERP = `-- name: MarcarItemPendenteNoERP :exec
+UPDATE cart_items
+SET erp_pending_since = COALESCE(erp_pending_since, now())
+WHERE cart_id = $1::uuid
+  AND product_id = $2::uuid
+`
+
+type MarcarItemPendenteNoERPParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+// Marca que a escrita desta linha no ERP falhou.
+//
+// Idempotente por construção: a marca guarda a PRIMEIRA falha (COALESCE), para
+// "há quanto tempo isto está pendente" continuar respondendo a verdade depois
+// de várias tentativas.
+func (q *Queries) MarcarItemPendenteNoERP(ctx context.Context, arg MarcarItemPendenteNoERPParams) error {
+	_, err := q.db.Exec(ctx, marcarItemPendenteNoERP, arg.CartID, arg.ProductID)
 	return err
 }
 
@@ -3829,6 +3931,7 @@ DELETE FROM cart_items
 WHERE cart_id = $1::uuid
   AND product_id = $2::uuid
   AND waitlisted_quantity = 0
+  AND erp_pending_since IS NULL
 `
 
 type RemoveCartItemFromERPParams struct {
@@ -3841,6 +3944,17 @@ type RemoveCartItemFromERPParams struct {
 // Só quando NÃO há parcela em fila: uma linha com fila representa gente
 // esperando, e apagá-la por causa de uma edição no painel do ERP mataria a
 // espera de alguém que nunca chegou a estar no pedido.
+//
+// ⚠ E só quando a linha NÃO está pendente de escrita.
+//
+// "Não está no pedido do ERP" tem duas causas, e elas pedem o oposto uma da
+// outra: o lojista removeu (apagar aqui é o certo) ou a NOSSA escrita falhou
+// (apagar aqui destrói uma compra que a compradora já teve confirmada).
+//
+// Em 01/09/2026 a @dany.lifestyle comentou 2091, recebeu a DM "Novo item
+// adicionado", a escrita morreu num 429, e no dia seguinte o reflexo apagou a
+// linha — 8 mudanças de uma vez, sem registrar nada. `erp_pending_since` é o
+// que separa os dois casos, e enquanto ela estiver marcada a linha fica.
 func (q *Queries) RemoveCartItemFromERP(ctx context.Context, arg RemoveCartItemFromERPParams) error {
 	_, err := q.db.Exec(ctx, removeCartItemFromERP, arg.CartID, arg.ProductID)
 	return err
@@ -4943,7 +5057,7 @@ const updateCartItem = `-- name: UpdateCartItem :one
 UPDATE cart_items
 SET quantity = $2
 WHERE id = $1
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity, erp_pending_since
 `
 
 type UpdateCartItemParams struct {
@@ -4963,6 +5077,7 @@ func (q *Queries) UpdateCartItem(ctx context.Context, arg UpdateCartItemParams) 
 		&i.WaitlistedQuantity,
 		&i.SessionID,
 		&i.PaidQuantity,
+		&i.ErpPendingSince,
 	)
 	return i, err
 }
@@ -5776,7 +5891,7 @@ ON CONFLICT (cart_id, product_id)
 DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
              waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity,
              session_id = COALESCE(cart_items.session_id, EXCLUDED.session_id)
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity, erp_pending_since
 `
 
 type UpsertCartItemParams struct {
@@ -5811,6 +5926,7 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 		&i.WaitlistedQuantity,
 		&i.SessionID,
 		&i.PaidQuantity,
+		&i.ErpPendingSince,
 	)
 	return i, err
 }

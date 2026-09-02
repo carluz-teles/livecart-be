@@ -55,6 +55,14 @@ type IngestRepository interface {
 	CreateLiveComment(ctx context.Context, params CreateLiveCommentParams) (string, error)
 	// UpdateLiveCommentResult stamps the processing outcome onto a stored comment.
 	UpdateLiveCommentResult(ctx context.Context, commentID string, hasPurchaseIntent bool, matchedProductID string, matchedQuantity int, result string) error
+	// MarcarItemPendenteNoERP marca que a escrita da linha no ERP falhou.
+	//
+	// A marca é o que separa "o lojista removeu o item" de "a nossa escrita não
+	// chegou" — sem ela o reflexo apaga a linha achando que foi o lojista, e uma
+	// compra já confirmada à compradora some sem registro.
+	MarcarItemPendenteNoERP(ctx context.Context, cartID, productID string) error
+	// ConfirmarItemNoERP limpa a marca: o ERP conhece a linha.
+	ConfirmarItemNoERP(ctx context.Context, cartID, productID string) error
 	// GetProductByID returns the enxuto product view by id (active-product
 	// fallback and single-promo resolution), or nil when absent.
 	GetProductByID(ctx context.Context, storeID, productID string) (*ProductRow, error)

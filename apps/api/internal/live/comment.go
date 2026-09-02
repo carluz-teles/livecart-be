@@ -533,6 +533,32 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if input.Channel == "dm" {
 		notifyCommentID = ""
 	}
+	// ═══ A DM SÓ SAI QUANDO É VERDADE ═══
+	//
+	// Regra do lojista, 02/09/2026: "não podemos avisar o cliente que deu certo
+	// sem saber se vai dar certo. Virou loteria."
+	//
+	// A ordem já estava certa — a reserva no ERP roda antes disto. O que faltava
+	// era a falha PESAR: ela só virava um Warn, e a DM saía igual. Em 01/09 a
+	// @dany.lifestyle recebeu "Novo item adicionado: Pote com Tampa Pinha –
+	// 11cm" enquanto a escrita morria num 429. Ela ficou com a prova de uma
+	// compra que a loja nunca viu.
+	//
+	// A mensagem não se PERDE, ela é ADIADA: a linha fica marcada como pendente,
+	// a varredura reenvia, e o aviso sai quando o item existir dos dois lados.
+	// Isso preserva a decisão de 17/08 — um ERP lento não pode calar o comprador
+	// — sem o preço de mentir para ele.
+	pendentes := itensPendentesNoERP(adicionados)
+	if pendentes > 0 {
+		logger.From(ctx, s.logger).Warn("DM adiada: o ERP ainda não confirmou o item",
+			zap.String("cart_id", ultimo.carrinho.CartID),
+			zap.String("username", input.Username),
+			zap.Int("itens_pendentes", pendentes),
+			zap.Int("itens_no_comentario", len(adicionados)),
+		)
+		return nil
+	}
+
 	// A mensagem da compradora NÃO viaja no prazo da requisição.
 	//
 	// A reserva no ERP roda antes dela, no mesmo ctx, e é a parte lenta. Na live
@@ -757,6 +783,31 @@ type resultadoDoItem struct {
 	pedida   int // quantidade efetivamente pedida, já com o teto da loja aplicado
 	naFila   int
 	carrinho AddToCartOutput
+	// erpPendente diz que a escrita no ERP FALHOU e a linha existe só aqui.
+	//
+	// É o que impede a DM de sair: avisar "item adicionado" quando o pedido do
+	// lojista não tem o item é prometer o que o sistema não pode cumprir — e a
+	// compradora fica com a prova de uma compra que a loja não enxerga.
+	erpPendente bool
+}
+
+// itensPendentesNoERP conta quantos itens do comentário o ERP NÃO confirmou.
+//
+// É a regra que decide se a compradora é avisada, e por isso ela tem nome: um
+// `if` embutido no meio do fluxo não pode ser testado sem subir o serviço
+// inteiro, e esta é justamente a regra que precisa de prova.
+//
+// QUALQUER item pendente cala a mensagem do comentário inteiro. Um comentário
+// vira UMA DM — "2071 x6 e 2091" é uma frase só — e mandar metade da verdade é
+// pior do que adiar: a compradora conferiria o total e não bateria.
+func itensPendentesNoERP(itens []resultadoDoItem) int {
+	n := 0
+	for _, item := range itens {
+		if item.erpPendente {
+			n++
+		}
+	}
+	return n
 }
 
 // processarItemDoComentario coloca UM produto no carrinho da compradora.
@@ -976,6 +1027,7 @@ func (s *Service) processarItemDoComentario(
 	}
 
 	// Reserve stock in ERP (only for available items)
+	erpPendente := false
 	if availableQty > 0 && s.stockReserver != nil {
 		if syncErr := s.stockReserver.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, availableQty, product.Price, input.Username); syncErr != nil {
 			// QUAL produto e QUANTO. A linha só tinha o carrinho, e quando duas
@@ -993,14 +1045,38 @@ func (s *Service) processarItemDoComentario(
 				zap.Int("quantity", availableQty),
 				zap.Error(syncErr),
 			)
+
+			// A LINHA FICA MARCADA, e é isto que a salva.
+			//
+			// Sem a marca ela é indistinguível de uma linha que o lojista
+			// removeu do pedido, e o próximo reflexo a apaga — foi o que
+			// aconteceu com a @dany.lifestyle em 01/09/2026. Marcada, o reflexo
+			// a preserva e a varredura a reenvia.
+			if markErr := s.ingestRepo.MarcarItemPendenteNoERP(ctx, result.CartID, product.ID); markErr != nil {
+				logger.From(ctx, s.logger).Error("a linha ficou sem a marca de pendente — o próximo reflexo pode apagá-la",
+					zap.String("cart_id", result.CartID),
+					zap.String("product_id", product.ID),
+					zap.Error(markErr),
+				)
+			}
+			erpPendente = true
+		} else if clearErr := s.ingestRepo.ConfirmarItemNoERP(ctx, result.CartID, product.ID); clearErr != nil {
+			// Best-effort: a linha está no ERP, e uma marca velha só faria a
+			// varredura reenviar algo que já chegou — barulho, não perda.
+			logger.From(ctx, s.logger).Warn("não consegui limpar a marca de pendente",
+				zap.String("cart_id", result.CartID),
+				zap.String("product_id", product.ID),
+				zap.Error(clearErr),
+			)
 		}
 	}
 
 	return &resultadoDoItem{
-		produto:  product,
-		pedida:   quantidade,
-		naFila:   waitlistQty,
-		carrinho: result,
+		erpPendente: erpPendente,
+		produto:     product,
+		pedida:      quantidade,
+		naFila:      waitlistQty,
+		carrinho:    result,
 	}, nil
 }
 

@@ -148,6 +148,8 @@ type CartItem struct {
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
 	SessionID          pgtype.UUID `json:"session_id"`
 	PaidQuantity       int32       `json:"paid_quantity"`
+	// Quando a escrita desta linha no ERP falhou. NULL = o ERP conhece a linha (ou nunca precisou conhecer). Não-NULL = a linha existe só aqui, e o reflexo NÃO pode apagá-la — ela precisa ser reenviada.
+	ErpPendingSince pgtype.Timestamptz `json:"erp_pending_since"`
 }
 
 // RN-12: uma linha por ADIÇÃO ao carrinho, com a sessão de origem. cart_items diz o que TEM no carrinho; esta tabela diz de onde veio cada unidade. Sem ela, cart_items.session_id é first-touch e credita tudo à primeira transmissão.
