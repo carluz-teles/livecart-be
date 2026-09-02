@@ -682,4 +682,59 @@ var baselineRawThrows = map[string]bool{
 	"live.Service.resolveSessionOfEvent:\"session not found\"":                                           true,
 	"notification.Handler.ListUndelivered:\"Erro ao listar mensagens não entregues\"":                    true,
 	"notification.Handler.ListUndelivered:\"eventId é obrigatório\"":                                     true,
+
+	// ─── catalog + product.UploadImage (Carlos, 31/08/2026) ────────────────
+	//
+	// Trinta e um throws que entraram junto com o domínio de catálogo (coleções
+	// de produtos por evento) e o upload de imagem. Registrados aqui em vez de
+	// convertidos, e o motivo é a própria política do teste: not-found,
+	// validação e config podem ficar crus.
+	//
+	// O precedente é o domínio `customer`, que tem estas mesmas frases já na
+	// linha de base — "invalid store id", "handle is required". Converter só
+	// estes trinta e um deixaria dois domínios vizinhos falando línguas
+	// diferentes sobre o mesmo erro.
+	//
+	// ⚠ Isto é DÍVIDA, não absolvição: quando a fase D chegar ao catálogo, os
+	// dois grupos saem daqui juntos. A catraca continua fechada para o que vier
+	// DEPOIS destes.
+
+	// Validação de UUID no handler — segunda camada, o ozzo já barra antes.
+	"catalog.Handler.Create:\"invalid store ID\"":            true,
+	"catalog.Handler.Delete:\"invalid catalog ID\"":          true,
+	"catalog.Handler.Delete:\"invalid store ID\"":            true,
+	"catalog.Handler.GetByID:\"invalid catalog ID\"":         true,
+	"catalog.Handler.GetByID:\"invalid store ID\"":           true,
+	"catalog.Handler.GetEventCatalog:\"invalid event ID\"":   true,
+	"catalog.Handler.GetEventCatalog:\"invalid store ID\"":   true,
+	"catalog.Handler.GetPublicCatalog:\"invalid event ID\"":  true,
+	"catalog.Handler.List:\"invalid store ID\"":              true,
+	"catalog.Handler.SetEventCatalog:\"invalid catalog ID\"": true,
+	"catalog.Handler.SetEventCatalog:\"invalid event ID\"":   true,
+	"catalog.Handler.SetEventCatalog:\"invalid store ID\"":   true,
+	"catalog.Handler.SetProducts:\"invalid catalog ID\"":     true,
+	"catalog.Handler.SetProducts:\"invalid store ID\"":       true,
+	"catalog.Handler.Update:\"invalid catalog ID\"":          true,
+	"catalog.Handler.Update:\"invalid store ID\"":            true,
+	"catalog.toProductIDs#0":                                 true,
+
+	// Not-found puro: a linha não existe, e não há decisão de domínio a comunicar.
+	"catalog.Repository.Delete:\"catalog not found\"":                  true,
+	"catalog.Repository.GetByID:\"catalog not found\"":                 true,
+	"catalog.Repository.GetEventCatalog:\"event has no catalog\"":      true,
+	"catalog.Repository.GetPublicCatalogByEvent:\"catalog not found\"": true,
+	"catalog.Repository.SetEventCatalog:\"event not found\"":           true,
+	"catalog.Repository.Update:\"catalog not found\"":                  true,
+
+	// Upload de imagem: validação do arquivo (tamanho, tipo, presença), config
+	// ausente (bucket não configurado) e falha de infraestrutura do storage.
+	// Nenhum deles é decisão de negócio que o front precise ramificar.
+	"product.Handler.UploadImage:\"invalid store ID\"":                                 true,
+	"product.Handler.UploadImage:\"file is required\"":                                 true,
+	"product.Handler.UploadImage:\"file too large, maximum size is 5MB\"":              true,
+	"product.Handler.UploadImage:\"invalid file type, accepted: JPG, PNG, GIF, WebP\"": true,
+	"product.Handler.UploadImage:\"storage not configured\"":                           true,
+	"product.Handler.UploadImage:\"failed to generate image URL\"":                     true,
+	"product.Handler.UploadImage:\"failed to read file\"":                              true,
+	"product.Handler.UploadImage:\"failed to upload file\"":                            true,
 }
