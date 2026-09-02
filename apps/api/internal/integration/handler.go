@@ -74,7 +74,6 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	// Drenagem das reservas manuais para pedidos de venda. Migração única: sai
 	// da API quando a tabela stock_reservations estiver vazia.
-	g.Post("/erp/drain-legacy-reservations", h.DrainLegacyReservations)
 	// Juntar pedidos no ERP. Fica no grupo de integrações porque o efeito é
 	// inteiramente do lado do ERP — no LiveCart os pedidos continuam separados.
 	g.Post("/erp/join-orders", h.JoinOrders)

@@ -890,12 +890,6 @@ func (b *Bling) ReverseOrderStock(ctx context.Context, orderID string) error {
 		providers.ErrOperationNotSupported)
 }
 
-// ReverseLegacyStockExit é exclusivo da drenagem do modelo antigo do Tiny.
-func (b *Bling) ReverseLegacyStockExit(ctx context.Context, productID string, qty int, obs string) (string, error) {
-	return "", fmt.Errorf("%w: drenagem do modelo legado é exclusiva do Tiny",
-		providers.ErrOperationNotSupported)
-}
-
 // SyncProduct: o LiveCart não escreve produto de volta no ERP. O catálogo é do
 // lojista e a direção do fluxo é ERP → LiveCart.
 func (b *Bling) SyncProduct(ctx context.Context, product providers.ERPProduct) (*providers.SyncResult, error) {

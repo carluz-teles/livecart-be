@@ -205,7 +205,6 @@ func (s *Service) erpStock() *erp.Service {
 		// morto aqui.
 		s.erpStockService.SetCartReopener(reopenerAdapter{s})
 		// Drenagem das reservas manuais: migração única, sai com ela.
-		s.erpStockService.SetDrainRepository(s.repo)
 		// Caminho de volta: o pedido do ERP refletido no carrinho.
 		s.erpStockService.SetCartSyncCollaborators(s)
 	})

@@ -30,6 +30,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -292,4 +293,32 @@ func TestUpsertConcorrenteSomaExatamenteUmaVezPorChamada(t *testing.T) {
 		t.Errorf("soma = %d, quero %d — cada chamada soma exatamente uma unidade, "+
 			"nem a mais (oversell) nem a menos (unidade perdida)", total, chamadas)
 	}
+}
+
+// seedReservaAtiva cria um carrinho vencido com uma reserva ATIVA.
+//
+// Mudou de casa quando a drenagem do modelo legado foi removida: o arquivo que
+// a hospedava existia só para provar a reivindicação do estorno contra o
+// Postgres, e saiu junto com o código que ele protegia. O helper ficou porque
+// os testes de decremento, ciclo de estoque e simulação de live ainda precisam
+// semear a linha 'active' que eles próprios consomem.
+func seedReservaAtiva(t *testing.T, fx scaleFixture, productID string, qty int) (cartID, reservationID string) {
+	t.Helper()
+	ctx := context.Background()
+	seedSeq++
+	uniq := fmt.Sprintf("cl-%d-%d", seedSeq, rand.Intn(1_000_000))
+
+	if err := testPool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+		 VALUES ($1, 'u-'||$2, 'h'||$2, 't-'||$2, (floor(random()*2000000000))::int, 'expired', 'unpaid')
+		 RETURNING id::text`, fx.eventID, uniq).Scan(&cartID); err != nil {
+		t.Fatalf("seed cart: %v", err)
+	}
+	if err := testPool.QueryRow(ctx,
+		`INSERT INTO stock_reservations (event_id, cart_id, product_id, external_product_id, quantity, status)
+		 VALUES ($1, $2, $3, 'EXT-'||$4, $5, 'active')
+		 RETURNING id::text`, fx.eventID, cartID, productID, uniq, qty).Scan(&reservationID); err != nil {
+		t.Fatalf("seed reserva: %v", err)
+	}
+	return cartID, reservationID
 }
