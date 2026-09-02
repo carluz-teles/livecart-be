@@ -402,10 +402,6 @@ type ERPProvider interface {
 	// um segundo. Devolve "" quando não existe.
 	FindOrderIDByMarker(ctx context.Context, marker string) (string, error)
 
-	// ReverseLegacyStockExit devolve ao estoque uma saída manual do modelo ANTIGO.
-	// Só a drenagem única chama — ver a nota na implementação; sai junto com ela.
-	ReverseLegacyStockExit(ctx context.Context, productID string, qty int, obs string) (string, error)
-
 	// SearchContacts searches for contacts by name or document.
 	SearchContacts(ctx context.Context, params SearchContactsParams) ([]ERPContactResult, error)
 

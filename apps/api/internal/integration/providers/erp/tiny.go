@@ -2456,38 +2456,6 @@ func (t *Tiny) orderAnchor(ctx context.Context, orderID string) (string, error) 
 	return out.NumeroOrdemCompra, nil
 }
 
-// ReverseLegacyStockExit devolve ao estoque uma saída manual criada pelo modelo
-// ANTIGO (POST /estoque tipo E, a entrada que compensa a saída tipo S).
-//
-// Existe por uma razão só, e ela tem prazo: no instante do corte havia 690
-// unidades da cantodaart seguradas por 462 saídas manuais, e alguém precisa
-// devolvê-las depois que o pedido de venda assumir a guarda. Fora da drenagem,
-// nada no sistema deve chamar isto — a catraca em conventions garante.
-//
-// Quando a drenagem tiver rodado e a tabela stock_reservations estiver vazia,
-// este método e a rota que ele usa saem juntos.
-func (t *Tiny) ReverseLegacyStockExit(ctx context.Context, productID string, qty int, obs string) (string, error) {
-	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
-	payload := map[string]any{
-		"tipo":          "E",
-		"quantidade":    qty,
-		"precoUnitario": 0,
-		"observacoes":   obs,
-	}
-	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
-	if err != nil {
-		return "", fmt.Errorf("reversing legacy stock exit: %w", err)
-	}
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return "", fmt.Errorf("reverse legacy stock exit failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
-	}
-	var result struct {
-		IDLancamento int64 `json:"idLancamento"`
-	}
-	_ = json.Unmarshal(body, &result)
-	return strconv.FormatInt(result.IDLancamento, 10), nil
-}
-
 // SearchContacts searches for contacts by name in Tiny.
 // GET /contatos?nome={name}&limit=10
 //

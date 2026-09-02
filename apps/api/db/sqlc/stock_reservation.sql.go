@@ -52,33 +52,6 @@ func (q *Queries) AdjustActiveReservationQuantity(ctx context.Context, arg Adjus
 	return i, err
 }
 
-const claimReservationForReversal = `-- name: ClaimReservationForReversal :execrows
-UPDATE stock_reservations SET status = 'reversed', reversed_at = now()
-WHERE id = $1 AND status = 'active'
-`
-
-// Reivindica a reserva ANTES de mandar o estorno ao ERP. Devolve 1 para quem
-// ganhou a corrida e 0 para todo o resto.
-//
-// Inverte a ordem que produziu estoque fantasma em 08/08. Antes era: estorna no
-// Tiny, depois marca 'reversed'. Quando a marcação falhava — "context deadline
-// exceeded" às 15:29:28 — a reserva continuava 'active', o handler devolvia
-// erro, a asynq retentava (max_retry 3), e a retentativa via a reserva ainda
-// ativa e mandava a MESMA entrada de novo. O Tiny registrou duas linhas
-// idênticas para a reserva f4590b1f, 12:29 e 12:30, e o produto terminou com
-// 7 unidades onde deviam existir 5.
-//
-// Reivindicando primeiro, a segunda tentativa recebe 0 e não chama o ERP. O
-// estorno duplo deixa de ser possível por construção, e não por o UPDATE ter
-// dado certo a tempo.
-func (q *Queries) ClaimReservationForReversal(ctx context.Context, id pgtype.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, claimReservationForReversal, id)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const convertReservationsByEvent = `-- name: ConvertReservationsByEvent :exec
 UPDATE stock_reservations SET status = 'converted', reversed_at = now()
 WHERE event_id = $1 AND status = 'active'
@@ -318,69 +291,6 @@ func (q *Queries) ListActiveReservationsByEvent(ctx context.Context, eventID pgt
 	return items, nil
 }
 
-const listCartsWithActiveReservations = `-- name: ListCartsWithActiveReservations :many
-SELECT c.id::text AS cart_id,
-       COALESCE(c.store_id, e.store_id)::text AS store_id,
-       c.status,
-       COALESCE(c.payment_status, '') AS payment_status,
-       COALESCE(c.external_order_id, '') AS external_order_id,
-       e.status AS event_status,
-       COUNT(sr.id)::int AS reservation_rows,
-       COALESCE(SUM(sr.quantity), 0)::int AS reserved_units
-FROM carts c
-JOIN live_events e ON e.id = c.event_id
-JOIN stock_reservations sr ON sr.cart_id = c.id AND sr.status = 'active'
-WHERE COALESCE(c.store_id, e.store_id) = $1::uuid
-GROUP BY c.id, c.store_id, e.store_id, c.status, c.payment_status, c.external_order_id, e.status, c.created_at
-ORDER BY c.created_at DESC
-`
-
-type ListCartsWithActiveReservationsRow struct {
-	CartID          string `json:"cart_id"`
-	StoreID         string `json:"store_id"`
-	Status          string `json:"status"`
-	PaymentStatus   string `json:"payment_status"`
-	ExternalOrderID string `json:"external_order_id"`
-	EventStatus     string `json:"event_status"`
-	ReservationRows int32  `json:"reservation_rows"`
-	ReservedUnits   int32  `json:"reserved_units"`
-}
-
-// Carrinhos da loja que ainda seguram peça por reserva MANUAL — a lista de
-// trabalho da drenagem única.
-//
-// Ordena do mais novo para o mais antigo de propósito: os carrinhos recentes são
-// os de uma live em andamento, e são eles que não podem ficar um segundo sem
-// estoque segurado. Os antigos já estão parados há dias e podem esperar.
-func (q *Queries) ListCartsWithActiveReservations(ctx context.Context, storeID pgtype.UUID) ([]ListCartsWithActiveReservationsRow, error) {
-	rows, err := q.db.Query(ctx, listCartsWithActiveReservations, storeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListCartsWithActiveReservationsRow{}
-	for rows.Next() {
-		var i ListCartsWithActiveReservationsRow
-		if err := rows.Scan(
-			&i.CartID,
-			&i.StoreID,
-			&i.Status,
-			&i.PaymentStatus,
-			&i.ExternalOrderID,
-			&i.EventStatus,
-			&i.ReservationRows,
-			&i.ReservedUnits,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listStockPositionsForReconciliation = `-- name: ListStockPositionsForReconciliation :many
 SELECT p.id,
        p.name,
@@ -477,38 +387,6 @@ func (q *Queries) RestoreReservationQuantityByID(ctx context.Context, arg Restor
 		return 0, err
 	}
 	return result.RowsAffected(), nil
-}
-
-const restoreReservationToActive = `-- name: RestoreReservationToActive :execrows
-UPDATE stock_reservations SET status = 'active', reversed_at = NULL
-WHERE id = $1 AND status = 'reversed'
-`
-
-// Devolve a reserva reivindicada ao estado ativo quando o ERP recusou o
-// estorno. Sem isto a reivindicação seria uma via de mão única: a unidade
-// ficaria presa no Tiny para sempre, porque nenhuma tentativa futura a veria.
-//
-// Só desfaz o que ESTA execução reivindicou (status ainda 'reversed' e sem
-// movimento gravado). O que já foi confirmado no ERP nunca volta.
-func (q *Queries) RestoreReservationToActive(ctx context.Context, id pgtype.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, restoreReservationToActive, id)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const reverseReservationByID = `-- name: ReverseReservationByID :exec
-UPDATE stock_reservations SET status = 'reversed', reversed_at = now()
-WHERE id = $1 AND status = 'active'
-`
-
-// Marcação per-row da finalização retomável: cada reserva só vira 'reversed'
-// depois que o Tiny confirmou a entrada E correspondente — o resume estorna
-// apenas as que continuam 'active'.
-func (q *Queries) ReverseReservationByID(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, reverseReservationByID, id)
-	return err
 }
 
 const reverseReservationsByCart = `-- name: ReverseReservationsByCart :exec

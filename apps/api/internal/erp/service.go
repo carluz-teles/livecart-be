@@ -152,9 +152,6 @@ type Service struct {
 	status ERPOrderStatusRepository
 	// reopener segue o pedido que o lojista reabriu no ERP. Opcional.
 	reopener CartReopener
-	// drain é a persistência da migração única das reservas manuais. Opcional e
-	// com prazo: sai quando a drenagem terminar. Ver drenagem.go.
-	drain DrainRepository
 	// cartSync é o caminho de volta: o pedido do ERP refletido no carrinho.
 	// Ver reflexo.go.
 	cartSync CartSyncCollaborators

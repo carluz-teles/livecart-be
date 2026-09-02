@@ -102,6 +102,10 @@ type ERPOrderMirror = erp.ERPOrderMirror
 
 // Service handles business logic for integrations.
 type Service struct {
+	// medidorEspelho conta o custo do espelho contra o teto do ERP. Ver
+	// medidor_espelho.go — é temporário, sai quando a decisão vier.
+	medidorEspelho *medidorDoEspelho
+
 	repo                *Repository
 	factory             *providers.Factory
 	encryptor           *crypto.Encryptor
@@ -205,7 +209,6 @@ func (s *Service) erpStock() *erp.Service {
 		// morto aqui.
 		s.erpStockService.SetCartReopener(reopenerAdapter{s})
 		// Drenagem das reservas manuais: migração única, sai com ela.
-		s.erpStockService.SetDrainRepository(s.repo)
 		// Caminho de volta: o pedido do ERP refletido no carrinho.
 		s.erpStockService.SetCartSyncCollaborators(s)
 	})
@@ -534,6 +537,7 @@ func NewService(
 	}
 	invertAll, invertIDs := parseStoreFlag("ERP_FINALISE_INVERTED_STORE_IDS")
 	svc := &Service{
+		medidorEspelho:             novoMedidorDoEspelho(),
 		repo:                       repo,
 		factory:                    factory,
 		encryptor:                  encryptor,
@@ -3649,8 +3653,11 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 	// releitura do saldo — quinze compradores no mesmo produto viravam quinze
 	// leituras onde uma basta, tiradas do mesmo teto que a live usa para criar os
 	// pedidos. Ver coalescencia.go.
+	s.anotarEspelho(ctx, "recebido", externalProductID)
+
 	var aplicado bool
 	rodou, err := s.coalescedorDeEspelho().Fazer(storeID+"|"+externalProductID, func() error {
+		s.anotarEspelho(ctx, "lido", externalProductID)
 		var innerErr error
 		aplicado, innerErr = s.processProductWebhook(ctx, storeID, provider, externalProductID)
 		return innerErr
@@ -3659,6 +3666,7 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 		// Absorvido por uma releitura em curso, que repetirá e verá o estado
 		// final. Não aplicou nada AGORA, e é isso que o chamador precisa saber:
 		// o backstop da fila de espera só roda sobre estoque efetivamente escrito.
+		s.anotarEspelho(ctx, "coalescido", externalProductID)
 		logger.From(ctx, s.logger).Debug("stock re-read coalesced into the one already running",
 			zap.String("external_product_id", externalProductID))
 		return false, nil
@@ -3696,6 +3704,7 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 	for attempt := 0; attempt <= productWebhookMaxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			s.anotarEspelho(ctx, "retentativa", externalProductID)
 			logger.From(ctx, s.logger).Warn("retrying product webhook processing",
 				zap.String("store_id", storeID),
 				zap.String("integration_id", integration.ID),
@@ -6357,6 +6366,7 @@ func (s *Service) handleProviderError(ctx context.Context, integrationID string,
 		// integration_logs com status 'error' e a mensagem crua ("HTTP 429: ..."),
 		// que é de onde este diagnóstico saiu. O status da integração descreve se
 		// ela está utilizável, e durante um 429 ela está — daqui a pouco.
+		s.anotarEspelho(ctx, "limitado", "")
 		logger.From(ctx, s.logger).Error("provider rate limited",
 			zap.String("integration_id", integrationID),
 			zap.String("operation", operation),

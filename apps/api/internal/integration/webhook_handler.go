@@ -636,9 +636,9 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 			// código numérico que a API usa para MUDAR a situação — as duas
 			// grafias convivem, e a tabela que as casa está em
 			// providers.ERPOrderStatus.
-			Numero            string `json:"numero"`
-			CodigoSituacao    string `json:"codigoSituacao"`
-			DescricaoSituacao string `json:"descricaoSituacao"`
+			Numero            textoOuNumero `json:"numero"`
+			CodigoSituacao    string        `json:"codigoSituacao"`
+			DescricaoSituacao string        `json:"descricaoSituacao"`
 			// Evento de rastreio.
 			IDVendaTiny    json.Number `json:"idVendaTiny"`
 			CodigoRastreio string      `json:"codigoRastreio"`
@@ -647,9 +647,20 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		} `json:"dados"`
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
-		logger.From(c.Context(), h.logger).Warn("failed to parse Tiny webhook payload",
+		// SAIR, e não seguir. Antes isto era um Warn e o fluxo continuava com o
+		// struct ZERADO — o que é pior do que não tratar: `idPedido` virava
+		// vazio e a nota fiscal era descartada por "missing idPedido", quando o
+		// id estava no corpo o tempo todo. Nove notas perdidas em 02/09/2026 por
+		// causa de UM campo com o tipo trocado.
+		//
+		// 200 mesmo assim: o Tiny reenviaria o mesmo corpo, e o mesmo corpo
+		// falharia igual. Quem conserta isto é gente lendo o log, e por isso o
+		// payload vai junto.
+		logger.From(c.Context(), h.logger).Error("Tiny webhook ilegível — nada foi processado",
 			zap.Error(err),
+			zap.String("payload", limitarPayload(body)),
 		)
+		return httpx.OK(c, fiber.Map{"status": "unparseable"})
 	}
 
 	// Resolve product ID: dados.idProduto (number) or dados.id (string)
@@ -808,7 +819,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 			)
 		default:
 			payload := append([]byte(nil), body...)
-			numero := webhook.Dados.Numero
+			numero := webhook.Dados.Numero.String()
 			ehAtualizacao := webhook.Tipo == "atualizacao_pedido"
 			go func() {
 				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
@@ -860,7 +871,11 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 				}
 			}()
 		} else {
-			logger.From(c.Context(), h.logger).Warn("nota_fiscal webhook missing idPedido — cannot resolve cart",
+			// Sem idPedido não há como resolver o carrinho, e nem sempre há um:
+			// a conta do lojista emite nota de venda que não passou pelo
+			// LiveCart. Debug, não Warn — não é defeito nosso nem há ação a
+			// tomar, e como aviso só ensina o time a ignorar o log.
+			logger.From(c.Context(), h.logger).Debug("nota_fiscal sem idPedido — provavelmente de um pedido que não é nosso",
 				zap.String("id_nfe", idNFe),
 			)
 		}
