@@ -534,7 +534,14 @@ type CommentRow struct {
 // CommentModerationResponse is a comment returned to the moderation UI, including
 // the Instagram comment ID needed to reply / hide / delete via the Graph API.
 type CommentModerationResponse struct {
-	ID                string    `json:"id"`
+	ID string `json:"id"`
+	// SessionID é a transmissão em que a fala aconteceu.
+	//
+	// Uma campanha guarda-chuva tem várias — a live de segunda, o story de
+	// terça, o post de quinta —, e sem este campo a lista de comentários era um
+	// caldo só: o lojista não conseguia rever UMA transmissão. Vazio para as
+	// falas anteriores ao vínculo por sessão.
+	SessionID         string    `json:"sessionId,omitempty"`
 	PlatformCommentID string    `json:"platformCommentId"`
 	Handle            string    `json:"handle"`
 	Text              string    `json:"text"`

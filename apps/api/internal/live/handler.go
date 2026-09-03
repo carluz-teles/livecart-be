@@ -1047,6 +1047,7 @@ func (h *Handler) ListComments(c *fiber.Ctx) error {
 	for i, cm := range comments {
 		responses[i] = CommentModerationResponse{
 			ID:                cm.ID,
+			SessionID:         cm.SessionID,
 			PlatformCommentID: cm.PlatformCommentID,
 			Handle:            cm.PlatformHandle,
 			Text:              cm.Text,

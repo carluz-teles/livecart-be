@@ -1258,7 +1258,12 @@ func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, li
 			return nil, fmt.Errorf("scanning comment row: %w", err)
 		}
 		c.ID = id.String()
-		c.SessionID = sessionID.String()
+		// session_id é NULL para as falas anteriores ao vínculo por sessão, e
+		// pgtype devolveria o UUID ZERO nesse caso — um id que parece válido e
+		// não casa com transmissão nenhuma. Vazio é a verdade.
+		if sessionID.Valid {
+			c.SessionID = sessionID.String()
+		}
 		c.CreatedAt = createdAt.Time
 		comments = append(comments, c)
 	}
