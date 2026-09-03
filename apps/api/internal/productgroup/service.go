@@ -140,7 +140,16 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (*domain.C
 
 		variantName := buildVariantName(input.Name, v.OptionValues)
 
+		// O id da variação nasce AQUI, no domínio, e não no banco.
+		//
+		// `CreateProduct` lista `id` entre as colunas do INSERT desde que o
+		// import manual passou a devolver o id que realmente gravou. Quem não
+		// preenche o campo não cai no DEFAULT da coluna: manda NULL explícito,
+		// e um NULL explícito vence o DEFAULT. Toda variação criada por esta
+		// tela morria em 23502, e a importação de variações do ERP junto —
+		// `CreateForERP` é este mesmo caminho.
 		productRow, err := q.CreateProduct(ctx, sqlc.CreateProductParams{
+			ID:                  vo.GenerateProductID().ToPgUUID(),
 			StoreID:             input.StoreID.ToPgUUID(),
 			Name:                variantName,
 			ExternalID:          pgtype.Text{String: v.ExternalID, Valid: v.ExternalID != ""},
