@@ -2029,14 +2029,21 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 
 // ListCommentsByEvent returns the event's comments (with Instagram comment IDs)
 // for the moderation UI. Validates store ownership of the event.
-func (s *Service) ListCommentsByEvent(ctx context.Context, eventID, storeID string, limit, offset int) ([]CommentRow, error) {
+func (s *Service) ListCommentsByEvent(ctx context.Context, eventID, storeID, sessionID string, limit, offset int) ([]CommentRow, error) {
 	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
 		return nil, err
 	}
+	// O teto continua sendo do servidor: uma campanha de uma semana passa de 16
+	// mil falas, e devolver tudo de uma vez é derrubar o browser do lojista.
+	// Quem quiser o resto pede a próxima página.
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	return s.repo.ListCommentsByEvent(ctx, eventID, limit, offset)
+	// sessionID não é conferido contra o evento de propósito: o WHERE já casa
+	// event_id E session_id, então um id de outra loja não devolve nada em vez
+	// de devolver erro — e uma ida a mais no banco só para dizer "não existe"
+	// seria custo por um caso que a tela não produz.
+	return s.repo.ListCommentsByEvent(ctx, eventID, sessionID, limit, offset)
 }
 
 // ListActiveCheckouts returns the carts in checkout phase for an event so the

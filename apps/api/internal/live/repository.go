@@ -1219,10 +1219,24 @@ func (r *Repository) ListCommentsBySession(ctx context.Context, sessionID string
 // ListCommentsByEvent returns comments for an event, including the Instagram
 // comment ID needed for moderation (reply / hide / delete) and the mirrored
 // hidden state so the UI's hide button can toggle (hide ↔ unhide).
-func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, limit, offset int) ([]CommentRow, error) {
+func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID, sessionID string, limit, offset int) ([]CommentRow, error) {
 	uid, err := parseUUID(eventID)
 	if err != nil {
 		return nil, err
+	}
+
+	// Filtro de transmissão VAZIO quer dizer "a campanha inteira". Ele precisa
+	// viver no SQL, e não numa filtragem depois: a campanha tem 16 mil falas e a
+	// janela pega as primeiras — filtrar no cliente devolveria as primeiras da
+	// CAMPANHA, que são todas da primeira transmissão, e a segunda nunca
+	// apareceria por mais que se pedisse por ela.
+	var sid pgtype.UUID
+	if sessionID != "" {
+		v, err := parseUUID(sessionID)
+		if err != nil {
+			return nil, err
+		}
+		sid = v
 	}
 
 	// LEFT JOIN, e não INNER: o comentário SEM produto é o que mais importa nesta
@@ -1239,9 +1253,10 @@ func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, li
 		FROM live_comments lc
 		LEFT JOIN products p ON p.id = lc.matched_product_id
 		WHERE lc.event_id = $1 AND lc.deleted_at IS NULL
+		  AND ($4::uuid IS NULL OR lc.session_id = $4)
 		ORDER BY lc.created_at
 		LIMIT $2 OFFSET $3
-	`, uid, limit, offset)
+	`, uid, limit, offset, sid)
 	if err != nil {
 		return nil, fmt.Errorf("listing comments by event: %w", err)
 	}

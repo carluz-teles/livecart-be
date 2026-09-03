@@ -1016,6 +1016,9 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live event UUID"
+// @Param        sessionId query string false "Filter to a single session (empty = whole event)"
+// @Param        limit query int false "Items per page" default(100)
+// @Param        offset query int false "Items to skip" default(0)
 // @Success      200 {object} httpx.Envelope{data=ListCommentsResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id}/comments [get]
@@ -1038,7 +1041,7 @@ func (h *Handler) ListComments(c *fiber.Ctx) error {
 	eventID := c.Params("id")
 
 	comments, err := h.service.ListCommentsByEvent(c.Context(), eventID, storeID,
-		c.QueryInt("limit", 100), c.QueryInt("offset", 0))
+		c.Query("sessionId"), c.QueryInt("limit", 100), c.QueryInt("offset", 0))
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
