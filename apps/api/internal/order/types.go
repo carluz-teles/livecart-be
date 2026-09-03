@@ -463,6 +463,14 @@ type OrderCommentResponse struct {
 	ID        string    `json:"id"`
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"createdAt"`
+	// O desfecho do comentário, cru como o motor da live o apurou. O front
+	// traduz para cor e frase — ver OrderDetail.History.
+	Result string `json:"result"`
+	// Produto que o comentário casou. Vazio = não casou com nenhum, e é o
+	// caso mais informativo dos dois.
+	ProductName    string `json:"productName,omitempty"`
+	ProductKeyword string `json:"productKeyword,omitempty"`
+	Quantity       int    `json:"quantity,omitempty"`
 }
 
 type ListOrdersResponse struct {
@@ -578,9 +586,13 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 	comments := make([]OrderCommentResponse, len(o.Comments))
 	for i, c := range o.Comments {
 		comments[i] = OrderCommentResponse{
-			ID:        c.ID,
-			Text:      c.Text,
-			CreatedAt: c.CreatedAt,
+			ID:             c.ID,
+			Text:           c.Text,
+			Result:         c.Result,
+			ProductName:    c.ProductName,
+			ProductKeyword: c.ProductKeyword,
+			Quantity:       c.Quantity,
+			CreatedAt:      c.CreatedAt,
 		}
 	}
 
@@ -1081,16 +1093,37 @@ type OrderShipmentEventRecord struct {
 	Source      string
 }
 
+// CommentRow é um comentário da live com o DESFECHO que ele teve.
+//
+// O desfecho é o ponto. A linha do tempo mostrava "@fulana comentou: 2074" e
+// parava aí — quem lia não sabia se aquilo virou item, foi para a fila ou não
+// casou com produto nenhum. Os três desfechos são visualmente idênticos quando
+// só o texto aparece, e são a diferença entre uma venda e uma venda perdida.
+//
+// O dado sempre esteve em live_comments (result, matched_product_id,
+// matched_quantity). Só nunca tinha sido carregado.
 type CommentRow struct {
 	ID        string
 	Text      string
 	CreatedAt time.Time
+	// Result é o desfecho apurado pelo motor da live: added_to_cart,
+	// waitlisted, out_of_stock, no_product, blocked, no_intent…
+	Result string
+	// ProductName/Keyword ficam vazios quando o comentário não casou com
+	// produto — que é justamente o caso que o lojista precisa enxergar.
+	ProductName    string
+	ProductKeyword string
+	Quantity       int
 }
 
 type CommentOutput struct {
-	ID        string
-	Text      string
-	CreatedAt time.Time
+	ID             string
+	Text           string
+	CreatedAt      time.Time
+	Result         string
+	ProductName    string
+	ProductKeyword string
+	Quantity       int
 }
 
 // OrderShippingAddressOutput is the parsed shipping_address JSONB projection.

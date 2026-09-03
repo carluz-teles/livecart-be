@@ -19,6 +19,8 @@ type fakeIngestRepo struct {
 	products     map[string]*ProductRow // keyword (upper) → product
 	lookupErr    map[string]error       // keyword (upper) → forced error
 	emitted      []events.Envelope
+	pendentes    []string // "cartID|productID" marcados como pendentes no ERP
+	confirmados  []string // "cartID|productID" que o ERP confirmou
 	dedupSeen    map[string]bool
 	getCallCount int
 
@@ -72,6 +74,18 @@ func (f *fakeIngestRepo) CreateLiveComment(_ context.Context, params CreateLiveC
 	f.createdComments = append(f.createdComments, params)
 	f.commentSeq++
 	return fmt.Sprintf("comment-%d", f.commentSeq), nil
+}
+
+// pendentes/confirmados registram o que o fluxo marcou — é por eles que os
+// testes provam que a linha ficou protegida do reflexo.
+func (f *fakeIngestRepo) MarcarItemPendenteNoERP(_ context.Context, cartID, productID string) error {
+	f.pendentes = append(f.pendentes, cartID+"|"+productID)
+	return nil
+}
+
+func (f *fakeIngestRepo) ConfirmarItemNoERP(_ context.Context, cartID, productID string) error {
+	f.confirmados = append(f.confirmados, cartID+"|"+productID)
+	return nil
 }
 
 func (f *fakeIngestRepo) UpdateLiveCommentResult(_ context.Context, _ string, _ bool, _ string, _ int, result string) error {
