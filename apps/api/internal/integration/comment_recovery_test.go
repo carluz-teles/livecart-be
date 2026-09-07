@@ -4,16 +4,71 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/notification"
+	"livecart/apps/api/lib/database"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 	"livecart/apps/api/db/sqlc"
 )
+
+func TestCommentWork_ProductionPoolPreservesJSON(t *testing.T) {
+	requireDB(t)
+	ctx := t.Context()
+	pool, err := database.NewPool(ctx, testPool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	repo := NewRepository(sqlc.New(pool), pool)
+	id := fmt.Sprintf("production-json-%d", time.Now().UnixNano())
+	wantText := "Eu quero \"1234\" 💜\nsegunda linha"
+	payload, err := json.Marshal(map[string]string{"CommentID": id, "Text": wantText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, done, err := repo.BeginCommentWork(ctx, id, payload)
+	if err != nil || done || owner == "" {
+		t.Fatalf("claim with production connection: owner=%q completed=%v err=%v", owner, done, err)
+	}
+	var stored []byte
+	if err := pool.QueryRow(ctx, `SELECT payload FROM live_comment_work WHERE platform_comment_id=$1`, id).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal(stored, &decoded); err != nil || decoded["CommentID"] != id || decoded["Text"] != wantText {
+		t.Fatalf("comment payload was not preserved: %s err=%v", stored, err)
+	}
+	plan := []byte(`{"items":[{"sku":"1234","quantity":2}]}`)
+	if err := repo.AcceptComment(ctx, id, plan); err != nil {
+		t.Fatalf("accept with production connection: %v", err)
+	}
+	accepted, err := repo.CommentWasAccepted(ctx, id)
+	if err != nil || !accepted {
+		t.Fatalf("accepted plan missing: accepted=%v err=%v", accepted, err)
+	}
+	storedPlan, err := repo.AcceptedCommentPlan(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot struct {
+		Items []struct {
+			SKU      string `json:"sku"`
+			Quantity int    `json:"quantity"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(storedPlan, &snapshot); err != nil || len(snapshot.Items) != 1 || snapshot.Items[0].SKU != "1234" || snapshot.Items[0].Quantity != 2 {
+		t.Fatalf("accepted plan was not preserved: %s err=%v", storedPlan, err)
+	}
+	if err := repo.FinishCommentWork(ctx, id, owner, nil); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCommentWork_RetrySurvivesLeaseAndFailure(t *testing.T) {
 	requireDB(t)
