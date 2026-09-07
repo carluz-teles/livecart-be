@@ -759,13 +759,13 @@ func TestReconciliacaoAposCriacaoNaoGastaEscritaAtoa(t *testing.T) {
 
 // Comentário que chega enquanto a criação está em voo não vira erro. Antes
 // virava ("cart não está em 'open'") e o item ficava só no carrinho.
-func TestComentarioDuranteCriacaoNaoViraErro(t *testing.T) {
+func TestComentarioDuranteCriacaoPermanecePendente(t *testing.T) {
 	svc, repo, _, _ := montar(map[string]int{"ext-p1": 100})
 	repo.criarCarrinho("cart-1", item("p1", 1))
 	_, _ = repo.TransitionCartERPOrderState(context.Background(), "cart-1", OrderStateNone, OrderStateConverting)
 
-	if err := svc.ReserveStockInERP(context.Background(), "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
-		t.Errorf("comentário durante a criação virou erro: %v", err)
+	if err := svc.ReserveStockInERP(context.Background(), "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); !errors.Is(err, ErrOrderBusy) {
+		t.Errorf("criação em voo deve permanecer pendente, resultado: %v", err)
 	}
 }
 

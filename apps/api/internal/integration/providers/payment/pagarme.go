@@ -330,28 +330,36 @@ func (p *Pagarme) CancelTestCharge(ctx context.Context, chargeID string) error {
 	return p.CancelPixPayment(ctx, chargeID)
 }
 
-// CancelPixPayment cancela a cobranca no Pagar.me.
-//
-// `DELETE /charges/{charge_id}` — a documentacao e explicita: "a cobranca pode
-// ser cancelada a qualquer momento, desde que nao tenha sido paga". Pagar.me
-// devolve erro quando ja foi paga, e e o que se quer: preferimos falhar a
-// invalidacao a apagar um pagamento legitimo.
-//
-// O id aqui e o da COBRANCA (`ch_...`), nao o da ordem (`or_...`) que vai em
-// PixPaymentResult.PaymentID.
+// CancelPixPayment only acknowledges a terminal or expired PIX. The charges
+// DELETE endpoint also refunds paid PIX and has no conditional pending-only
+// operation: checking status before DELETE would still race an incoming payment.
 func (p *Pagarme) CancelPixPayment(ctx context.Context, chargeID string) error {
 	if chargeID == "" {
 		return nil
 	}
-	url := fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID)
-	resp, body, err := p.DoRequest(ctx, http.MethodDelete, url, nil, p.authHeaders())
+	resp, body, err := p.DoRequest(ctx, http.MethodGet, fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID), nil, p.authHeaders())
 	if err != nil {
-		return fmt.Errorf("cancelling charge: %w", err)
+		return err
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return fmt.Errorf("cancelling charge: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+		return fmt.Errorf("checking PIX expiry: HTTP %d", resp.StatusCode)
 	}
-	return nil
+	var charge pagarmeCharge
+	if err := json.Unmarshal(body, &charge); err != nil {
+		return err
+	}
+	switch charge.Status {
+	case "canceled", "cancelled", "failed", "refunded":
+		return nil
+	case "pending":
+		if charge.LastTransaction != nil {
+			expires, err := time.Parse(time.RFC3339, charge.LastTransaction.ExpiresAt)
+			if err == nil && !expires.After(time.Now()) {
+				return nil
+			}
+		}
+	}
+	return providers.ErrPixStillPayable
 }
 
 // CreateCheckout creates a hosted-checkout order at Pagar.me. Live commerce
@@ -487,6 +495,23 @@ func (p *Pagarme) getChargeStatus(ctx context.Context, chargeID string) (*Paymen
 	if err := json.Unmarshal(body, &ch); err != nil {
 		return nil, fmt.Errorf("parsing charge response: %w", err)
 	}
+	reference := ch.Code
+	var metadata map[string]any
+	if ch.Order != nil {
+		order := ch.Order
+		// Charge notifications can beat the create response that binds the
+		// payment attempt. Recover the quote identity from its parent order.
+		if order.ID != "" && order.Metadata["livecart_attempt_id"] == nil {
+			order, err = p.getOrder(ctx, order.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if order.Code != "" {
+			reference = order.Code
+		}
+		metadata = order.Metadata
+	}
 
 	status := mapPagarmeStatus(ch.Status)
 	var paidAt *time.Time
@@ -516,13 +541,14 @@ func (p *Pagarme) getChargeStatus(ctx context.Context, chargeID string) (*Paymen
 		Amount:            int64(ch.Amount),
 		PaidAt:            paidAt,
 		FailureReason:     statusDetail,
-		ExternalReference: ch.Code,
+		ExternalReference: reference,
+		Metadata:          metadata,
 		PaymentMethod:     mapPagarmePaymentMethod(ch.PaymentMethod),
 		Installments:      installments,
 	}, nil
 }
 
-func (p *Pagarme) getOrderStatus(ctx context.Context, orderID string) (*PaymentStatus, error) {
+func (p *Pagarme) getOrder(ctx context.Context, orderID string) (*pagarmeOrderResponse, error) {
 	url := fmt.Sprintf("%s/orders/%s", pagarmeAPIBaseURL, orderID)
 
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
@@ -540,8 +566,22 @@ func (p *Pagarme) getOrderStatus(ctx context.Context, orderID string) (*PaymentS
 	if err := json.Unmarshal(body, &pgOrder); err != nil {
 		return nil, fmt.Errorf("parsing order response: %w", err)
 	}
+	return &pgOrder, nil
+}
 
-	status := mapPagarmeStatus(pgOrder.Status)
+func (p *Pagarme) getOrderStatus(ctx context.Context, orderID string) (*PaymentStatus, error) {
+	pgOrder, err := p.getOrder(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+
+	// LiveCart creates one charge per checkout attempt. Use the charge identity
+	// for both order.* and charge.* notifications so one payment is booked once.
+	if len(pgOrder.Charges) != 1 || pgOrder.Charges[0].ID == "" {
+		return nil, fmt.Errorf("order %s: expected one identifiable charge, got %d", orderID, len(pgOrder.Charges))
+	}
+	charge := pgOrder.Charges[0]
+	status := mapPagarmeStatus(charge.Status)
 
 	var (
 		paidAt        *time.Time
@@ -581,9 +621,9 @@ func (p *Pagarme) getOrderStatus(ctx context.Context, orderID string) (*PaymentS
 	)
 
 	return &PaymentStatus{
-		PaymentID:         pgOrder.ID,
+		PaymentID:         charge.ID,
 		Status:            status,
-		Amount:            int64(pgOrder.Amount),
+		Amount:            int64(charge.Amount),
 		PaidAt:            paidAt,
 		FailureReason:     statusDetail,
 		ExternalReference: pgOrder.Code,
@@ -1052,6 +1092,7 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	)
 	if len(pgResp.Charges) > 0 {
 		charge := pgResp.Charges[0]
+		result.PaymentID = charge.ID
 		if charge.LastTransaction != nil {
 			lt := charge.LastTransaction
 			statusDetail = lt.Status
@@ -1375,7 +1416,7 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 	}
 
 	return &PixPaymentResult{
-		PaymentID:         pgResp.ID,
+		PaymentID:         chargeID,
 		CancelID:          chargeID,
 		Status:            PaymentPending,
 		QRCode:            qrCode,
@@ -1600,6 +1641,7 @@ type pagarmeCheckout struct {
 }
 
 type pagarmeCharge struct {
+	Order           *pagarmeOrderResponse   `json:"order"`
 	ID              string                  `json:"id"`
 	Code            string                  `json:"code"`
 	Amount          int                     `json:"amount"`

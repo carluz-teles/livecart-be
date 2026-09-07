@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"github.com/jackc/pgx/v5/pgxpool"
 	"sync"
 
 	"go.uber.org/zap"
@@ -9,6 +10,8 @@ import (
 // Manager creates and caches AdaptiveLimiter instances keyed by integration ID.
 // Each integration gets its own limiter that auto-calibrates via API headers.
 type Manager struct {
+	pool     *pgxpool.Pool
+	tiny     map[string]*Tiny
 	mu       sync.RWMutex
 	limiters map[string]*AdaptiveLimiter
 	fixos    map[string]*Fixo
@@ -19,6 +22,7 @@ type Manager struct {
 func NewManager(logger *zap.Logger) *Manager {
 	return &Manager{
 		limiters: make(map[string]*AdaptiveLimiter),
+		tiny:     make(map[string]*Tiny),
 		fixos:    make(map[string]*Fixo),
 		logger:   logger.Named("ratelimit"),
 	}

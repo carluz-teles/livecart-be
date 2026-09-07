@@ -18,6 +18,7 @@ package checkout
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -76,7 +77,7 @@ func TestCobrancaPixSaiUmaVezSo(t *testing.T) {
 	}
 
 	id, _, err = testRepo.TakeCartPixCharge(ctx, cartID)
-	if err != nil {
+	if !errors.Is(err, ErrPixCancellationBusy) {
 		t.Fatalf("segunda leitura: %v", err)
 	}
 	if id != "" {
@@ -126,7 +127,7 @@ func TestSomenteUmaMutacaoLevaACobranca(t *testing.T) {
 			defer wg.Done()
 			<-largada
 			id, _, err := testRepo.TakeCartPixCharge(ctx, cartID)
-			if err != nil {
+			if err != nil && !errors.Is(err, ErrPixCancellationBusy) {
 				t.Errorf("leitura concorrente: %v", err)
 				return
 			}
@@ -167,5 +168,31 @@ func TestGerarDeNovoSubstituiACobranca(t *testing.T) {
 		t.Errorf("veio (%q, %d), quero (ch_SEGUNDA, 2500) — guardar a antiga faria o "+
 			"cancelamento mirar a cobrança errada e deixar viva a que está na tela",
 			id, amount)
+	}
+}
+
+func TestPixFailureKeepsReferenceForRetry(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	cartID := seedCartForPix(t)
+	if err := testRepo.SetCartPixCharge(ctx, cartID, "ch_retry", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := testRepo.TakeCartPixCharge(ctx, cartID); err != nil {
+		t.Fatal(err)
+	}
+	if err := testRepo.ReleasePixCancellationLease(ctx, cartID, "ch_retry"); err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := testRepo.TakeCartPixCharge(ctx, cartID)
+	if err != nil || id != "ch_retry" {
+		t.Fatalf("lost retry reference: %q %v", id, err)
+	}
+	if err := testRepo.ClearCancelledPixCharge(ctx, cartID, "ch_retry"); err != nil {
+		t.Fatal(err)
+	}
+	id, _, err = testRepo.TakeCartPixCharge(ctx, cartID)
+	if err != nil || id != "" {
+		t.Fatalf("confirmed cancellation retained reference: %q %v", id, err)
 	}
 }

@@ -10,6 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ApiRateBudget struct {
+	AccountKey   string             `json:"account_key"`
+	NextAt       pgtype.Timestamptz `json:"next_at"`
+	IntervalMs   int64              `json:"interval_ms"`
+	BlockedUntil pgtype.Timestamptz `json:"blocked_until"`
+}
+
 type BillingLedgerEntry struct {
 	ID          pgtype.UUID        `json:"id"`
 	StoreID     pgtype.UUID        `json:"store_id"`
@@ -124,11 +131,15 @@ type Cart struct {
 	// Por que o cancelamento foi desfeito: payment_won (pagamento venceu a corrida) ou erp_reopened (lojista reabriu o pedido no ERP à mão)
 	CancellationRevertedReason pgtype.Text `json:"cancellation_reverted_reason"`
 	// Carrinho ANFITRIÃO desta junção — é dele o pedido no ERP. NULO = carrinho independente ou anfitrião.
-	JoinedToCartID   pgtype.UUID        `json:"joined_to_cart_id"`
-	JoinedAt         pgtype.Timestamptz `json:"joined_at"`
-	ErpOrderStatus   pgtype.Text        `json:"erp_order_status"`
-	ErpOrderStatusAt pgtype.Timestamptz `json:"erp_order_status_at"`
-	ErpOrderNumber   pgtype.Text        `json:"erp_order_number"`
+	JoinedToCartID        pgtype.UUID        `json:"joined_to_cart_id"`
+	JoinedAt              pgtype.Timestamptz `json:"joined_at"`
+	ErpOrderStatus        pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt      pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber        pgtype.Text        `json:"erp_order_number"`
+	ErpOpRestingState     pgtype.Text        `json:"erp_op_resting_state"`
+	ErpItemsRetryAt       pgtype.Timestamptz `json:"erp_items_retry_at"`
+	PaymentReviewRequired bool               `json:"payment_review_required"`
+	PixCancelLeaseUntil   pgtype.Timestamptz `json:"pix_cancel_lease_until"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -149,7 +160,8 @@ type CartItem struct {
 	SessionID          pgtype.UUID `json:"session_id"`
 	PaidQuantity       int32       `json:"paid_quantity"`
 	// Quando a escrita desta linha no ERP falhou. NULL = o ERP conhece a linha (ou nunca precisou conhecer). Não-NULL = a linha existe só aqui, e o reflexo NÃO pode apagá-la — ela precisa ser reenviada.
-	ErpPendingSince pgtype.Timestamptz `json:"erp_pending_since"`
+	ErpPendingSince      pgtype.Timestamptz `json:"erp_pending_since"`
+	ErpConfirmedQuantity pgtype.Int4        `json:"erp_confirmed_quantity"`
 }
 
 // RN-12: uma linha por ADIÇÃO ao carrinho, com a sessão de origem. cart_items diz o que TEM no carrinho; esta tabela diz de onde veio cada unidade. Sem ela, cart_items.session_id é first-touch e credita tudo à primeira transmissão.
@@ -159,9 +171,12 @@ type CartItemEvent struct {
 	ProductID pgtype.UUID `json:"product_id"`
 	SessionID pgtype.UUID `json:"session_id"`
 	// Quantidade ADICIONADA nesta operação (sempre > 0). Remoções não geram linha — a quantidade final vem de cart_items e o selamento aloca sobre o log, tirando das adições mais recentes primeiro.
-	Quantity  int32              `json:"quantity"`
-	UnitPrice int64              `json:"unit_price"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Quantity           int32              `json:"quantity"`
+	UnitPrice          int64              `json:"unit_price"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	PlatformCommentID  pgtype.Text        `json:"platform_comment_id"`
+	WaitlistedQuantity int32              `json:"waitlisted_quantity"`
+	IsNewCart          bool               `json:"is_new_cart"`
 }
 
 // Append-only log of cart item mutations during checkout (buyer or merchant driven).
@@ -425,6 +440,20 @@ type LiveComment struct {
 	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
 }
 
+type LiveCommentWork struct {
+	PlatformCommentID string             `json:"platform_comment_id"`
+	Payload           json.RawMessage    `json:"payload"`
+	LeaseOwner        pgtype.UUID        `json:"lease_owner"`
+	LeaseUntil        pgtype.Timestamptz `json:"lease_until"`
+	AcceptedAt        pgtype.Timestamptz `json:"accepted_at"`
+	AcceptedPlan      json.RawMessage    `json:"accepted_plan"`
+	Attempts          int32              `json:"attempts"`
+	NextAttemptAt     pgtype.Timestamptz `json:"next_attempt_at"`
+	LastError         pgtype.Text        `json:"last_error"`
+	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
 // Container for live sessions. Carts are tied to events, not sessions.
 type LiveEvent struct {
 	ID      pgtype.UUID `json:"id"`
@@ -552,6 +581,7 @@ type NotificationLog struct {
 	ProviderMessageID pgtype.Text        `json:"provider_message_id"`
 	// RN-38: motivo canonico da nao entrega (comment_window_expired, no_eligible_comment, instagram_rejected). Preenchido quando status = undelivered. O texto exibido ao lojista sai de notification.UndeliverableReasonText — a coluna guarda o codigo, nunca a frase.
 	UndeliveredReason pgtype.Text `json:"undelivered_reason"`
+	PlatformCommentID pgtype.Text `json:"platform_comment_id"`
 }
 
 // Temporary storage for OAuth PKCE code_verifier during authorization flow
@@ -646,6 +676,20 @@ type OrderPayment struct {
 	InvoiceStatus         pgtype.Text        `json:"invoice_status"`
 	InvoiceEmittedAt      pgtype.Timestamptz `json:"invoice_emitted_at"`
 	ErpPaymentSnapshot    json.RawMessage    `json:"erp_payment_snapshot"`
+}
+
+type PaymentAttempt struct {
+	ID              pgtype.UUID        `json:"id"`
+	CartID          pgtype.UUID        `json:"cart_id"`
+	IntegrationID   pgtype.UUID        `json:"integration_id"`
+	Provider        string             `json:"provider"`
+	AmountCents     int64              `json:"amount_cents"`
+	CartFingerprint string             `json:"cart_fingerprint"`
+	PaymentID       pgtype.Text        `json:"payment_id"`
+	CancelID        pgtype.Text        `json:"cancel_id"`
+	Status          string             `json:"status"`
+	ReviewReason    pgtype.Text        `json:"review_reason"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
 type Product struct {

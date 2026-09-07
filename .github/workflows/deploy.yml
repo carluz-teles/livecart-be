@@ -19,7 +19,10 @@ env:
   CONTAINER_NAME: backend
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
   deploy:
+    needs: test
     name: Build and Deploy
     runs-on: ubuntu-latest
 

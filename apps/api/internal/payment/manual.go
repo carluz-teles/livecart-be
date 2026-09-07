@@ -101,42 +101,6 @@ func (s *Service) ConfirmManualPayment(ctx context.Context, cartID, storeID stri
 	agora := time.Now()
 	paymentID := manualPaymentID(cartID)
 
-	// Confirmação MANUAL: o lojista está dizendo que recebeu o valor do pedido.
-	// Não há gateway a consultar, então o valor pago é o preço cheio — se ele
-	// deu desconto por fora, quem sabe é ele, e inventar um desconto aqui faria
-	// o pedido no ERP declarar um abatimento que ninguém concedeu.
-	liveEventID, err := s.gateway.UpdateCartPaymentStatus(
-		ctx, cartID, "paid", paymentID, &agora, manualPaymentMethod, gmvCents)
-	if err != nil {
-		if !errors.Is(err, ErrCartNotPayable) {
-			return fmt.Errorf("updating cart payment status: %w", err)
-		}
-		// Mesma inversão do webhook: o carrinho foi cancelado pela loja e o
-		// dinheiro entrou assim mesmo. O dinheiro manda — restaura e segue o
-		// fluxo normal, com o estoque retomado na mesma transação.
-		restaurado, restoredEventID, restoreErr := s.gateway.RestoreCancelledCartAsPaid(
-			ctx, cartID, storeID, "paid", paymentID, &agora, manualPaymentMethod)
-		if restoreErr != nil {
-			return fmt.Errorf("restoring cancelled cart as paid: %w", restoreErr)
-		}
-		if !restaurado {
-			// Expirado, ou cancelado de um jeito que a restauração não cobre. Não
-			// marcamos pago às escondidas: o prazo precisa voltar antes, e quem
-			// decide isso é o lojista (regerar o link reabre o carrinho).
-			return httpx.DomainError(409, httpx.CodeCartExpired,
-				"este pedido expirou — regere o link do checkout antes de confirmar o pagamento")
-		}
-		liveEventID = restoredEventID
-		log.Warn("manual payment on a store-cancelled cart — cancellation reverted",
-			zap.String("cart_id", cartID))
-	}
-
-	log.Info("manual payment confirmed",
-		zap.String("cart_id", cartID),
-		zap.String("store_id", storeID),
-		zap.Int64("gmv_cents", gmvCents),
-	)
-
 	// O MESMO fato do pagamento normal. PaymentSnapshot nil de propósito: é ele
 	// que vira contas a receber no Tiny, e o lojista lança isso lá com os dados
 	// da forma como recebeu.
@@ -148,13 +112,49 @@ func (s *Service) ConfirmManualPayment(ctx context.Context, cartID, storeID stri
 		GMVCents  int64  `json:"gmv_cents,omitempty"`
 	}{cartID, storeID, paymentID, manualPaymentMethod, gmvCents})
 
-	return s.gateway.EmitEvent(ctx, events.Envelope{
-		Name:        events.CartPaid,
-		Source:      events.SourceInternal,
-		DedupKey:    string(events.CartPaid) + ":" + paymentID,
-		LiveEventID: liveEventID,
-		Payload:     payload,
-	})
+	fact := events.Envelope{
+		Name:     events.CartPaid,
+		Source:   events.SourceInternal,
+		DedupKey: string(events.CartPaid) + ":" + paymentID,
+		Payload:  payload,
+	}
+
+	// Confirmação MANUAL: o lojista está dizendo que recebeu o valor do pedido.
+	// Não há gateway a consultar, então o valor pago é o preço cheio — se ele
+	// deu desconto por fora, quem sabe é ele, e inventar um desconto aqui faria
+	// o pedido no ERP declarar um abatimento que ninguém concedeu.
+	_, err = s.gateway.UpdateCartPaymentStatus(
+		ctx, cartID, "paid", paymentID, &agora, manualPaymentMethod, gmvCents, fact)
+	if err != nil {
+		if !errors.Is(err, ErrCartNotPayable) {
+			return fmt.Errorf("updating cart payment status: %w", err)
+		}
+		// Mesma inversão do webhook: o carrinho foi cancelado pela loja e o
+		// dinheiro entrou assim mesmo. O dinheiro manda — restaura e segue o
+		// fluxo normal, com o estoque retomado na mesma transação.
+		restaurado, _, restoreErr := s.gateway.RestoreCancelledCartAsPaid(
+			ctx, cartID, storeID, "paid", paymentID, &agora, manualPaymentMethod, gmvCents, fact)
+		if restoreErr != nil {
+			return fmt.Errorf("restoring cancelled cart as paid: %w", restoreErr)
+		}
+		if !restaurado {
+			// Expirado, ou cancelado de um jeito que a restauração não cobre. Não
+			// marcamos pago às escondidas: o prazo precisa voltar antes, e quem
+			// decide isso é o lojista (regerar o link reabre o carrinho).
+			return httpx.DomainError(409, httpx.CodeCartExpired,
+				"este pedido expirou — regere o link do checkout antes de confirmar o pagamento")
+		}
+		log.Warn("manual payment on a store-cancelled cart — cancellation reverted",
+			zap.String("cart_id", cartID))
+	}
+
+	log.Info("manual payment confirmed",
+		zap.String("cart_id", cartID),
+		zap.String("store_id", storeID),
+		zap.Int64("gmv_cents", gmvCents),
+	)
+
+	return nil
 }
 
 // ConfirmManualRefund é o "Marcar como reembolsado" do painel.

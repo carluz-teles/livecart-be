@@ -24,6 +24,9 @@ import (
 // agora vive neste pacote. O integration.Repository.UpdateCartPaymentStatus
 // retorna este mesmo valor (referenciando payment.ErrCartNotPayable) — fonte
 // única, sem tradução entre pacotes.
+var ErrStalePayment = errors.New("payment does not belong to the current paid balance")
+var ErrPaymentReviewRequired = fmt.Errorf("payment requires quote review: %w", ErrStalePayment)
+
 var ErrCartNotPayable = errors.New("cart not payable (expired or cancelled)")
 
 // ProcessPaymentInput is the payment webhook consumer input. It mirrors
@@ -64,7 +67,7 @@ type CartPaymentGateway interface {
 	// webhook — the guard that serializes this consumer against ExpireCart. On
 	// success it also returns the cart's live_event_id (from the same RETURNING
 	// row, no extra query) so the caller can tag the emitted cart payment fact.
-	UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (liveEventID string, err error)
+	UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64, facts ...events.Envelope) (liveEventID string, err error)
 
 	// RestoreCancelledCartAsPaid handles the inverse race (LIV-84): a MANUAL
 	// store cancellation that a payment then won. When UpdateCartPaymentStatus
@@ -73,7 +76,7 @@ type CartPaymentGateway interface {
 	// fan-out runs — o dinheiro manda. Returns restored=false when the cart is
 	// not a store-cancelled cart pending payment (the caller then does the benign
 	// ErrCartNotPayable skip). Also returns the cart's live_event_id on restore.
-	RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (restored bool, liveEventID string, err error)
+	RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64, facts ...events.Envelope) (restored bool, liveEventID string, err error)
 
 	// MarkCartRefunded aplica a escrita guardada do estorno MANUAL: só um
 	// carrinho PAGO vira 'refunded', e o guard vive na query para duas abas
@@ -240,13 +243,59 @@ func (s *Service) AplicarStatusDePagamento(
 		cartPaymentStatus = "pending"
 	}
 
+	var facts []events.Envelope
+	if name, ok := cartPaymentFact[cartPaymentStatus]; ok {
+		// The paid fact carries the FRESH gateway snapshot (installments, fees,
+		// money-release date); OnCartPaid freezes it into the order.paid payload so
+		// record the payment in Tiny without re-fetching — the same data the
+		// resumable state machine persists to carts.erp_payment_snapshot for retry.
+		var snap *providers.PaymentStatus
+		if cartPaymentStatus == "paid" {
+			snap = status
+		}
+		// gmv_cents = soma pura de itens (exclui frete e cupom) — fonte única de
+		// verdade via CartGMVCents. Falha → emite com 0 (receptor usa fallback).
+		var gmvCents int64
+		if cartPaymentStatus == "paid" {
+			if v, err := s.gateway.CartGMVCents(ctx, status.ExternalReference); err == nil {
+				gmvCents = v
+			} else {
+				logger.From(ctx, s.logger).Warn("cart.paid: CartGMVCents failed, emitting gmv_cents=0",
+					zap.String("cart_id", status.ExternalReference), zap.Error(err))
+			}
+		}
+		payload, _ := json.Marshal(struct {
+			CartID          string                   `json:"cart_id"`
+			StoreID         string                   `json:"store_id"`
+			PaymentID       string                   `json:"payment_id"`
+			Method          string                   `json:"payment_method"`
+			GMVCents        int64                    `json:"gmv_cents,omitempty"`
+			PaymentSnapshot *providers.PaymentStatus `json:"payment_snapshot,omitempty"`
+		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod, gmvCents, snap})
+		facts = append(facts, events.Envelope{
+			Name:     name,
+			Source:   events.Source(input.Provider),
+			DedupKey: string(name) + ":" + status.PaymentID,
+			Payload:  payload,
+		})
+	}
+
 	// Update cart payment status and payment method. liveEventID travels to the
 	// cart payment fact emitted below (from the RETURNING row, no extra query).
 	// status.Amount é o que o gateway cobrou de fato — já com cupom e desconto
 	// de PIX descontados. É esse número que o pedido no ERP tem de declarar
 	// como pago; o preço cheio das unidades ele já sabe sozinho.
-	liveEventID, err := s.gateway.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod, status.Amount)
+	liveEventID, err := s.gateway.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod, status.Amount, facts...)
 	if err != nil {
+		if errors.Is(err, ErrPaymentReviewRequired) {
+			s.logger.Warn("payment requires quote review", zap.String("cart_id", status.ExternalReference),
+				zap.String("store_id", input.StoreID), zap.String("payment_id", status.PaymentID))
+			return nil
+		}
+		if errors.Is(err, ErrStalePayment) {
+			s.logger.Info("payment already recorded or obsolete", zap.String("cart_id", status.ExternalReference), zap.String("payment_id", status.PaymentID))
+			return nil
+		}
 		if errors.Is(err, ErrCartNotPayable) {
 			// Corrida cancelamento × pagamento, lado inverso (LIV-84): o lojista
 			// cancelou o carrinho e o pagamento foi aprovado assim mesmo (PIX pago
@@ -258,7 +307,7 @@ func (s *Service) AplicarStatusDePagamento(
 			if cartPaymentStatus == "paid" {
 				var restoreErr error
 				restored, liveEventID, restoreErr = s.gateway.RestoreCancelledCartAsPaid(ctx,
-					status.ExternalReference, input.StoreID, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
+					status.ExternalReference, input.StoreID, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod, status.Amount, facts...)
 				if restoreErr != nil {
 					logger.From(ctx, s.logger).Error("failed to restore store-cancelled cart as paid",
 						zap.String("cart_id", status.ExternalReference), zap.Error(restoreErr))
@@ -298,50 +347,8 @@ func (s *Service) AplicarStatusDePagamento(
 		zap.String("cart_id", status.ExternalReference),
 		zap.String("payment_status", cartPaymentStatus),
 		zap.String("payment_method", status.PaymentMethod),
+		zap.String("event_id", liveEventID),
 	)
-
-	// Emit the canonical CART payment fact (specific-fact strategy — L3). It only
-	// fires when the guarded UpdateCartPaymentStatus actually held. The fan-out
-	// (coupon, order/GMV/email/waitlist, billing) now lives in REACTORS that
-	// consume cart.paid / cart.refunded (registered in main.newApp) — decoupled
-	// and retriable — instead of the inline cascade this method used to run.
-	// dedup by payment_id so the provider's at-least-once burst collapses.
-	if name, ok := cartPaymentFact[cartPaymentStatus]; ok {
-		// The paid fact carries the FRESH gateway snapshot (installments, fees,
-		// money-release date); OnCartPaid freezes it into the order.paid payload so
-		// record the payment in Tiny without re-fetching — the same data the
-		// resumable state machine persists to carts.erp_payment_snapshot for retry.
-		var snap *providers.PaymentStatus
-		if cartPaymentStatus == "paid" {
-			snap = status
-		}
-		// gmv_cents = soma pura de itens (exclui frete e cupom) — fonte única de
-		// verdade via CartGMVCents. Falha → emite com 0 (receptor usa fallback).
-		var gmvCents int64
-		if cartPaymentStatus == "paid" {
-			if v, err := s.gateway.CartGMVCents(ctx, status.ExternalReference); err == nil {
-				gmvCents = v
-			} else {
-				logger.From(ctx, s.logger).Warn("cart.paid: CartGMVCents failed, emitting gmv_cents=0",
-					zap.String("cart_id", status.ExternalReference), zap.Error(err))
-			}
-		}
-		payload, _ := json.Marshal(struct {
-			CartID          string                   `json:"cart_id"`
-			StoreID         string                   `json:"store_id"`
-			PaymentID       string                   `json:"payment_id"`
-			Method          string                   `json:"payment_method"`
-			GMVCents        int64                    `json:"gmv_cents,omitempty"`
-			PaymentSnapshot *providers.PaymentStatus `json:"payment_snapshot,omitempty"`
-		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod, gmvCents, snap})
-		_ = s.gateway.EmitEvent(ctx, events.Envelope{
-			Name:        name,
-			Source:      events.Source(input.Provider),
-			DedupKey:    string(name) + ":" + status.PaymentID,
-			LiveEventID: liveEventID,
-			Payload:     payload,
-		})
-	}
 
 	// cart.cancelled has a SECOND producer (blocked-handle cancel) with a
 	// different intent, so its reactor can't be shared safely — keep the

@@ -1477,3 +1477,16 @@ const (
 	TrackingStatusReturned                 TrackingStatus = "returned"
 	TrackingStatusCanceled                 TrackingStatus = "canceled"
 )
+
+// ErrPixStillPayable prevents automatic cancellation from issuing a refund.
+var ErrPixStillPayable = errors.New("o PIX anterior ainda pode ser pago; aguarde sua expiração antes de gerar outro")
+
+// DeliveryError preserves HTTP retry classification through notification ports.
+type DeliveryError struct {
+	Err       error
+	Retryable bool
+}
+
+func (e *DeliveryError) Error() string   { return e.Err.Error() }
+func (e *DeliveryError) Unwrap() error   { return e.Err }
+func (e *DeliveryError) Temporary() bool { return e.Retryable }

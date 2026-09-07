@@ -24,6 +24,7 @@ package erp
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -70,7 +71,7 @@ type CartSyncReport struct {
 
 // SyncCartFromERPOrder traz para o carrinho o que o pedido diz hoje.
 //
-// Roda sob o mesmo CAS open→mutating das escritas: se uma mutação nossa está em
+// Roda sob o CAS exclusivo open/confirmed→reflecting das escritas: se uma mutação nossa está em
 // voo, o reflexo desiste — ela vai reenviar a grade do banco e o pedido resultante
 // é o que o próximo reflexo vai ler. Sem isso os dois se atropelariam, cada um
 // desfazendo o outro.
@@ -99,7 +100,7 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 		return rel, nil
 	}
 
-	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, casa, OrderStateMutating)
+	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, casa, OrderStateReflecting)
 	if err != nil {
 		return nil, fmt.Errorf("claiming cart for reflection: %w", err)
 	}
@@ -110,8 +111,9 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 		return rel, nil
 	}
 	defer func() {
-		fim := context.WithoutCancel(ctx)
-		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateMutating, casa); backErr != nil {
+		fim, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateReflecting, casa); backErr != nil {
 			logger.From(fim, s.logger).Error("failed to return cart to its resting state after reflection",
 				zap.String("cart_id", cartID),
 				zap.String("resting_state", string(casa)),
@@ -145,7 +147,7 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 		vistos[linha.ProductID] = true
 		atual, existe := noCarrinho[linha.ProductID]
 
-		if existe && atual.Quantity == linha.Quantity {
+		if existe && atual.Quantity == linha.Quantity && atual.UnitPrice == linha.UnitPrice {
 			continue
 		}
 

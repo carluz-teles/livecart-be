@@ -1,3 +1,5 @@
+//go:build integration
+
 package events
 
 import (
@@ -19,9 +21,9 @@ import (
 // Redis is reachable (e.g. plain `go test ./...` without infra).
 func redisAddr(t *testing.T) string {
 	t.Helper()
-	addr := os.Getenv("REDIS_ADDR")
+	addr := os.Getenv("TEST_REDIS_ADDR")
 	if addr == "" {
-		addr = "localhost:6379"
+		t.Skip("TEST_REDIS_ADDR not set: isolated Redis is required")
 	}
 	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
 	if err != nil {
@@ -37,11 +39,11 @@ func redisAddr(t *testing.T) string {
 func TestPipeline_EnqueueConsume(t *testing.T) {
 	addr := redisAddr(t)
 
-	client := NewClient(asynq.RedisClientOpt{Addr: addr}, zap.NewNop())
+	client := NewClient(asynq.RedisClientOpt{Addr: addr, DB: 15}, zap.NewNop())
 	defer client.Close()
 
 	got := make(chan Envelope, 1)
-	srv := asynq.NewServer(asynq.RedisClientOpt{Addr: addr}, asynq.Config{
+	srv := asynq.NewServer(asynq.RedisClientOpt{Addr: addr, DB: 15}, asynq.Config{
 		Concurrency: 1,
 		Queues:      map[string]int{QueueNormal: 1},
 	})
@@ -91,11 +93,11 @@ func TestPipeline_TracePropagation(t *testing.T) {
 	// A real SDK provider generates valid trace/span ids (no exporter needed).
 	otel.SetTracerProvider(sdktrace.NewTracerProvider())
 
-	client := NewClient(asynq.RedisClientOpt{Addr: addr}, zap.NewNop())
+	client := NewClient(asynq.RedisClientOpt{Addr: addr, DB: 15}, zap.NewNop())
 	defer client.Close()
 
 	got := make(chan Envelope, 1)
-	srv := asynq.NewServer(asynq.RedisClientOpt{Addr: addr}, asynq.Config{
+	srv := asynq.NewServer(asynq.RedisClientOpt{Addr: addr, DB: 15}, asynq.Config{
 		Concurrency: 1,
 		Queues:      map[string]int{QueueNormal: 1},
 	})

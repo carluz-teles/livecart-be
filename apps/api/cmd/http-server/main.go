@@ -478,6 +478,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		} else {
 			// Create rate limit manager for integration providers
 			rateLimitManager := ratelimit.NewManager(log)
+			rateLimitManager.SetSharedPool(pool)
 
 			// Create provider factory with constructors
 			providerFactory := providers.NewFactory(providers.FactoryConfig{
@@ -1047,6 +1048,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	couponLifecycle := coupon.NewRedemptionSyncer(couponSvc)
 	if checkoutSvc != nil {
 		checkoutSvc.SetCouponLifecycle(couponLifecycle)
+		couponSvc.SetPaymentInvalidator(checkoutSvc)
 	}
 	// Coupon reactor: confirms the redemption on cart.paid (reserved → confirmed)
 	// and refunds it on cart.refunded (→ refunded, slot back to circulation),
@@ -1705,6 +1707,31 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	}
 	eventsRelay.Start()
 	// Reverse stop order: relay (producer) -> server (consumer) -> client close.
+	startRecovery := func(name string, recoverBatch func(context.Context)) {
+		recoveryCtx, stop := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-recoveryCtx.Done():
+					return
+				case <-ticker.C:
+					batchCtx, cancel := context.WithTimeout(recoveryCtx, 2*time.Minute)
+					recoverBatch(batchCtx)
+					cancel()
+				}
+			}
+		}()
+		lifecycle.add(name, func() { stop(); <-done })
+	}
+	startRecovery("comment-recovery", liveSvc.RecoverPendingComments)
+	if integrationSvc != nil {
+		startRecovery("erp-item-recovery", integrationSvc.RecoverPendingERPItems)
+	}
+
 	lifecycle.add("events-client", func() { _ = eventsClient.Close() })
 	lifecycle.add("events-server", eventsServer.Stop)
 	lifecycle.add("events-relay", eventsRelay.Stop)

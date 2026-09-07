@@ -1,0 +1,34 @@
+name: Backend tests
+on:
+  pull_request:
+  push:
+    branches: [main, stg]
+  workflow_call:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: livecart
+          POSTGRES_PASSWORD: livecart
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U livecart -d postgres'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+    env:
+      TEST_DATABASE_URL: postgres://livecart:livecart@localhost:5432/postgres?sslmode=disable
+      TEST_REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -tags=integration -p=2 -count=1 -timeout=5m ./apps/api/...
+      - run: go build ./apps/api/...

@@ -236,6 +236,13 @@ func (r *Repository) TakeCartPixCharge(ctx context.Context, cartID string) (stri
 	row, err := r.q.TakeCartPixCharge(ctx, pgtype.UUID{Bytes: uid, Valid: true})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			has, err := r.q.HasPendingPixCharge(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+			if err != nil {
+				return "", 0, err
+			}
+			if has {
+				return "", 0, ErrPixCancellationBusy
+			}
 			return "", 0, nil
 		}
 		return "", 0, err
@@ -450,21 +457,22 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 	}
 
 	cart := &CartRow{
-		ID:                  uuid.UUID(row.ID.Bytes).String(),
-		EventID:             uuid.UUID(row.EventID.Bytes).String(),
-		PlatformUserID:      row.PlatformUserID,
-		PlatformHandle:      row.PlatformHandle,
-		Token:               row.Token,
-		Status:              row.Status,
-		PaymentStatus:       "pending",
-		CreatedAt:           row.CreatedAt.Time,
-		EventTitle:          eventTitle,
-		StoreID:             uuid.UUID(row.StoreID.Bytes).String(),
-		StoreName:           row.StoreName,
-		StoreSlug:           row.StoreSlug,
-		AllowEdit:           row.AllowEdit,
-		MaxQuantityPerItem:  int(row.MaxQuantityPerItem),
-		MinInstallmentCents: int(row.MinInstallmentCents),
+		PaymentReviewRequired: row.PaymentReviewRequired,
+		ID:                    uuid.UUID(row.ID.Bytes).String(),
+		EventID:               uuid.UUID(row.EventID.Bytes).String(),
+		PlatformUserID:        row.PlatformUserID,
+		PlatformHandle:        row.PlatformHandle,
+		Token:                 row.Token,
+		Status:                row.Status,
+		PaymentStatus:         "pending",
+		CreatedAt:             row.CreatedAt.Time,
+		EventTitle:            eventTitle,
+		StoreID:               uuid.UUID(row.StoreID.Bytes).String(),
+		StoreName:             row.StoreName,
+		StoreSlug:             row.StoreSlug,
+		AllowEdit:             row.AllowEdit,
+		MaxQuantityPerItem:    int(row.MaxQuantityPerItem),
+		MinInstallmentCents:   int(row.MinInstallmentCents),
 	}
 
 	if row.CheckoutUrl.Valid {
@@ -850,4 +858,22 @@ func GetExpiresAtMinutes(minutes int) *time.Time {
 	}
 	t := time.Now().Add(time.Duration(minutes) * time.Minute)
 	return &t
+}
+
+func (r *Repository) ClearCancelledPixCharge(ctx context.Context, cartID, cancelID string) error {
+	id, err := uuid.Parse(cartID)
+	if err != nil {
+		return err
+	}
+	return r.q.ClearCancelledPixCharge(ctx, sqlc.ClearCancelledPixChargeParams{ID: pgtype.UUID{Bytes: id, Valid: true}, PixChargeID: pgtype.Text{String: cancelID, Valid: true}})
+}
+
+var ErrPixCancellationBusy = errors.New("another PIX check is in progress")
+
+func (r *Repository) ReleasePixCancellationLease(ctx context.Context, cartID, cancelID string) error {
+	id, err := uuid.Parse(cartID)
+	if err != nil {
+		return err
+	}
+	return r.q.ReleasePixCancellationLease(ctx, sqlc.ReleasePixCancellationLeaseParams{ID: pgtype.UUID{Bytes: id, Valid: true}, PixChargeID: pgtype.Text{String: cancelID, Valid: true}})
 }

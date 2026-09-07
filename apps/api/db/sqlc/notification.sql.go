@@ -85,22 +85,23 @@ const createNotificationLog = `-- name: CreateNotificationLog :one
 
 INSERT INTO notification_logs (
     store_id, event_id, cart_id, platform_user_id, platform_handle,
-    notification_type, channel, status, message_text
+    notification_type, channel, status, message_text,platform_comment_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason, platform_comment_id
 `
 
 type CreateNotificationLogParams struct {
-	StoreID          pgtype.UUID `json:"store_id"`
-	EventID          pgtype.UUID `json:"event_id"`
-	CartID           pgtype.UUID `json:"cart_id"`
-	PlatformUserID   string      `json:"platform_user_id"`
-	PlatformHandle   pgtype.Text `json:"platform_handle"`
-	NotificationType string      `json:"notification_type"`
-	Channel          string      `json:"channel"`
-	Status           string      `json:"status"`
-	MessageText      pgtype.Text `json:"message_text"`
+	StoreID           pgtype.UUID `json:"store_id"`
+	EventID           pgtype.UUID `json:"event_id"`
+	CartID            pgtype.UUID `json:"cart_id"`
+	PlatformUserID    string      `json:"platform_user_id"`
+	PlatformHandle    pgtype.Text `json:"platform_handle"`
+	NotificationType  string      `json:"notification_type"`
+	Channel           string      `json:"channel"`
+	Status            string      `json:"status"`
+	MessageText       pgtype.Text `json:"message_text"`
+	PlatformCommentID pgtype.Text `json:"platform_comment_id"`
 }
 
 // =============================================================================
@@ -117,6 +118,7 @@ func (q *Queries) CreateNotificationLog(ctx context.Context, arg CreateNotificat
 		arg.Channel,
 		arg.Status,
 		arg.MessageText,
+		arg.PlatformCommentID,
 	)
 	var i NotificationLog
 	err := row.Scan(
@@ -135,6 +137,7 @@ func (q *Queries) CreateNotificationLog(ctx context.Context, arg CreateNotificat
 		&i.SentAt,
 		&i.ProviderMessageID,
 		&i.UndeliveredReason,
+		&i.PlatformCommentID,
 	)
 	return i, err
 }
@@ -158,7 +161,7 @@ func (q *Queries) FindStoreByActiveTestSetupCode(ctx context.Context, notificati
 }
 
 const getLastNotificationForUser = `-- name: GetLastNotificationForUser :one
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason, platform_comment_id FROM notification_logs
 WHERE store_id = $1 AND platform_user_id = $2 AND status = 'sent'
 ORDER BY created_at DESC
 LIMIT 1
@@ -189,12 +192,13 @@ func (q *Queries) GetLastNotificationForUser(ctx context.Context, arg GetLastNot
 		&i.SentAt,
 		&i.ProviderMessageID,
 		&i.UndeliveredReason,
+		&i.PlatformCommentID,
 	)
 	return i, err
 }
 
 const getNotificationByCartAndType = `-- name: GetNotificationByCartAndType :one
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason, platform_comment_id FROM notification_logs
 WHERE cart_id = $1 AND notification_type = $2 AND status = 'sent'
 LIMIT 1
 `
@@ -224,8 +228,26 @@ func (q *Queries) GetNotificationByCartAndType(ctx context.Context, arg GetNotif
 		&i.SentAt,
 		&i.ProviderMessageID,
 		&i.UndeliveredReason,
+		&i.PlatformCommentID,
 	)
 	return i, err
+}
+
+const getSentNotificationForComment = `-- name: GetSentNotificationForComment :one
+SELECT id FROM notification_logs WHERE store_id=$1 AND platform_comment_id=$2 AND notification_type=$3 AND status='sent' ORDER BY created_at DESC LIMIT 1
+`
+
+type GetSentNotificationForCommentParams struct {
+	StoreID           pgtype.UUID `json:"store_id"`
+	PlatformCommentID pgtype.Text `json:"platform_comment_id"`
+	NotificationType  string      `json:"notification_type"`
+}
+
+func (q *Queries) GetSentNotificationForComment(ctx context.Context, arg GetSentNotificationForCommentParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getSentNotificationForComment, arg.StoreID, arg.PlatformCommentID, arg.NotificationType)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const getStoreCartMessageSettings = `-- name: GetStoreCartMessageSettings :one
@@ -306,7 +328,7 @@ func (q *Queries) GetStoreTestRecipient(ctx context.Context, id pgtype.UUID) (Ge
 }
 
 const listNotificationsByEvent = `-- name: ListNotificationsByEvent :many
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason, platform_comment_id FROM notification_logs
 WHERE event_id = $1
 ORDER BY created_at DESC
 `
@@ -337,6 +359,7 @@ func (q *Queries) ListNotificationsByEvent(ctx context.Context, eventID pgtype.U
 			&i.SentAt,
 			&i.ProviderMessageID,
 			&i.UndeliveredReason,
+			&i.PlatformCommentID,
 		); err != nil {
 			return nil, err
 		}
@@ -349,7 +372,7 @@ func (q *Queries) ListNotificationsByEvent(ctx context.Context, eventID pgtype.U
 }
 
 const listNotificationsByStore = `-- name: ListNotificationsByStore :many
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason, platform_comment_id FROM notification_logs
 WHERE store_id = $1
 ORDER BY created_at DESC
 LIMIT $2
@@ -386,6 +409,7 @@ func (q *Queries) ListNotificationsByStore(ctx context.Context, arg ListNotifica
 			&i.SentAt,
 			&i.ProviderMessageID,
 			&i.UndeliveredReason,
+			&i.PlatformCommentID,
 		); err != nil {
 			return nil, err
 		}
@@ -589,7 +613,7 @@ SET status = $2,
     error_message = $3,
     sent_at = COALESCE(sent_at, $4)
 WHERE provider_message_id = $1
-RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason
+RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason, platform_comment_id
 `
 
 type UpdateNotificationLogByProviderMessageIDParams struct {
@@ -625,6 +649,7 @@ func (q *Queries) UpdateNotificationLogByProviderMessageID(ctx context.Context, 
 		&i.SentAt,
 		&i.ProviderMessageID,
 		&i.UndeliveredReason,
+		&i.PlatformCommentID,
 	)
 	return i, err
 }

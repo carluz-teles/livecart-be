@@ -2,6 +2,7 @@ package providers
 
 import (
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -400,6 +401,20 @@ func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 			//    integração: um balde a mais é melhor do que balde nenhum.
 			chave := chaveDeCotaBling(cfg)
 			limiter = f.rateLimitManager.GetOrCreateFixo(chave, BlingRPSPadrao)
+		} else if cfg.Name == ProviderTiny {
+			key := "tiny:" + cfg.StoreID
+			if cnpj, ok := cfg.Metadata["cnpj"].(string); ok && cnpj != "" {
+				digits := strings.Map(func(r rune) rune {
+					if r >= '0' && r <= '9' {
+						return r
+					}
+					return -1
+				}, cnpj)
+				if digits != "" {
+					key = "tiny:cnpj:" + digits
+				}
+			}
+			limiter = f.rateLimitManager.GetOrCreateTiny(key)
 		} else {
 			limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
 		}

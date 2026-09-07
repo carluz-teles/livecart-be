@@ -1,139 +1,29 @@
-# Rate Limiting para Integrações
+# Rate limiting das integrações
 
-## Visão Geral
+O controle acontece antes de cada requisição HTTP em `providers.BaseProvider`, incluindo tentativas internas de uma operação. Limitar somente as operações da fila de ERP não limita o número de chamadas que cada operação executa.
 
-O LiveCart usa um sistema de **rate limiting adaptativo** para proteger integrações com APIs externas (Tiny/Olist, MercadoPago, etc.). O sistema se auto-calibra usando os headers de rate limit retornados pela própria API, sem necessidade de configurar limites manualmente.
+## Tiny / Olist v3
 
-## Arquitetura
+`ratelimit.Manager.GetOrCreateTiny` fornece o limitador Tiny. GET/HEAD usam orçamento de leitura; os outros métodos usam escrita. Em produção, `main.go` configura o pool compartilhado e a tabela `api_rate_budgets` coordena as réplicas. É necessário aplicar a migração 151 antes desse código.
 
-### Princípio: Nunca chegar no limite
+- Sem cabeçalhos, cada categoria começa em 24/min, abaixo do menor plano documentado (30/min).
+- Uma cota de minuto anunciada ajusta a taxa para 80% do limite. O saldo e tempo restante podem reduzir ainda mais o ritmo.
+- Cabeçalhos de rajada, como `Limit: 4 / Reset: 1`, não substituem a cota aprendida de minuto.
+- Um 429 suspende somente sua categoria pelo reset anunciado; sem prazo válido, o padrão é um minuto.
+- `Retry-After` aceita segundos e data HTTP. Sucesso atrasado não cancela uma suspensão já registrada.
+- Réplicas disputam apenas a vaga atual, sem reservar uma fila futura. Se a espera não cabe no contexto, a requisição é recusada antes do envio com `ErrNaoDespachado`.
+- Sem pool (testes ou ferramentas locais), há controle em memória com a mesma separação de categorias e espera após 429; ele não coordena processos diferentes.
 
-Em vez de usar token bucket ou limites fixos, o sistema usa **throttling uniforme** baseado nos headers reais da API:
+A identidade é CNPJ normalizado dos metadados quando disponível, ou loja. Na ausência do CNPJ, duas lojas da mesma conta Tiny não são automaticamente agrupadas. Aplicativos externos sempre ficam fora do controle LiveCart e compartilham a cota da conta; a margem de 20% não garante eliminar todos os 429.
 
-```
-Chamada 1 (sem dados) → passa direto → API responde com headers
-                                             ↓
-                               X-RateLimit-Remaining: 55
-                               X-RateLimit-Reset: 58 (segundos)
-                                             ↓
-                               Calcula intervalo: 58s / 55 = ~1.05s
-                                             ↓
-Chamada 2 → espera 1.05s → faz request → recebe novos headers → recalcula
-```
+A [documentação oficial](https://api-docs.erp.olist.com/documentacao/comecando/limites-de-consulta) define o reset em segundos restantes e o compartilhamento por conta. A [tabela por plano](https://ajuda.olist.com/hubs-e-plataformas-via-api/aplicativos-api-v3-configuracoes-e-utilizacao) é a referência para cotas de leitura e escrita. Não aplicar limites da API v2 à v3.
 
-### Componentes
+## Outros provedores
 
-```
-┌─────────────────────────────────────────────────┐
-│                  main.go                         │
-│  rateLimitManager := ratelimit.NewManager(log)   │
-└──────────────────┬──────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────┐
-│              ratelimit.Manager                   │
-│  Cache de AdaptiveLimiter por integration ID     │
-│  GetOrCreate(integrationID) → *AdaptiveLimiter   │
-└──────────────────┬──────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────┐
-│           ratelimit.AdaptiveLimiter               │
-│  Wait(ctx) — bloqueia até poder fazer request     │
-│  UpdateFromHeaders(remaining, resetSeconds)       │
-└──────────────────┬──────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────┐
-│            providers.BaseProvider                 │
-│  DoRequest():                                     │
-│    1. RateLimiter.Wait(ctx)  ← throttling         │
-│    2. HTTP request                                │
-│    3. RateLimiter.UpdateFromHeaders() ← calibra   │
-└─────────────────────────────────────────────────┘
-```
+O Bling usa o limitador fixo por conta configurado na fábrica. Outros provedores ainda podem usar `AdaptiveLimiter`, que depende de cabeçalhos e não impõe taxa preventiva enquanto não tem dados. Não presumir que seu estado em memória seja compartilhado entre réplicas ou que diferentes APIs tenham os mesmos contratos.
 
-### Pacote `lib/ratelimit/`
+## Observação e testes
 
-| Arquivo | Descrição |
-|---------|-----------|
-| `ratelimit.go` | Interfaces: `RateLimiter`, `Reservation`, `ErrRateLimited` |
-| `adaptive.go` | `AdaptiveLimiter`: throttling uniforme via headers |
-| `manager.go` | `Manager`: cache de limiters por integration ID |
+`provider HTTP 429` representa uma resposta HTTP recusada e registra método, caminho e cabeçalhos de quota, sem autorização/query string. Logs dos loops de retry descrevem tentativas e não devem ser somados com ele como novas requisições.
 
-## Como Funciona
-
-### 1. Primeira chamada (sem dados)
-
-Na primeira requisição, o limiter não tem dados da API. A chamada passa direto sem throttling. Isso é seguro porque uma única chamada nunca estoura o limite de nenhum provedor.
-
-### 2. Throttling uniforme
-
-Após a primeira resposta com headers, o limiter calcula o intervalo entre chamadas:
-
-```
-intervalo = tempoParaReset / remaining
-```
-
-**Exemplo** (plano Essencial Tiny, 120 req/min):
-- API retorna: `Remaining: 100`, `Reset: 50s`
-- Intervalo calculado: `50s / 100 = 0.5s` entre chamadas
-- Chamadas são espaçadas uniformemente, nunca estourando o limite
-
-### 3. Auto-calibração
-
-Cada resposta da API atualiza o limiter com novos headers. Isso significa:
-- Se outro app consumir da mesma conta, o `Remaining` diminui e o intervalo aumenta automaticamente
-- Se a API mudar seus limites, o sistema se adapta sozinho
-- Não é necessário saber o plano do usuário
-
-### 4. Proteção contra 429
-
-Se mesmo assim receber um 429 (Too Many Requests):
-- `DoRequestWithRetry()` detecta o status 429
-- Lê `X-RateLimit-Reset` ou `Retry-After` do header
-- Espera o tempo indicado antes de retentativa
-- O service layer marca a integração como `"error"` no dashboard
-
-## Headers Utilizados
-
-| Header | Descrição | Usado em |
-|--------|-----------|----------|
-| `X-RateLimit-Remaining` | Requisições restantes no ciclo | `UpdateFromHeaders()` |
-| `X-RateLimit-Reset` | Segundos para reset do ciclo | `UpdateFromHeaders()` |
-| `X-RateLimit-Limit` | Limite total (informativo) | Não usado diretamente |
-| `Retry-After` | Segundos para retry após 429 | `DoRequestWithRetry()` |
-
-## Limites por Provedor
-
-### Tiny/Olist API v3
-
-Limites **por conta** (todos os apps compartilham a cota):
-
-| Plano | Req/min (total) | Escrita/min |
-|-------|----------------|-------------|
-| Básico / Crescer | 60 | 30 |
-| Essencial / Evoluir | 120 | 60 |
-| Grande / Potencializar | 240 | 100 |
-
-- **429**: bloqueio temporário até próximo ciclo (API key NÃO é revogada)
-- **Webhooks**: removidos após 20 falhas consecutivas (~15h50min)
-
-### MercadoPago
-
-Retorna headers `X-RateLimit-*` padrão. O sistema se adapta automaticamente.
-
-## Tratamento de Erros
-
-1. **Rate limit atingido** (`ErrRateLimited`): o service layer loga com nível `Error` e marca a integração como `"error"`, visível no dashboard do usuário.
-
-2. **429 em retry**: `DoRequestWithRetry()` espera o tempo indicado pelo header e retenta.
-
-3. **5xx**: backoff exponencial padrão (100ms, 200ms, 400ms... até 5s).
-
-## Adicionando um Novo Provedor
-
-1. Passe `RateLimiter` do config para `BaseProvider` no constructor (mesmo padrão do Tiny/MercadoPago)
-2. Se a API retornar headers `X-RateLimit-*` → funciona automaticamente, zero config
-3. Se usar headers diferentes (ex: `RateLimit-Remaining`) → adicione parsing em `DoRequest()` para esse padrão
-4. Se NÃO retornar headers → o limiter permite tudo (sem throttling), e o tratamento de 429 serve como safety net
+Regressões estão em `lib/ratelimit/tiny_test.go`, `internal/integration/rate_budget_test.go` e nos testes de retry/base/estoque dos provedores. O [guia de staging](staging-live-recovery.md) descreve as alterações, os logs e as lacunas de recuperação ainda existentes.

@@ -3,7 +3,9 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -297,6 +299,20 @@ func (s *Service) ListUndelivered(ctx context.Context, storeID, eventID string) 
 
 // Send sends a notification based on type and store settings.
 func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error) {
+	if input.PlatformCommentID != "" {
+		storeID, err := parseUUID(input.StoreID)
+		if err != nil {
+			return nil, err
+		}
+		id, err := s.queries.GetSentNotificationForComment(ctx, sqlc.GetSentNotificationForCommentParams{StoreID: storeID, PlatformCommentID: pgtype.Text{String: input.PlatformCommentID, Valid: true}, NotificationType: string(input.NotificationType)})
+		if err == nil {
+			return &SendResult{LogID: id.String(), Status: StatusSent}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+	}
+
 	// Group I (observability): a DM/notification send was requested. Best-effort;
 	// dedup on store+recipient+type+cart so retries of the same send collapse.
 	_ = events.EmitInternal(ctx, s.queries, events.NotificationRequested,
@@ -349,7 +365,7 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 	// Create log entry as pending
 	logID, err := s.createLog(ctx, input, StatusPending, message, nil)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to create notification log", zap.Error(err))
+		return nil, fmt.Errorf("persisting notification before delivery: %w", err)
 	}
 
 	// RN-38 — a porta pode já estar fechada ANTES da tentativa.
@@ -406,7 +422,11 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 				zap.Error(sendErr),
 			)
 			// Fallback to DM
-			sendErr = s.dmSender.SendInstagramDM(ctx, input.StoreID, input.PlatformUserID, message)
+			if fallbackErr := s.dmSender.SendInstagramDM(ctx, input.StoreID, input.PlatformUserID, message); fallbackErr != nil {
+				sendErr = errors.Join(sendErr, fallbackErr)
+			} else {
+				sendErr = nil
+			}
 		}
 	} else {
 		// No comment ID, send DM directly
@@ -769,15 +789,16 @@ func (s *Service) createLog(ctx context.Context, input SendInput, status Notific
 	}
 
 	log, err := s.queries.CreateNotificationLog(ctx, sqlc.CreateNotificationLogParams{
-		StoreID:          storeUID,
-		EventID:          eventID,
-		CartID:           cartID,
-		PlatformUserID:   input.PlatformUserID,
-		PlatformHandle:   handle,
-		NotificationType: string(input.NotificationType),
-		Channel:          string(ChannelInstagramDM),
-		Status:           string(status),
-		MessageText:      msgText,
+		PlatformCommentID: pgtype.Text{String: input.PlatformCommentID, Valid: input.PlatformCommentID != ""},
+		StoreID:           storeUID,
+		EventID:           eventID,
+		CartID:            cartID,
+		PlatformUserID:    input.PlatformUserID,
+		PlatformHandle:    handle,
+		NotificationType:  string(input.NotificationType),
+		Channel:           string(ChannelInstagramDM),
+		Status:            string(status),
+		MessageText:       msgText,
 	})
 	if err != nil {
 		return "", err

@@ -1,15 +1,15 @@
+//go:build integration
+
 package events
 
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
@@ -21,23 +21,8 @@ import (
 // 000089 migration applied.
 func TestOutbox_RelayDelivers(t *testing.T) {
 	addr := redisAddr(t)
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		t.Skip("no DATABASE_URL")
-	}
 	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("connecting db: %v", err)
-	}
-	defer pool.Close()
-
-	// Isolate this run.
-	if _, err := pool.Exec(ctx, "DELETE FROM event_outbox"); err != nil {
-		t.Fatalf("cleanup outbox: %v", err)
-	}
-	_, _ = pool.Exec(ctx, "DELETE FROM event_consumed")
+	pool := isolatedEventDB(t)
 
 	// Emit into the outbox in a transaction (as a domain service would).
 	eventID := uuid.NewString()
@@ -54,7 +39,7 @@ func TestOutbox_RelayDelivers(t *testing.T) {
 
 	// Consumer.
 	got := make(chan Envelope, 1)
-	srv := asynq.NewServer(asynq.RedisClientOpt{Addr: addr}, asynq.Config{
+	srv := asynq.NewServer(asynq.RedisClientOpt{Addr: addr, DB: 15}, asynq.Config{
 		Concurrency: 1,
 		Queues:      map[string]int{QueueNormal: 1},
 	})
@@ -73,7 +58,7 @@ func TestOutbox_RelayDelivers(t *testing.T) {
 	defer srv.Shutdown()
 
 	// Relay drains the outbox to Redis.
-	client := NewClient(asynq.RedisClientOpt{Addr: addr}, zap.NewNop())
+	client := NewClient(asynq.RedisClientOpt{Addr: addr, DB: 15}, zap.NewNop())
 	defer client.Close()
 	relay := NewRelay(RelayConfig{Pool: pool, Client: client, Logger: zap.NewNop(), Interval: 200 * time.Millisecond})
 	relay.Start()

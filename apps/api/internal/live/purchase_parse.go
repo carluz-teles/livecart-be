@@ -70,7 +70,7 @@ func normalizarComentario(texto string) string {
 	t := strings.NewReplacer("×", "x", "✕", "x", "✖", "x", "*", "x").Replace(texto)
 	t = precoRe.ReplaceAllString(t, " ")
 	// Separa código colado da quantidade: 1024x3 → 1024 x3
-	t = regexp.MustCompile(`(?i)([0-9A-Za-z]{4})x(\d{1,2})\b`).ReplaceAllString(t, "$1 x$2")
+	t = regexp.MustCompile(`(?i)([0-9A-Za-z]{4})x\s*(\d{1,2})\b`).ReplaceAllString(t, "$1 x$2")
 	// Separa palavra colada ANTES do código: "Código1485" → "Código 1485".
 	// Da live de 19/08: a @mariabsales escreveu "Código1485 X2" e perdeu a
 	// compra — o "ó" não é ASCII, o tokenizador quebrava em "digo1485", e

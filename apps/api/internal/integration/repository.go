@@ -1056,7 +1056,8 @@ func (r *Repository) LiveCommentExistsByPlatformID(ctx context.Context, platform
 	}
 	var exists bool
 	err := r.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM live_comments WHERE platform_comment_id = $1)`,
+		`SELECT EXISTS(SELECT 1 FROM live_comments WHERE platform_comment_id = $1
+            AND NOT EXISTS(SELECT 1 FROM live_comment_work w WHERE w.platform_comment_id=$1 AND w.completed_at IS NULL))`,
 		platformCommentID,
 	).Scan(&exists)
 	return exists, err
@@ -1103,6 +1104,15 @@ func (r *Repository) MarkLiveCommentDeleted(ctx context.Context, platformComment
 }
 
 func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCommentParams) (string, error) {
+	var existing string
+	err := r.pool.QueryRow(ctx, `SELECT id::text FROM live_comments WHERE platform_comment_id=$1 ORDER BY created_at LIMIT 1`, params.PlatformCommentID).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+
 	sessionID, err := parseUUID(params.SessionID)
 	if err != nil {
 		return "", err
@@ -1120,7 +1130,13 @@ func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCom
 		}
 	}
 
-	row, err := r.queries.CreateLiveComment(ctx, sqlc.CreateLiveCommentParams{
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	qtx := r.queries.WithTx(tx)
+	row, err := qtx.CreateLiveComment(ctx, sqlc.CreateLiveCommentParams{
 		SessionID:         sessionID,
 		EventID:           eventID,
 		Platform:          params.Platform,
@@ -1135,6 +1151,12 @@ func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCom
 	})
 	if err != nil {
 		return "", fmt.Errorf("creating live comment: %w", err)
+	}
+	if err := qtx.IncrementLiveSessionComments(ctx, sessionID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
 	return uuidToString(row.ID), nil
 }
@@ -2505,7 +2527,7 @@ func (r *Repository) cancelCartComMotivo(ctx context.Context, cartID, storeID, m
 // dentro da tx, sem query extra) — o cart.paid emitido pelo caller logo depois
 // do restore precisa dele.
 func (r *Repository) RestoreCancelledCartAsPaid(
-	ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string,
+	ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64, facts ...events.Envelope,
 ) (restored bool, liveEventID string, err error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
@@ -2516,7 +2538,31 @@ func (r *Repository) RestoreCancelledCartAsPaid(
 		paidAtPg = pgtype.Timestamptz{Time: *paidAt, Valid: true}
 	}
 
-	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	err = func() error {
+		var owner string
+		var eligible bool
+		if err := tx.QueryRow(ctx, `SELECT e.store_id::text,c.status='cancelled' AND c.cancelled_reason='store_cancelled' AND COALESCE(c.payment_status,'pending') NOT IN ('paid','refunded') FROM carts c JOIN live_events e ON e.id=c.event_id WHERE c.id=$1 FOR UPDATE OF c`, cID).Scan(&owner, &eligible); err != nil {
+			return err
+		}
+		if owner != storeID {
+			return fmt.Errorf("payment store does not own cart")
+		}
+		if !eligible {
+			return nil
+		}
+		review, err := verifyPaymentAttempt(ctx, tx, cartID, paymentID, paymentMethod, amountCents, paidAt, facts)
+		if err != nil {
+			return err
+		}
+		if review {
+			return nil
+		}
+		q := r.queries.WithTx(tx)
 		cart, err := q.RestoreCancelledCartAsPaid(ctx, sqlc.RestoreCancelledCartAsPaidParams{
 			ID:            cID,
 			PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
@@ -2584,11 +2630,28 @@ func (r *Repository) RestoreCancelledCartAsPaid(
 			return fmt.Errorf("emitting cart.cancellation_reverted: %w", err)
 		}
 
+		// The restore itself changes eligibility; ledger, coverage and payment
+		// fact must commit in this same transaction.
+		if _, err := q.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
+			CartID: cID, PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true}, CheckoutID: paymentID,
+			PaidAt: paidAtPg, PaymentMethod: pgtype.Text{String: paymentMethod, Valid: true}, AmountCents: amountCents,
+		}); err != nil {
+			return err
+		}
+		for _, fact := range facts {
+			fact.LiveEventID = eventID
+			if err := events.Emit(ctx, q, fact); err != nil {
+				return err
+			}
+		}
 		restored = true
 		liveEventID = eventID
 		return nil
-	})
+	}()
 	if err != nil {
+		return false, "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return false, "", err
 	}
 	return restored, liveEventID, nil
@@ -2881,7 +2944,9 @@ func (r *Repository) DecrementCartItemWaitlistedQuantity(ctx context.Context, ca
 	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE cart_items
-		SET waitlisted_quantity = waitlisted_quantity - $3::int
+		SET waitlisted_quantity = waitlisted_quantity - $3::int,
+            erp_confirmed_quantity=COALESCE(erp_confirmed_quantity,quantity-waitlisted_quantity),
+            erp_pending_since=COALESCE(erp_pending_since,now())
 		WHERE cart_id = $1 AND product_id = $2 AND waitlisted_quantity >= $3::int
 	`, cID, pID, delta)
 	if err != nil {
@@ -2925,7 +2990,7 @@ func (r *Repository) GetCartTokenByID(ctx context.Context, cartID string) (strin
 // PIX, o que entra é MENOR que o preço cheio das unidades cobertas, e é
 // exatamente essa diferença que o pedido precisa declarar como desconto em vez
 // de como saldo a pagar.
-func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (liveEventID string, err error) {
+func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64, facts ...events.Envelope) (liveEventID string, err error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return "", err
@@ -2936,7 +3001,49 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 		paidAtPg = pgtype.Timestamptz{Time: *paidAt, Valid: true}
 	}
 
-	cart, err := r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	// Serialize the ledger existence check, amount and item coverage together.
+	var currentStatus, currentID string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(payment_status,''),COALESCE(checkout_id,'') FROM carts WHERE id=$1 FOR UPDATE`, cID).Scan(&currentStatus, &currentID); err != nil {
+		return "", err
+	}
+	var recorded bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cart_payments WHERE cart_id=$1 AND checkout_id=$2)`, cID, paymentID).Scan(&recorded); err != nil {
+		return "", err
+	}
+	if paymentStatus == "paid" {
+		if recorded {
+			return "", paymentdomain.ErrStalePayment
+		}
+		review, err := verifyPaymentAttempt(ctx, tx, cartID, paymentID, paymentMethod, amountCents, paidAt, facts)
+		if err != nil {
+			return "", err
+		}
+		if review {
+			if err := tx.Commit(ctx); err != nil {
+				return "", err
+			}
+			return "", paymentdomain.ErrPaymentReviewRequired
+		}
+	}
+	if paymentStatus != "paid" {
+		// A cancelled old PIX cannot refund a replacement charge that was paid.
+		if paymentStatus == "refunded" && !recorded && currentID != paymentID {
+			return "", paymentdomain.ErrStalePayment
+		}
+		if (currentStatus == "paid" || currentStatus == "refunded") && !recorded && currentID != paymentID {
+			return "", paymentdomain.ErrStalePayment
+		}
+		if (currentStatus == "paid" || currentStatus == "refunded") && (paymentStatus == "pending" || paymentStatus == "failed") {
+			return "", paymentdomain.ErrStalePayment
+		}
+	}
+	qtx := r.queries.WithTx(tx)
+	cart, err := qtx.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
 		CartID:        cID,
 		PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
 		CheckoutID:    paymentID,
@@ -2953,7 +3060,17 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 		}
 		return "", fmt.Errorf("updating cart payment status: %w", err)
 	}
-	return uuidToString(cart.EventID), nil
+	liveEventID = uuidToString(cart.EventID)
+	for _, fact := range facts {
+		fact.LiveEventID = liveEventID
+		if err := events.Emit(ctx, qtx, fact); err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return liveEventID, nil
 }
 
 // =============================================================================
@@ -3798,6 +3915,7 @@ func (r *Repository) ListStuckERPOrderOps(ctx context.Context, olderThan time.Du
 	for _, row := range rows {
 		out = append(out, StuckERPOrderOp{
 			CartID:          uuidToString(row.ID),
+			RestingState:    row.RestingState,
 			State:           row.ErpOrderState,
 			ExternalOrderID: row.ExternalOrderID,
 			StoreID:         uuidToString(row.StoreID),

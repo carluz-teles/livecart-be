@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -51,6 +52,7 @@ func TestGetProductTipaOEstrangulamento(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits++
+		w.Header().Set("X-RateLimit-Reset", "58")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"mensagem":"too many requests"}`))
 	}))
@@ -68,6 +70,9 @@ func TestGetProductTipaOEstrangulamento(t *testing.T) {
 		t.Fatalf("429 chegou como %T (%v) — a busca nao consegue distinguir "+
 			"estrangulamento de 'esse produto deu problema' e acaba dizendo "+
 			"ao lojista que o produto nao existe", err, err)
+	}
+	if rl.RetryAfter != 58*time.Second {
+		t.Fatalf("GetProduct lost the provider's wait: %s", rl.RetryAfter)
 	}
 }
 
@@ -95,6 +100,7 @@ func TestGetProductMantem404ComoAusencia(t *testing.T) {
 // não voltarem a divergir — foi a divergência que criou o bug.
 func TestListProductsTipaOEstrangulamento(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
@@ -110,5 +116,8 @@ func TestListProductsTipaOEstrangulamento(t *testing.T) {
 	var rl *ratelimit.ErrRateLimited
 	if !errors.As(err, &rl) {
 		t.Fatalf("429 da listagem chegou como %T (%v)", err, err)
+	}
+	if rl.RetryAfter != 7*time.Second {
+		t.Fatalf("ListProducts lost the provider's wait: %s", rl.RetryAfter)
 	}
 }

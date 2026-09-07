@@ -1410,6 +1410,15 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 	}
 	defer tx.Rollback(ctx) // No-op if already committed
 
+	// A row lock cannot protect a cart that does not exist yet. Serialize the
+	// buyer's lookup and insert across replicas, including the VIP lookup.
+	buyerKey := "cart:" + params.EventID + ":" + params.PlatformUserID
+	if params.IsVip {
+		buyerKey = "vip-cart:" + params.StoreID + ":" + strings.ToLower(strings.TrimPrefix(params.PlatformHandle, "@"))
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, buyerKey); err != nil {
+		return nil, false, err
+	}
 	qtx := r.q.WithTx(tx)
 
 	// Busca o carrinho ABERTO do comprador neste evento. FOR UPDATE trava a row
@@ -1513,6 +1522,10 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("creating cart: %w", err)
+	}
+
+	if err := qtx.IncrementLiveEventOrders(ctx, eventID); err != nil {
+		return nil, false, err
 	}
 
 	// Commit the transaction

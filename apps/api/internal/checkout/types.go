@@ -17,27 +17,28 @@ import (
 // "data unavailable" (older paid carts may have nothing recorded for
 // card-specific fields, since they were not persisted before this change).
 type CartForCheckoutResponse struct {
-	ID                 string                       `json:"id"`
-	Token              string                       `json:"token"`
-	Status             string                       `json:"status"`
-	CustomerEmail      *string                      `json:"customerEmail"`
-	PaymentStatus      string                       `json:"paymentStatus"`
-	CheckoutURL        *string                      `json:"checkoutUrl"`
-	PlatformHandle     string                       `json:"platformHandle"`
-	AllowEdit          bool                         `json:"allowEdit"`
-	MaxQuantityPerItem int                          `json:"maxQuantityPerItem"`
-	ExpiresAt          *time.Time                   `json:"expiresAt"`
-	PaidAt             *time.Time                   `json:"paidAt,omitempty"`
-	CreatedAt          time.Time                    `json:"createdAt"`
-	Event              CartEventInfo                `json:"event"`
-	Store              CartStoreInfo                `json:"store"`
-	Items              []CartItemResponse           `json:"items"`
-	WaitlistItems      []WaitlistItemResponse       `json:"waitlistItems"`
-	Summary            CartSummary                  `json:"summary"`
-	Shipping           *CartShippingSelection       `json:"shipping,omitempty"`
-	Customer           *CheckoutCustomerInfo        `json:"customer,omitempty"`
-	ShippingAddress    *CheckoutShippingAddressInfo `json:"shippingAddress,omitempty"`
-	Payment            *CheckoutPaymentInfo         `json:"payment,omitempty"`
+	PaymentReviewRequired bool                         `json:"paymentReviewRequired"`
+	ID                    string                       `json:"id"`
+	Token                 string                       `json:"token"`
+	Status                string                       `json:"status"`
+	CustomerEmail         *string                      `json:"customerEmail"`
+	PaymentStatus         string                       `json:"paymentStatus"`
+	CheckoutURL           *string                      `json:"checkoutUrl"`
+	PlatformHandle        string                       `json:"platformHandle"`
+	AllowEdit             bool                         `json:"allowEdit"`
+	MaxQuantityPerItem    int                          `json:"maxQuantityPerItem"`
+	ExpiresAt             *time.Time                   `json:"expiresAt"`
+	PaidAt                *time.Time                   `json:"paidAt,omitempty"`
+	CreatedAt             time.Time                    `json:"createdAt"`
+	Event                 CartEventInfo                `json:"event"`
+	Store                 CartStoreInfo                `json:"store"`
+	Items                 []CartItemResponse           `json:"items"`
+	WaitlistItems         []WaitlistItemResponse       `json:"waitlistItems"`
+	Summary               CartSummary                  `json:"summary"`
+	Shipping              *CartShippingSelection       `json:"shipping,omitempty"`
+	Customer              *CheckoutCustomerInfo        `json:"customer,omitempty"`
+	ShippingAddress       *CheckoutShippingAddressInfo `json:"shippingAddress,omitempty"`
+	Payment               *CheckoutPaymentInfo         `json:"payment,omitempty"`
 	// True when Customer / ShippingAddress were prefilled from the same buyer's
 	// previous paid cart (returning-buyer flow). Frontend uses it to render the
 	// "olá de novo" banner above the form.
@@ -309,10 +310,11 @@ type GeneratePixResponse struct {
 
 // GetPaymentStatusResponse is the response for GET /api/public/checkout/:token/status
 type GetPaymentStatusResponse struct {
-	Status        string     `json:"status"`
-	PaymentStatus string     `json:"paymentStatus"`
-	PaidAt        *time.Time `json:"paidAt,omitempty"`
-	Message       string     `json:"message,omitempty"`
+	PaymentReviewRequired bool       `json:"paymentReviewRequired"`
+	Status                string     `json:"status"`
+	PaymentStatus         string     `json:"paymentStatus"`
+	PaidAt                *time.Time `json:"paidAt,omitempty"`
+	Message               string     `json:"message,omitempty"`
 }
 
 // =============================================================================
@@ -356,6 +358,7 @@ type WaitlistItemDetails struct {
 
 // CartDetails contains the cart data with event/store info
 type CartDetails struct {
+	PaymentReviewRequired   bool
 	ID                      string
 	EventID                 string
 	PlatformUserID          string
@@ -557,10 +560,11 @@ type DropFromWaitlistInput struct {
 
 // GetPaymentStatusOutput is the output for GetPaymentStatus service method
 type GetPaymentStatusOutput struct {
-	Status        string
-	PaymentStatus string
-	PaidAt        *time.Time
-	Message       string
+	PaymentReviewRequired bool
+	Status                string
+	PaymentStatus         string
+	PaidAt                *time.Time
+	Message               string
 }
 
 // =============================================================================
@@ -663,18 +667,19 @@ type SelectShippingMethodOutput struct {
 
 // CartRow represents a cart row from the database
 type CartRow struct {
-	ID                string
-	EventID           string
-	PlatformUserID    string
-	PlatformHandle    string
-	Token             string
-	Status            string
-	CheckoutURL       *string
-	CheckoutID        *string
-	CheckoutExpiresAt *time.Time
-	CustomerEmail     *string
-	PaymentStatus     string
-	PaidAt            *time.Time
+	PaymentReviewRequired bool
+	ID                    string
+	EventID               string
+	PlatformUserID        string
+	PlatformHandle        string
+	Token                 string
+	Status                string
+	CheckoutURL           *string
+	CheckoutID            *string
+	CheckoutExpiresAt     *time.Time
+	CustomerEmail         *string
+	PaymentStatus         string
+	PaidAt                *time.Time
 	// PaymentIntegrationID is the integration the cart was bound to on its
 	// first successful GetCheckoutConfig call. nil while no provider was
 	// resolved yet; once set, all payment-processing calls reuse this exact
