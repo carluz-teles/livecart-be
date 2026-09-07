@@ -626,6 +626,36 @@ const docTemplate = `{
                         "in": "query"
                     },
                     {
+                        "type": "string",
+                        "description": "Registration date from (YYYY-MM-DD, America/Sao_Paulo)",
+                        "name": "dateFrom",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Registration date through (YYYY-MM-DD, inclusive)",
+                        "name": "dateTo",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Only currently blocked customers",
+                        "name": "blockedOnly",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Minimum paid amount (cents)",
+                        "name": "totalSpentMin",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Maximum paid amount (cents)",
+                        "name": "totalSpentMax",
+                        "in": "query"
+                    },
+                    {
                         "type": "boolean",
                         "description": "Filter customers with orders",
                         "name": "hasOrders",
@@ -3777,6 +3807,10 @@ const docTemplate = `{
         "apps_api_internal_customer.CustomerResponse": {
             "type": "object",
             "properties": {
+                "blocked": {
+                    "description": "Current block status, when loaded by the list projection",
+                    "type": "boolean"
+                },
                 "firstOrderAt": {
                     "type": "string"
                 },

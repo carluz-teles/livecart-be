@@ -23,6 +23,69 @@ func (q *Queries) CountCustomers(ctx context.Context, storeID pgtype.UUID) (int3
 	return column_1, err
 }
 
+const countFilteredCustomers = `-- name: CountFilteredCustomers :one
+WITH customer_summary AS (
+    SELECT c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at, c.whatsapp_opted_out,
+        COALESCE(stats.total_orders, 0)::int AS total_orders,
+        COALESCE(stats.total_spent, 0)::bigint AS total_spent,
+        EXISTS (SELECT 1 FROM blocked_handles b
+            WHERE b.store_id = c.store_id
+              AND b.platform_handle = LOWER(LTRIM(c.platform_handle, '@'))
+              AND b.unblocked_at IS NULL) AS blocked
+    FROM customers c
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS total_orders, COALESCE(SUM(o.total_cents), 0)::bigint AS total_spent
+        FROM orders o WHERE o.customer_id = c.id AND o.store_id = c.store_id AND o.status = 'paid'
+    ) stats ON true
+    WHERE c.store_id = $1
+      AND ($2::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $2::date)
+      AND ($3::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $3::date)
+      AND ($4::text = '' OR c.platform_handle ILIKE $5::text OR c.email ILIKE $5::text)
+), filtered AS (
+    SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out, total_orders, total_spent, blocked FROM customer_summary
+    WHERE (NOT $6::boolean OR blocked)
+      AND ($7::boolean IS NULL OR (total_orders > 0) = $7::boolean)
+      AND ($8::int IS NULL OR total_orders >= $8::int)
+      AND ($9::int IS NULL OR total_orders <= $9::int)
+      AND ($10::bigint IS NULL OR total_spent >= $10::bigint)
+      AND ($11::bigint IS NULL OR total_spent <= $11::bigint)
+)
+SELECT COUNT(*)::int FROM filtered
+`
+
+type CountFilteredCustomersParams struct {
+	StoreID       pgtype.UUID `json:"store_id"`
+	DateFrom      pgtype.Date `json:"date_from"`
+	DateTo        pgtype.Date `json:"date_to"`
+	Search        string      `json:"search"`
+	SearchPattern string      `json:"search_pattern"`
+	BlockedOnly   bool        `json:"blocked_only"`
+	HasOrders     pgtype.Bool `json:"has_orders"`
+	OrderCountMin pgtype.Int4 `json:"order_count_min"`
+	OrderCountMax pgtype.Int4 `json:"order_count_max"`
+	TotalSpentMin pgtype.Int8 `json:"total_spent_min"`
+	TotalSpentMax pgtype.Int8 `json:"total_spent_max"`
+}
+
+func (q *Queries) CountFilteredCustomers(ctx context.Context, arg CountFilteredCustomersParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countFilteredCustomers,
+		arg.StoreID,
+		arg.DateFrom,
+		arg.DateTo,
+		arg.Search,
+		arg.SearchPattern,
+		arg.BlockedOnly,
+		arg.HasOrders,
+		arg.OrderCountMin,
+		arg.OrderCountMax,
+		arg.TotalSpentMin,
+		arg.TotalSpentMax,
+	)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createCustomer = `-- name: CreateCustomer :one
 
 INSERT INTO customers (
@@ -386,6 +449,136 @@ func (q *Queries) ListCustomers(ctx context.Context, arg ListCustomersParams) ([
 			&i.WhatsappOptedOut,
 			&i.TotalOrders,
 			&i.TotalSpent,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFilteredCustomers = `-- name: ListFilteredCustomers :many
+WITH customer_summary AS (
+    SELECT c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at, c.whatsapp_opted_out,
+        COALESCE(stats.total_orders, 0)::int AS total_orders,
+        COALESCE(stats.total_spent, 0)::bigint AS total_spent,
+        EXISTS (SELECT 1 FROM blocked_handles b
+            WHERE b.store_id = c.store_id
+              AND b.platform_handle = LOWER(LTRIM(c.platform_handle, '@'))
+              AND b.unblocked_at IS NULL) AS blocked
+    FROM customers c
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS total_orders, COALESCE(SUM(o.total_cents), 0)::bigint AS total_spent
+        FROM orders o WHERE o.customer_id = c.id AND o.store_id = c.store_id AND o.status = 'paid'
+    ) stats ON true
+    WHERE c.store_id = $5
+      AND ($6::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $6::date)
+      AND ($7::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $7::date)
+      AND ($8::text = '' OR c.platform_handle ILIKE $9::text OR c.email ILIKE $9::text)
+), filtered AS (
+    SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out, total_orders, total_spent, blocked FROM customer_summary
+    WHERE (NOT $10::boolean OR blocked)
+      AND ($11::boolean IS NULL OR (total_orders > 0) = $11::boolean)
+      AND ($12::int IS NULL OR total_orders >= $12::int)
+      AND ($13::int IS NULL OR total_orders <= $13::int)
+      AND ($14::bigint IS NULL OR total_spent >= $14::bigint)
+      AND ($15::bigint IS NULL OR total_spent <= $15::bigint)
+)
+SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out, total_orders, total_spent, blocked FROM filtered
+ORDER BY
+    CASE WHEN $1::text = 'last_order_at' AND $2::text = 'asc' THEN last_order_at END ASC NULLS LAST,
+    CASE WHEN $1::text = 'last_order_at' AND $2::text = 'desc' THEN last_order_at END DESC NULLS LAST,
+    CASE WHEN $1::text = 'first_order_at' AND $2::text = 'asc' THEN first_order_at END ASC NULLS LAST,
+    CASE WHEN $1::text = 'first_order_at' AND $2::text = 'desc' THEN first_order_at END DESC NULLS LAST,
+    CASE WHEN $1::text = 'total_orders' AND $2::text = 'asc' THEN total_orders END ASC NULLS LAST,
+    CASE WHEN $1::text = 'total_orders' AND $2::text = 'desc' THEN total_orders END DESC NULLS LAST,
+    CASE WHEN $1::text = 'total_spent' AND $2::text = 'asc' THEN total_spent END ASC NULLS LAST,
+    CASE WHEN $1::text = 'total_spent' AND $2::text = 'desc' THEN total_spent END DESC NULLS LAST,
+    CASE WHEN $1::text = 'platform_handle' AND $2::text = 'asc' THEN platform_handle END ASC NULLS LAST,
+    CASE WHEN $1::text = 'platform_handle' AND $2::text = 'desc' THEN platform_handle END DESC NULLS LAST,
+    id ASC
+LIMIT $4 OFFSET $3
+`
+
+type ListFilteredCustomersParams struct {
+	SortBy        string      `json:"sort_by"`
+	SortOrder     string      `json:"sort_order"`
+	RowOffset     int32       `json:"row_offset"`
+	RowLimit      int32       `json:"row_limit"`
+	StoreID       pgtype.UUID `json:"store_id"`
+	DateFrom      pgtype.Date `json:"date_from"`
+	DateTo        pgtype.Date `json:"date_to"`
+	Search        string      `json:"search"`
+	SearchPattern string      `json:"search_pattern"`
+	BlockedOnly   bool        `json:"blocked_only"`
+	HasOrders     pgtype.Bool `json:"has_orders"`
+	OrderCountMin pgtype.Int4 `json:"order_count_min"`
+	OrderCountMax pgtype.Int4 `json:"order_count_max"`
+	TotalSpentMin pgtype.Int8 `json:"total_spent_min"`
+	TotalSpentMax pgtype.Int8 `json:"total_spent_max"`
+}
+
+type ListFilteredCustomersRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	PlatformUserID   string             `json:"platform_user_id"`
+	PlatformHandle   string             `json:"platform_handle"`
+	Email            pgtype.Text        `json:"email"`
+	Phone            pgtype.Text        `json:"phone"`
+	FirstOrderAt     pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt      pgtype.Timestamptz `json:"last_order_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	WhatsappOptedOut bool               `json:"whatsapp_opted_out"`
+	TotalOrders      int32              `json:"total_orders"`
+	TotalSpent       int64              `json:"total_spent"`
+	Blocked          bool               `json:"blocked"`
+}
+
+// Customer list and count share the same filters; apply them before pagination.
+func (q *Queries) ListFilteredCustomers(ctx context.Context, arg ListFilteredCustomersParams) ([]ListFilteredCustomersRow, error) {
+	rows, err := q.db.Query(ctx, listFilteredCustomers,
+		arg.SortBy,
+		arg.SortOrder,
+		arg.RowOffset,
+		arg.RowLimit,
+		arg.StoreID,
+		arg.DateFrom,
+		arg.DateTo,
+		arg.Search,
+		arg.SearchPattern,
+		arg.BlockedOnly,
+		arg.HasOrders,
+		arg.OrderCountMin,
+		arg.OrderCountMax,
+		arg.TotalSpentMin,
+		arg.TotalSpentMax,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFilteredCustomersRow{}
+	for rows.Next() {
+		var i ListFilteredCustomersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Email,
+			&i.Phone,
+			&i.FirstOrderAt,
+			&i.LastOrderAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.WhatsappOptedOut,
+			&i.TotalOrders,
+			&i.TotalSpent,
+			&i.Blocked,
 		); err != nil {
 			return nil, err
 		}

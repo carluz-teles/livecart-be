@@ -2,6 +2,9 @@ basePath: /
 definitions:
   apps_api_internal_customer.CustomerResponse:
     properties:
+      blocked:
+        description: Current block status, when loaded by the list projection
+        type: boolean
       firstOrderAt:
         type: string
       handle:
@@ -1209,6 +1212,26 @@ paths:
         in: query
         name: sortOrder
         type: string
+      - description: Registration date from (YYYY-MM-DD, America/Sao_Paulo)
+        in: query
+        name: dateFrom
+        type: string
+      - description: Registration date through (YYYY-MM-DD, inclusive)
+        in: query
+        name: dateTo
+        type: string
+      - description: Only currently blocked customers
+        in: query
+        name: blockedOnly
+        type: boolean
+      - description: Minimum paid amount (cents)
+        in: query
+        name: totalSpentMin
+        type: integer
+      - description: Maximum paid amount (cents)
+        in: query
+        name: totalSpentMax
+        type: integer
       - description: Filter customers with orders
         in: query
         name: hasOrders

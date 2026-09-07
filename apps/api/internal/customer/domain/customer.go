@@ -46,6 +46,7 @@ func (a ShippingAddress) State() string        { return a.state }
 // Customer represents a buyer of a store, aggregated with order stats and the
 // latest checkout snapshot (name, document, shipping address).
 type Customer struct {
+	blocked             *bool
 	id                  vo.CustomerID
 	platformUserID      string
 	handle              string
@@ -108,3 +109,12 @@ func (c *Customer) TotalSpent() int64                     { return c.totalSpent 
 func (c *Customer) LastOrderAt() *time.Time               { return c.lastOrderAt }
 func (c *Customer) FirstOrderAt() *time.Time              { return c.firstOrderAt }
 func (c *Customer) LastShippingAddress() *ShippingAddress { return c.lastShippingAddress }
+
+// WithBlockStatus enriches the list projection without changing an existing entity.
+// Nil on projections that did not query block status.
+func (c *Customer) WithBlockStatus(blocked bool) *Customer {
+	copy := *c
+	copy.blocked = &blocked
+	return &copy
+}
+func (c *Customer) Blocked() *bool { return c.blocked }

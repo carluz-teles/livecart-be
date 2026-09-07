@@ -3,6 +3,8 @@ package customer
 import (
 	"context"
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -172,6 +174,21 @@ func (s *Service) GetByPlatformUser(ctx context.Context, storeID uuid.UUID, plat
 
 // List returns customers with pagination and search as domain entities.
 func (s *Service) List(ctx context.Context, input ListCustomersInput) ([]*domain.Customer, query.Pagination, int, error) {
+	for _, value := range []string{input.Filters.DateFrom, input.Filters.DateTo} {
+		if value != "" {
+			if _, err := time.Parse("2006-01-02", value); err != nil {
+				return nil, input.Pagination, 0, httpx.ErrBadRequest("data inválida: use AAAA-MM-DD")
+			}
+		}
+	}
+	if input.Filters.DateFrom != "" && input.Filters.DateTo != "" && input.Filters.DateFrom > input.Filters.DateTo {
+		return nil, input.Pagination, 0, httpx.ErrBadRequest("a data inicial deve preceder a final")
+	}
+	for _, value := range []*int{input.Filters.OrderCountMin, input.Filters.OrderCountMax} {
+		if value != nil && (*value < 0 || *value > math.MaxInt32) {
+			return nil, input.Pagination, 0, httpx.ErrBadRequest("quantidade de pedidos fora do intervalo permitido")
+		}
+	}
 	input.Pagination.Normalize()
 	input.Sorting.Normalize("last_order_at")
 

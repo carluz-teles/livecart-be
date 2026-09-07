@@ -197,3 +197,75 @@ ORDER BY (
   ) DESC,
   cu.last_order_at DESC NULLS LAST
 LIMIT 1;
+
+-- Customer list and count share the same filters; apply them before pagination.
+-- name: ListFilteredCustomers :many
+WITH customer_summary AS (
+    SELECT c.*,
+        COALESCE(stats.total_orders, 0)::int AS total_orders,
+        COALESCE(stats.total_spent, 0)::bigint AS total_spent,
+        EXISTS (SELECT 1 FROM blocked_handles b
+            WHERE b.store_id = c.store_id
+              AND b.platform_handle = LOWER(LTRIM(c.platform_handle, '@'))
+              AND b.unblocked_at IS NULL) AS blocked
+    FROM customers c
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS total_orders, COALESCE(SUM(o.total_cents), 0)::bigint AS total_spent
+        FROM orders o WHERE o.customer_id = c.id AND o.store_id = c.store_id AND o.status = 'paid'
+    ) stats ON true
+    WHERE c.store_id = sqlc.arg(store_id)
+      AND (sqlc.narg(date_from)::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date >= sqlc.narg(date_from)::date)
+      AND (sqlc.narg(date_to)::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= sqlc.narg(date_to)::date)
+      AND (sqlc.arg(search)::text = '' OR c.platform_handle ILIKE sqlc.arg(search_pattern)::text OR c.email ILIKE sqlc.arg(search_pattern)::text)
+), filtered AS (
+    SELECT * FROM customer_summary
+    WHERE (NOT sqlc.arg(blocked_only)::boolean OR blocked)
+      AND (sqlc.narg(has_orders)::boolean IS NULL OR (total_orders > 0) = sqlc.narg(has_orders)::boolean)
+      AND (sqlc.narg(order_count_min)::int IS NULL OR total_orders >= sqlc.narg(order_count_min)::int)
+      AND (sqlc.narg(order_count_max)::int IS NULL OR total_orders <= sqlc.narg(order_count_max)::int)
+      AND (sqlc.narg(total_spent_min)::bigint IS NULL OR total_spent >= sqlc.narg(total_spent_min)::bigint)
+      AND (sqlc.narg(total_spent_max)::bigint IS NULL OR total_spent <= sqlc.narg(total_spent_max)::bigint)
+)
+SELECT * FROM filtered
+ORDER BY
+    CASE WHEN sqlc.arg(sort_by)::text = 'last_order_at' AND sqlc.arg(sort_order)::text = 'asc' THEN last_order_at END ASC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'last_order_at' AND sqlc.arg(sort_order)::text = 'desc' THEN last_order_at END DESC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'first_order_at' AND sqlc.arg(sort_order)::text = 'asc' THEN first_order_at END ASC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'first_order_at' AND sqlc.arg(sort_order)::text = 'desc' THEN first_order_at END DESC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'total_orders' AND sqlc.arg(sort_order)::text = 'asc' THEN total_orders END ASC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'total_orders' AND sqlc.arg(sort_order)::text = 'desc' THEN total_orders END DESC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'total_spent' AND sqlc.arg(sort_order)::text = 'asc' THEN total_spent END ASC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'total_spent' AND sqlc.arg(sort_order)::text = 'desc' THEN total_spent END DESC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'platform_handle' AND sqlc.arg(sort_order)::text = 'asc' THEN platform_handle END ASC NULLS LAST,
+    CASE WHEN sqlc.arg(sort_by)::text = 'platform_handle' AND sqlc.arg(sort_order)::text = 'desc' THEN platform_handle END DESC NULLS LAST,
+    id ASC
+LIMIT sqlc.arg(row_limit) OFFSET sqlc.arg(row_offset);
+
+-- name: CountFilteredCustomers :one
+WITH customer_summary AS (
+    SELECT c.*,
+        COALESCE(stats.total_orders, 0)::int AS total_orders,
+        COALESCE(stats.total_spent, 0)::bigint AS total_spent,
+        EXISTS (SELECT 1 FROM blocked_handles b
+            WHERE b.store_id = c.store_id
+              AND b.platform_handle = LOWER(LTRIM(c.platform_handle, '@'))
+              AND b.unblocked_at IS NULL) AS blocked
+    FROM customers c
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS total_orders, COALESCE(SUM(o.total_cents), 0)::bigint AS total_spent
+        FROM orders o WHERE o.customer_id = c.id AND o.store_id = c.store_id AND o.status = 'paid'
+    ) stats ON true
+    WHERE c.store_id = sqlc.arg(store_id)
+      AND (sqlc.narg(date_from)::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date >= sqlc.narg(date_from)::date)
+      AND (sqlc.narg(date_to)::date IS NULL OR (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= sqlc.narg(date_to)::date)
+      AND (sqlc.arg(search)::text = '' OR c.platform_handle ILIKE sqlc.arg(search_pattern)::text OR c.email ILIKE sqlc.arg(search_pattern)::text)
+), filtered AS (
+    SELECT * FROM customer_summary
+    WHERE (NOT sqlc.arg(blocked_only)::boolean OR blocked)
+      AND (sqlc.narg(has_orders)::boolean IS NULL OR (total_orders > 0) = sqlc.narg(has_orders)::boolean)
+      AND (sqlc.narg(order_count_min)::int IS NULL OR total_orders >= sqlc.narg(order_count_min)::int)
+      AND (sqlc.narg(order_count_max)::int IS NULL OR total_orders <= sqlc.narg(order_count_max)::int)
+      AND (sqlc.narg(total_spent_min)::bigint IS NULL OR total_spent >= sqlc.narg(total_spent_min)::bigint)
+      AND (sqlc.narg(total_spent_max)::bigint IS NULL OR total_spent <= sqlc.narg(total_spent_max)::bigint)
+)
+SELECT COUNT(*)::int FROM filtered;
