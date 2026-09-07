@@ -254,6 +254,8 @@ type OrderWaitlistJourneyOutput struct {
 }
 
 type OrderDetailResponse struct {
+	PaymentReviewRequired bool `json:"paymentReviewRequired"`
+	ERPPendingItems       int  `json:"erpPendingItems"`
 	OrderResponse
 	// Cart token; the public buyer link is `${frontend_origin}/cart/${token}`.
 	// Detail-only — the list endpoint does not expose this to keep the surface
@@ -613,6 +615,7 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 	}
 
 	resp := OrderDetailResponse{
+		PaymentReviewRequired: o.PaymentReviewRequired, ERPPendingItems: o.ERPPendingItems,
 		OrderResponse:              NewOrderResponse(o.OrderOutput),
 		Token:                      o.Token,
 		Comments:                   comments,
@@ -797,8 +800,9 @@ type ListOrdersOutput struct {
 }
 
 type OrderOutput struct {
-	ID      string
-	ShortID int
+	PaymentReviewRequired bool
+	ID                    string
+	ShortID               int
 	// EventID/EventTitle são da CAMPANHA. O campo interno se chamava
 	// LiveSessionID e sempre carregou row.EventID — o comentário "keeping
 	// response field name for backwards compatibility" no service justificava o
@@ -977,21 +981,23 @@ type OrderItemRow struct {
 }
 
 type OrderDetailRow struct {
-	ID              string
-	ShortID         int
-	EventID         string
-	PlatformUserID  string
-	PlatformHandle  string
-	Token           string
-	Status          string
-	PaymentStatus   string
-	PaidAt          *time.Time
-	CreatedAt       time.Time
-	ExpiresAt       *time.Time
-	LiveTitle       string
-	LivePlatform    string
-	StoreID         string
-	IsFirstPurchase bool
+	PaymentReviewRequired bool
+	ERPPendingItems       int
+	ID                    string
+	ShortID               int
+	EventID               string
+	PlatformUserID        string
+	PlatformHandle        string
+	Token                 string
+	Status                string
+	PaymentStatus         string
+	PaidAt                *time.Time
+	CreatedAt             time.Time
+	ExpiresAt             *time.Time
+	LiveTitle             string
+	LivePlatform          string
+	StoreID               string
+	IsFirstPurchase       bool
 
 	// Customer captured at checkout (all optional — nil-safe reads).
 	CustomerEmail    string
@@ -1177,6 +1183,8 @@ type OrderShipmentOutput struct {
 }
 
 type OrderDetailOutput struct {
+	PaymentReviewRequired bool
+	ERPPendingItems       int
 	OrderOutput
 	// Cart token used to build the public checkout link (/cart/{token}). Only
 	// surfaced on the detail endpoint because the admin actions menu builds the

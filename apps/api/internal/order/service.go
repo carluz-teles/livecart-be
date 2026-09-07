@@ -107,6 +107,9 @@ func (s *Service) Cancel(ctx context.Context, orderID, storeID string) error {
 	if order.PaymentStatus == "paid" || order.PaymentStatus == "refunded" {
 		return httpx.DomainError(409, httpx.CodeOrderAlreadyPaid, "pedido já foi pago — não é possível cancelar")
 	}
+	if order.PaymentReviewRequired {
+		return httpx.DomainError(409, httpx.CodePaymentReviewRequired, "concilie o pagamento recebido antes de cancelar o pedido")
+	}
 	if order.Status == "cancelled" {
 		return httpx.DomainError(409, httpx.CodeOrderAlreadyCancelled, "pedido já está cancelado")
 	}
@@ -144,8 +147,12 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, orderID, storeID str
 	}
 	// Reuse the existing scoped lookup so a hostile storeID can't trigger a
 	// retry on someone else's cart.
-	if _, err := s.GetByID(ctx, orderID, storeID); err != nil {
+	order, err := s.GetByID(ctx, orderID, storeID)
+	if err != nil {
 		return err
+	}
+	if order.PaymentReviewRequired {
+		return httpx.DomainError(409, httpx.CodePaymentReviewRequired, "concilie o pagamento recebido antes de finalizar o pedido no ERP")
 	}
 	return s.erpRetryService.RetryERPFinalisation(ctx, orderID, storeID)
 }
@@ -268,6 +275,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	}
 
 	return &OrderOutput{
+		PaymentReviewRequired: row.PaymentReviewRequired,
 		ID:                    row.ID,
 		ShortID:               row.ShortID,
 		EventID:               row.EventID,
@@ -476,6 +484,8 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 
 	// ERP finalisation lifecycle. Always populated — the FE decides whether
 	// to render the retry banner based on Status.
+	out.PaymentReviewRequired = row.PaymentReviewRequired
+	out.ERPPendingItems = row.ERPPendingItems
 	out.ERPFinalisation = &ERPFinalisationOutput{
 		Status:        row.ERPFinalisationStatus,
 		LastError:     row.ERPLastError,

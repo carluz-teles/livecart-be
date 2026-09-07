@@ -539,3 +539,14 @@ func TestPedidoPorUnidades(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePurchaseItems_WhitespaceAfterMultiplication(t *testing.T) {
+	for _, text := range []string{"1207x 6", "1207x6", "1207 x6", "1207 × 6", "1207× 6", "1207X\t6", "1207✕ 6"} {
+		t.Run(text, func(t *testing.T) {
+			got := ParsePurchaseItems(text)
+			if len(got) != 1 || got[0].Keyword != "1207" || got[0].Quantity != 6 {
+				t.Fatalf("ParsePurchaseItems(%q) = %#v; want product 1207, quantity 6", text, got)
+			}
+		})
+	}
+}

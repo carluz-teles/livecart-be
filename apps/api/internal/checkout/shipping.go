@@ -656,6 +656,8 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		}
 	}
 
+	_ = s.invalidatePendingPix(ctx, cart)
+
 	// Re-read the cart to pick up the (possibly updated) coupon discount
 	// for the response summary.
 	refreshed, err := s.repo.GetCartByToken(ctx, input.Token)

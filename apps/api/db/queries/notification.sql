@@ -5,9 +5,9 @@
 -- name: CreateNotificationLog :one
 INSERT INTO notification_logs (
     store_id, event_id, cart_id, platform_user_id, platform_handle,
-    notification_type, channel, status, message_text
+    notification_type, channel, status, message_text,platform_comment_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;
 
 -- name: CreateEmailNotificationLog :exec
@@ -192,3 +192,6 @@ SET status = $2,
 WHERE provider_message_id = $1
 RETURNING *;
 
+
+-- name: GetSentNotificationForComment :one
+SELECT id FROM notification_logs WHERE store_id=$1 AND platform_comment_id=$2 AND notification_type=$3 AND status='sent' ORDER BY created_at DESC LIMIT 1;

@@ -1593,11 +1593,11 @@ func (s *Service) RemovePlatform(ctx context.Context, sessionID, platformLiveID 
 
 // AddToCart adds a product to a user's cart during a live event.
 // Creates a new cart if one doesn't exist for this user in this event.
-func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCartOutput, error) {
+func (s *Service) getOrCreateCartForItem(ctx context.Context, input AddToCartInput) (*CartRow, bool, error) {
 	// Generate token for new carts
 	token, err := generateCartToken()
 	if err != nil {
-		return AddToCartOutput{}, fmt.Errorf("generating cart token: %w", err)
+		return nil, false, fmt.Errorf("generating cart token: %w", err)
 	}
 
 	// Resolve customer for this cart so the Customers tab reflects activity
@@ -1650,7 +1650,16 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 		IsVip:          isVip,
 	})
 	if err != nil {
-		return AddToCartOutput{}, fmt.Errorf("getting or creating cart: %w", err)
+		return nil, false, fmt.Errorf("getting or creating cart: %w", err)
+	}
+
+	return cart, isNew, nil
+}
+
+func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCartOutput, error) {
+	cart, isNew, err := s.getOrCreateCartForItem(ctx, input)
+	if err != nil {
+		return AddToCartOutput{}, err
 	}
 
 	// Add item to cart, attributed to the session it was added in (first-touch).

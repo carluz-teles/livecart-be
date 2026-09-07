@@ -130,7 +130,7 @@ func (s *Service) garantirPedidoDoCarrinho(ctx context.Context, cartID, storeID 
 	}
 
 	switch st.State {
-	case OrderStateOpen, OrderStateMutating, OrderStateConfirmed:
+	case OrderStateOpen, OrderStateMutating, OrderStateReflecting, OrderStateConfirmed:
 		return nil // já existe
 	case OrderStateCancelled:
 		return nil // não ressuscita carrinho cancelado
@@ -249,6 +249,7 @@ func (s *Service) criarPedidoParaCarrinho(ctx context.Context, cartID, storeID s
 			zap.String("cart_id", cartID),
 			zap.Error(mutErr),
 		)
+		return mutErr
 	}
 	return nil
 }
@@ -389,19 +390,33 @@ func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaApli
 			// ninguém. Só destravou porque um humano foi ao banco.
 			return s.recriarPedidoSumido(ctx, cartID, storeID)
 		}
-		if err != nil || aplicada == nil {
-			return err // erro, ou perdeu o CAS e outro está cuidando
+		if errors.Is(err, ErrOrderBusy) {
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			tentativa--
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if aplicada == nil {
+			return ErrOrderBusy
 		}
 		grid, gridErr := s.cartGrid(ctx, cartID)
-		if gridErr != nil || mesmaGrade(aplicada, grid) {
+		if gridErr != nil {
+			return gridErr
+		}
+		if mesmaGrade(aplicada, grid) {
 			return nil
 		}
 		ja = aplicada
 	}
-	logger.From(ctx, s.logger).Info("grid still moving after re-checking; the next comment continues",
-		zap.String("cart_id", cartID),
-	)
-	return nil
+	return ErrOrderBusy
 }
 
 // recriarPedidoSumido solta o vínculo com um pedido que o ERP diz não existir e
@@ -453,7 +468,7 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 	// na quinta; o lojista soma no mesmo pedido para sair um frete só. Só o
 	// faturamento fecha a porta — ver casaDaMutacao.
 	casa := st.State
-	if casa == OrderStateMutating {
+	if casa == OrderStateMutating || casa == OrderStateReflecting {
 		// Encontrar o carrinho JÁ em 'mutating' é a mesma notícia que perder o
 		// CAS logo abaixo: outra mutação está escrevendo este pedido, monta a
 		// grade a partir do banco — onde o item deste chamador já está — e
@@ -467,7 +482,7 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 		logger.From(ctx, s.logger).Info("order mutation already in flight, latest grid will win",
 			zap.String("cart_id", cartID),
 		)
-		return nil, nil
+		return nil, ErrOrderBusy
 	}
 	if !podeMutar(casa) || st.ExternalOrderID == "" {
 		return nil, fmt.Errorf("cart %s não aceita mutação no estado %s: %w", cartID, st.State, ErrCartNotConverted)
@@ -493,7 +508,7 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 		logger.From(ctx, s.logger).Info("order mutation already in flight, latest grid will win",
 			zap.String("cart_id", cartID),
 		)
-		return nil, nil
+		return nil, ErrOrderBusy
 	}
 	defer func() {
 		// Contexto SEM cancelamento, e essa é a parte que importa.
@@ -507,7 +522,8 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 		// Medido numa live simulada de 15 compradores: seis carrinhos travados em
 		// 'mutating' e parados ali, com 10 itens no banco que nunca chegaram ao
 		// pedido.
-		fim := context.WithoutCancel(ctx)
+		fim, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel()
 		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateMutating, casa); backErr != nil {
 			logger.From(fim, s.logger).Error("failed to return cart to its resting state after mutation",
 				zap.String("cart_id", cartID),
@@ -593,6 +609,11 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 			return nil, gridErr
 		}
 		if mesmaGrade(enviada, grid) {
+			if ack, ok := s.repo.(ERPGridAcknowledger); ok {
+				if err := ack.ConfirmERPGrid(ctx, cartID, enviada); err != nil {
+					return nil, err
+				}
+			}
 			return enviada, nil // convergiu: o pedido já reflete o carrinho
 		}
 		final, mergeErr := s.preservarLinhasDoLojista(ctx, erpProvider, orderID, grid)
@@ -601,6 +622,11 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 		}
 		if err := s.enviarGrade(ctx, erpProvider, cartID, storeID, orderID, final); err != nil {
 			return nil, err
+		}
+		if ack, ok := s.repo.(ERPGridAcknowledger); ok {
+			if err := ack.ConfirmERPGrid(ctx, cartID, grid); err != nil {
+				return nil, err
+			}
 		}
 		enviada = grid
 		if passada >= maxPassadas {
@@ -619,12 +645,16 @@ func mesmaGrade(a, b []providers.ERPOrderItem) bool {
 	if a == nil || len(a) != len(b) {
 		return false
 	}
-	porProduto := make(map[string]int, len(a))
+	type itemKey struct {
+		productID string
+		unitPrice int64
+	}
+	porProduto := make(map[itemKey]int, len(a))
 	for _, it := range a {
-		porProduto[it.ProductID] += it.Quantity
+		porProduto[itemKey{it.ProductID, it.UnitPrice}] += it.Quantity
 	}
 	for _, it := range b {
-		porProduto[it.ProductID] -= it.Quantity
+		porProduto[itemKey{it.ProductID, it.UnitPrice}] -= it.Quantity
 	}
 	for _, resto := range porProduto {
 		if resto != 0 {
@@ -710,10 +740,13 @@ func (s *Service) enviarGrade(ctx context.Context, erpProvider providers.ERPProv
 		return fmt.Errorf("cart order %s: %w: %w", orderID, ErrPedidoFaturado, err)
 	}
 	if errors.Is(err, providers.ErrOrderStockLaunched) {
-		logger.From(ctx, s.logger).Warn("order locked by manually launched stock; reversing once to edit it",
+		logger.From(ctx, s.logger).Warn("order locked by launched stock; reversing once after invoice check",
 			zap.String("cart_id", cartID),
 			zap.String("external_order_id", orderID),
 		)
+		if _, checkErr := erpProvider.GetOrderItems(ctx, orderID); checkErr != nil {
+			return fmt.Errorf("checking order before reversing stock: %w", checkErr)
+		}
 		revErr := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
 			return erpProvider.ReverseOrderStock(ctx, orderID)
 		})
@@ -877,14 +910,10 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 				return fmt.Errorf("opening order before confirm: %w", err)
 			}
 		}
-	case OrderStateMutating:
-		// Mutação presa (processo morreu no meio): a grade pode estar velha.
-		if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateMutating, OrderStateOpen); err != nil {
-			return fmt.Errorf("unsticking mutating cart: %w", err)
-		}
-		if _, err := s.applyCartGridToOrder(ctx, cartID, storeID, st.ExternalOrderID, nil); err != nil {
-			return fmt.Errorf("reconciling order grid before confirm: %w", err)
-		}
+	case OrderStateMutating, OrderStateReflecting:
+		// A live write or reflection owns this order. Only the timed recovery
+		// sweep may restore an abandoned claim; a payment must not steal it.
+		return ErrOrderBusy
 	case OrderStateOpen:
 		// caminho normal
 	default:
@@ -898,6 +927,27 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 	if fresh.ExternalOrderID == "" {
 		return ErrCartNotConverted
 	}
+
+	if fresh.State == OrderStateConfirmed {
+		return nil
+	}
+	if fresh.State != OrderStateOpen {
+		return ErrOrderBusy
+	}
+	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateOpen, OrderStateMutating)
+	if err != nil {
+		return err
+	}
+	if !won {
+		return ErrOrderBusy
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if _, err := s.repo.TransitionCartERPOrderState(cleanup, cartID, OrderStateMutating, OrderStateOpen); err != nil {
+			s.logger.Error("releasing ERP payment confirmation claim", zap.String("cart_id", cartID), zap.Error(err))
+		}
+	}()
 
 	// A GRADE É RECONCILIADA ANTES DE APROVAR. Sempre.
 	//
@@ -981,11 +1031,12 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		}
 	}
 
-	if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, fresh.State, OrderStateConfirmed); err != nil {
-		logger.From(ctx, s.logger).Error("failed to transition cart to confirmed",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
+	won, err = s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateMutating, OrderStateConfirmed)
+	if err != nil {
+		return fmt.Errorf("confirming ERP order state: %w", err)
+	}
+	if !won {
+		return ErrOrderBusy
 	}
 	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
 		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done after confirm",
@@ -1038,7 +1089,7 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 		return nil
 	case OrderStateConfirmed:
 		return fmt.Errorf("cart %s confirmado — cancelamento pós-pago é fluxo de refund", cartID)
-	case OrderStateMutating:
+	case OrderStateMutating, OrderStateReflecting:
 		// Há uma escrita EM VOO neste pedido. Cancelar por cima dela produz o
 		// pior desfecho possível: o cancelamento devolve a reserva, o `PUT` que
 		// estava no ar aterrissa logo depois e o pedido cancelado volta a segurar
@@ -1094,7 +1145,8 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 		// Devolve o estado para a retentativa refazer o ciclo inteiro. Deixá-lo
 		// em 'cancelled' com o pedido vivo no ERP seria pior: o carrinho pararia
 		// de ser reconciliado e a reserva ficaria presa lá para sempre.
-		fim := context.WithoutCancel(ctx) // a compensação sobrevive ao prazo
+		fim, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel() // a compensação sobrevive ao prazo
 		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateCancelled, st.State); backErr != nil {
 			logger.From(fim, s.logger).Error("failed to return cart from cancelled after ERP refusal",
 				zap.String("cart_id", cartID),
@@ -1165,7 +1217,8 @@ func (s *Service) soltarPedidoConfirmado(ctx context.Context, cartID, storeID, m
 	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
 		return erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, providers.SituacaoCancelada)
 	}); err != nil {
-		fim := context.WithoutCancel(ctx) // a compensação sobrevive ao prazo
+		fim, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		defer cancel() // a compensação sobrevive ao prazo
 		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateCancelled, OrderStateConfirmed); backErr != nil {
 			logger.From(fim, s.logger).Error("failed to return confirmed cart from cancelled after ERP refusal",
 				zap.String("cart_id", cartID),
@@ -1217,13 +1270,21 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 				logger.From(opCtx, s.logger).Warn("sweep failed to resume a stuck creation",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
+		case op.State == OrderStateReflecting:
+			resting := op.RestingState
+			if resting == "" {
+				resting = OrderStateOpen
+			}
+			if _, err := s.repo.TransitionCartERPOrderState(ctx, op.CartID, OrderStateReflecting, resting); err != nil {
+				s.logger.Warn("restoring interrupted reflection", zap.Error(err))
+			}
 		case op.State == OrderStateMutating && op.ExternalOrderID != "":
 			if _, err := s.applyCartGridToOrder(opCtx, op.CartID, op.StoreID, op.ExternalOrderID, nil); err != nil {
 				logger.From(opCtx, s.logger).Warn("sweep failed to reconcile mutating cart",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 				continue
 			}
-			if _, err := s.repo.TransitionCartERPOrderState(opCtx, op.CartID, OrderStateMutating, OrderStateOpen); err != nil {
+			if _, err := s.repo.TransitionCartERPOrderState(opCtx, op.CartID, OrderStateMutating, restingOrderState(op.RestingState)); err != nil {
 				logger.From(opCtx, s.logger).Error("sweep failed to return cart to open",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
@@ -1300,4 +1361,11 @@ func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter 
 			)
 		}
 	}
+}
+
+func restingOrderState(state string) string {
+	if state == OrderStateConfirmed {
+		return state
+	}
+	return OrderStateOpen
 }

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -75,7 +74,15 @@ func NewBaseProvider(cfg BaseProviderConfig) *BaseProvider {
 func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body any, headers map[string]string) (*http.Response, []byte, error) {
 	// Throttle request based on API rate limit headers
 	if b.RateLimiter != nil {
-		if err := b.RateLimiter.Wait(ctx); err != nil {
+		var waitErr error
+		if limiter, ok := b.RateLimiter.(interface {
+			WaitRequest(context.Context, string) error
+		}); ok {
+			waitErr = limiter.WaitRequest(ctx, method)
+		} else {
+			waitErr = b.RateLimiter.Wait(ctx)
+		}
+		if err := waitErr; err != nil {
 			return nil, nil, err
 		}
 	}
@@ -124,6 +131,20 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 	}
 	defer resp.Body.Close()
 
+	// One event per refused HTTP request, with method and endpoint. Retry-loop
+	// messages alone cannot count requests or distinguish reads from writes.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		logger.From(ctx, b.Logger).Warn("provider HTTP 429",
+			zap.String("integration_id", b.IntegrationID),
+			zap.String("method", method),
+			zap.String("path", req.URL.EscapedPath()),
+			zap.String("rate_limit", resp.Header.Get("X-RateLimit-Limit")),
+			zap.String("rate_remaining", resp.Header.Get("X-RateLimit-Remaining")),
+			zap.String("rate_reset", resp.Header.Get("X-RateLimit-Reset")),
+			zap.String("retry_after", resp.Header.Get("Retry-After")),
+		)
+	}
+
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading response body: %w", err)
@@ -145,6 +166,14 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 		ErrorMessage:    errorMsg,
 	})
 
+	if limiter, ok := b.RateLimiter.(interface {
+		ObserveResponse(context.Context, string, int, http.Header) error
+	}); ok {
+		if err := limiter.ObserveResponse(ctx, method, resp.StatusCode, resp.Header); err != nil {
+			b.Logger.Warn("persisting API budget", zap.Error(err))
+		}
+		return resp, respBody, nil
+	}
 	// Update rate limiter with real API data from response headers
 	if b.RateLimiter != nil {
 		if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
@@ -269,21 +298,7 @@ func IsSuccessStatus(statusCode int) bool {
 // limite 30, reset até 58). NÃO existe header `Retry-After` ali; `Retry-After`
 // fica como fallback para outros provedores.
 func resetDoRateLimit(h http.Header, padrao time.Duration) time.Duration {
-	for _, chave := range []string{"X-RateLimit-Reset", "RateLimit-Reset", "Retry-After"} {
-		v := strings.TrimSpace(h.Get(chave))
-		if v == "" {
-			continue
-		}
-		if segundos, err := strconv.Atoi(v); err == nil && segundos > 0 && segundos <= 300 {
-			return time.Duration(segundos) * time.Second
-		}
-		if quando, err := http.ParseTime(v); err == nil {
-			if d := time.Until(quando); d > 0 && d <= 5*time.Minute {
-				return d
-			}
-		}
-	}
-	return padrao
+	return ratelimit.RetryAfter(h, padrao)
 }
 
 // DoRequestRetrying429 repete a requisição APENAS quando a API recusa por rate
@@ -310,7 +325,7 @@ func (b *BaseProvider) DoRequestRetrying429(ctx context.Context, maxRetries int,
 		// folga depois da espera.
 		if prazo, temPrazo := ctx.Deadline(); temPrazo {
 			if restante := time.Until(prazo); restante <= espera {
-				logger.From(ctx, b.Logger).Warn("rate limited on a write, and the reset does not fit the remaining deadline — handing the 429 back to the caller",
+				logger.From(ctx, b.Logger).Warn("rate limited request: reset exceeds remaining deadline",
 					zap.String("integration_id", b.IntegrationID),
 					zap.String("method", method),
 					zap.Duration("reset_in", espera),
@@ -320,7 +335,7 @@ func (b *BaseProvider) DoRequestRetrying429(ctx context.Context, maxRetries int,
 			}
 		}
 
-		logger.From(ctx, b.Logger).Warn("rate limited on a write (429) — waiting for the window to roll",
+		logger.From(ctx, b.Logger).Warn("rate limited request (429): waiting for reset",
 			zap.String("integration_id", b.IntegrationID),
 			zap.String("method", method),
 			zap.Int("attempt", tentativa+1),

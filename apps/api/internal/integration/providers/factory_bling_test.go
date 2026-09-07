@@ -116,7 +116,7 @@ func TestFactoryBlingUsaLimitadorPreditivoENaoOAdaptativo(t *testing.T) {
 
 // O Tiny NÃO pode mudar de limitador: ele recebe headers e o adaptativo é o
 // certo para ele. Consertar o Bling não pode mexer em quem fatura hoje.
-func TestFactoryTinyContinuaNoAdaptativo(t *testing.T) {
+func TestFactoryTinyUsesAccountAndMethodBudget(t *testing.T) {
 	mgr := ratelimit.NewManager(zap.NewNop())
 	f := NewFactory(FactoryConfig{
 		Logger:           zap.NewNop(),
@@ -136,8 +136,8 @@ func TestFactoryTinyContinuaNoAdaptativo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ehAdaptativo := p.(*tinyFalso).cfg.RateLimiter.(*ratelimit.AdaptiveLimiter); !ehAdaptativo {
-		t.Errorf("o Tiny recebeu %T, queria o AdaptiveLimiter — ele tem headers para reconciliar",
+	if _, ehAdaptativo := p.(*tinyFalso).cfg.RateLimiter.(*ratelimit.Tiny); !ehAdaptativo {
+		t.Errorf("o Tiny recebeu %T, queria a cota por conta e categoria de requisição",
 			p.(*tinyFalso).cfg.RateLimiter)
 	}
 }

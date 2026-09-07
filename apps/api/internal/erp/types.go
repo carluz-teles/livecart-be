@@ -49,6 +49,7 @@ const (
 	OrderStateConverting = "converting"
 	OrderStateOpen       = "open"
 	OrderStateMutating   = "mutating"
+	OrderStateReflecting = "reflecting"
 	OrderStateConfirmed  = "confirmed"
 	OrderStateCancelled  = "cancelled"
 )
@@ -172,6 +173,7 @@ type CartFinalisationStatus struct {
 // mid-op) — the input to the reconciliation sweep. Canonical home is this
 // package; internal/integration aliases it.
 type StuckERPOrderOp struct {
+	RestingState    string
 	CartID          string
 	State           string
 	ExternalOrderID string

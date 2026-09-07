@@ -28,9 +28,8 @@ import (
 var tinyAPIBaseURL = "https://api.tiny.com.br/public-api/v3"
 
 // Backoff entre as retentativas do GET /estoque quando o Tiny estrangula (429).
-// `var` só para o teste encurtar a espera; produção nunca reatribui. ~1.2s cobre
-// a janela de ~1 req/s do Tiny.
-var estoqueThrottleBackoff = 1200 * time.Millisecond
+// Sem cabeçalho, aguarda uma janela de minuto. `var` permite encurtar os testes.
+var estoqueThrottleBackoff = time.Minute
 
 // Tiny is a Brazilian ERP and interprets `data` fields against São Paulo
 // local time. Sending UTC made orders created late at night land on the next
@@ -322,7 +321,7 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 		// it as a "no results" partial failure instead of escalating to 500.
 		// Reuses the same sentinel BaseProvider.DoRequest emits after retries
 		// so handleProviderError keeps the consistent integration-state path.
-		return nil, &ratelimit.ErrRateLimited{}
+		return nil, &ratelimit.ErrRateLimited{RetryAfter: ratelimit.RetryAfter(resp.Header, time.Minute)}
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("list products failed: status %d, body: %s", resp.StatusCode, string(body))
@@ -468,15 +467,9 @@ func inteiroDoCru(v any) int {
 func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool) {
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
 
-	// O 429 do Tiny (limite ~1 req/s) é TRANSITÓRIO e não pode virar saldo
-	// físico. Ele estoura quando uma varredura de estoque concorrente consome a
-	// cota no mesmo segundo em que o lojista cadastra um produto — foi o que
-	// derrubou o 834962410 em 22/08/2026 (429 no GET /estoque durante o cadastro
-	// → gravou o físico), enquanto o 837156336, 2s depois, passou. Cair no físico
-	// aqui viola a opção "apenas disponível" e reoferta estoque reservado. Então
-	// re-tentamos o estrangulamento com backoff curto (o reset do Tiny é ~1s),
-	// capado para não travar o cadastro; 404 (produto sem controle de estoque) e
-	// os demais erros continuam caindo no físico na hora, sem espera.
+	// A recusa pode corresponder à janela de segundo ou de minuto. Respeitar
+	// o reset completo e o prazo do chamador; nunca substituir saldo disponível
+	// desconhecido pelo físico após esgotar as tentativas.
 	const maxTentativasEstoque = 4
 	var resp *http.Response
 	var body []byte
@@ -487,14 +480,12 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 		if !estrangulado || tentativa >= maxTentativasEstoque {
 			break
 		}
-		espera := estoqueThrottleBackoff // ~1 req/s do Tiny
-		if ra := resp.Header.Get("X-RateLimit-Reset"); ra != "" {
-			if s, e := strconv.Atoi(ra); e == nil && s > 0 && s <= 2 {
-				espera = time.Duration(s) * time.Second
-			}
+		espera := ratelimit.RetryAfter(resp.Header, estoqueThrottleBackoff)
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= espera {
+			return 0, false
 		}
 		if t.Logger != nil {
-			t.Logger.Warn("tiny available stock throttled (429); retrying before physical fallback",
+			t.Logger.Warn("tiny available stock throttled (429): waiting for reset",
 				zap.String("external_product_id", productID),
 				zap.Int("tentativa", tentativa),
 				zap.Duration("espera", espera),
@@ -621,7 +612,7 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	// resultado, descartava produto por produto até sobrar zero e dizer ao
 	// lojista que o produto não existe no ERP.
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, &ratelimit.ErrRateLimited{}
+		return nil, &ratelimit.ErrRateLimited{RetryAfter: ratelimit.RetryAfter(resp.Header, time.Minute)}
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("get product failed: status %d", resp.StatusCode)
@@ -2055,11 +2046,11 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 		return fmt.Errorf("updating order items: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		if bloqueioPorEstoqueLancado(body) {
-			return providers.ErrOrderStockLaunched
-		}
 		if bloqueioPorNotaFiscal(body) {
 			return providers.ErrPedidoComNotaFiscal
+		}
+		if bloqueioPorEstoqueLancado(body) {
+			return providers.ErrOrderStockLaunched
 		}
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: pedido %s: %s",

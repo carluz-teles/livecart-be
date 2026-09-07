@@ -311,6 +311,7 @@ SET status = 'expired', cancelled_reason = 'expired'
 WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT payment_review_required
   AND NOT never_expires   -- VIP: carrinho eterno nunca expira (defesa explícita; expires_at NULL já barraria)
   AND expires_at < now()
   AND NOT EXISTS (
@@ -338,6 +339,7 @@ SET status = 'cancelled', cancelled_reason = 'store_cancelled'
 WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT payment_review_required
 RETURNING *;
 
 -- name: RestoreCancelledCartAsPaid :one
@@ -369,18 +371,12 @@ WITH pago AS (
         external_order_id   = NULL,
         erp_stock_launched  = FALSE,
         erp_op_started_at   = NULL,
-        paid_amount_cents   = c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+        paid_amount_cents   = c.paid_amount_cents
     WHERE c.id = $1
       AND c.status = 'cancelled'
       AND c.cancelled_reason = 'store_cancelled'
       AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
     RETURNING *
-), carimbo AS (
-    UPDATE cart_items ci
-    SET paid_quantity = ci.quantity
-    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
-      AND ci.paid_quantity < ci.quantity
-    RETURNING 1
 )
 SELECT * FROM pago;
 
@@ -434,14 +430,15 @@ WITH inedito AS (
     RETURNING *
 ), carimbo AS (
     UPDATE cart_items ci
-    SET paid_quantity = ci.quantity
+    SET paid_quantity = ci.quantity - ci.waitlisted_quantity
     -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
     -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
     -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
     -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
     -- forma: carimba quando a linha gravada diz que está paga.
     WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
-      AND ci.paid_quantity < ci.quantity
+      AND ci.paid_quantity < ci.quantity-ci.waitlisted_quantity
+      AND (SELECT primeira_vez FROM inedito)
     RETURNING 1
 ), livro AS (
     -- Uma linha por cobrança. É o que permite o pedido no ERP dizer "R$ 40 pagos
@@ -949,6 +946,7 @@ SELECT
     c.checkout_expires_at,
     c.customer_email,
     c.payment_status,
+    c.payment_review_required,
     c.paid_at,
     c.payment_integration_id,
     c.created_at,
@@ -1186,7 +1184,8 @@ WHERE cart_id = $1 AND product_id = $2;
 -- um pedido no ERP, já que a escrita é substituição da grade inteira.
 UPDATE carts
 SET erp_order_state = sqlc.arg(to_state)::varchar,
-    erp_op_started_at = CASE WHEN sqlc.arg(to_state)::varchar IN ('converting','mutating') THEN now() ELSE erp_op_started_at END
+    erp_op_started_at = CASE WHEN sqlc.arg(to_state)::varchar IN ('converting','mutating','reflecting') THEN now() ELSE erp_op_started_at END,
+    erp_op_resting_state = CASE WHEN sqlc.arg(to_state)::varchar IN ('mutating','reflecting') THEN sqlc.arg(from_state)::text ELSE NULL END
 WHERE carts.id = (SELECT COALESCE(j.joined_to_cart_id, j.id) FROM carts j WHERE j.id = sqlc.arg(cart_id))
   AND carts.erp_order_state = sqlc.arg(from_state);
 
@@ -1218,10 +1217,10 @@ UPDATE carts SET erp_stock_launched = $2 WHERE id = $1;
 -- ciclo). NUNCA resetar para 'none' (a chamada em voo pode ter sucedido
 -- server-side e o caminho legado criaria pedido duplicado).
 SELECT c.id, c.erp_order_state, c.erp_op_started_at, COALESCE(c.external_order_id,'') AS external_order_id,
-       le.store_id
+       le.store_id, COALESCE(c.erp_op_resting_state,CASE WHEN c.payment_status='paid' THEN 'confirmed' ELSE 'open' END)::text AS resting_state
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
-WHERE c.erp_order_state IN ('converting','mutating')
+WHERE c.erp_order_state IN ('converting','mutating','reflecting')
   AND c.erp_op_started_at < now() - make_interval(secs => sqlc.arg(older_than_seconds)::int);
 
 -- name: GetCartGMVCents :one
@@ -1299,7 +1298,7 @@ LIMIT 1;
 -- Guarda a cobranca PIX viva do carrinho: o id que da para cancelar e o valor
 -- que o QR na mao do comprador cobra.
 UPDATE carts
-SET pix_charge_id = sqlc.arg(pix_charge_id),
+SET pix_cancel_lease_until=NULL,pix_charge_id = sqlc.arg(pix_charge_id),
     pix_amount_cents = sqlc.arg(pix_amount_cents)
 WHERE id = sqlc.arg(id);
 
@@ -1312,32 +1311,18 @@ SET pix_charge_id = NULL,
 WHERE id = sqlc.arg(id);
 
 -- name: TakeCartPixCharge :one
--- Le e LIMPA a cobranca viva na mesma instrucao.
---
--- Duas mutacoes simultaneas no mesmo carrinho tentariam cancelar a mesma
--- cobranca duas vezes; quem le aqui e o unico que recebe o id, entao o
--- cancelamento no gateway sai uma vez so.
---
--- O valor devolvido tem de ser o ANTIGO. `RETURNING` num UPDATE entrega a linha
--- DEPOIS da escrita, entao a forma direta devolveria os NULL que acabamos de
--- gravar. A CTE le antes, e o `FOR UPDATE` nela serializa os concorrentes: o
--- segundo a chegar espera, reavalia o predicado com a coluna ja nula, nao
--- encontra linha e sai sem id — que e exatamente o vencedor unico que se quer.
---
--- Evita de proposito o `RETURNING OLD.*` do Postgres 18: a query passaria a
--- depender da versao do servidor, e o custo aqui e uma CTE.
-WITH tomada AS (
-    SELECT carts.id AS cart_id, carts.pix_charge_id, carts.pix_amount_cents
-    FROM carts
-    WHERE carts.id = sqlc.arg(id) AND carts.pix_charge_id IS NOT NULL
-    FOR UPDATE
-)
-UPDATE carts c
-SET pix_charge_id = NULL,
-    pix_amount_cents = NULL
-FROM tomada
-WHERE c.id = tomada.cart_id
-RETURNING tomada.pix_charge_id, tomada.pix_amount_cents;
+-- Keep the reference until the gateway confirms cancellation; a timeout must
+-- remain retryable. Clearing is a compare-and-swap against this exact charge.
+UPDATE carts SET pix_cancel_lease_until=now()+interval '60 seconds' WHERE id=$1 AND COALESCE(pix_charge_id,'')<>'' AND (pix_cancel_lease_until IS NULL OR pix_cancel_lease_until<now()) RETURNING pix_charge_id,pix_amount_cents;
+
+-- name: HasPendingPixCharge :one
+SELECT EXISTS(SELECT 1 FROM carts WHERE id=$1 AND COALESCE(pix_charge_id,'')<>'');
+
+-- name: ReleasePixCancellationLease :exec
+UPDATE carts SET pix_cancel_lease_until=NULL WHERE id=$1 AND pix_charge_id=$2;
+
+-- name: ClearCancelledPixCharge :exec
+UPDATE carts SET pix_charge_id=NULL,pix_amount_cents=NULL,pix_cancel_lease_until=NULL WHERE id=$1 AND pix_charge_id=$2;
 
 -- name: CancelCartOnRefund :execrows
 -- O reembolso mata a venda, e o carrinho precisa morrer junto.
@@ -1429,7 +1414,11 @@ WHERE p.external_id = sqlc.arg(external_product_id)
 --   reserva LOCAL   → o ERP não sabe de nada nosso; conta tudo que está vivo
 --
 -- `conta_com_pedido` é esse interruptor. O chamador o deriva do modo efetivo.
-SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
+SELECT COALESCE(SUM(CASE WHEN NOT sqlc.arg(conta_com_pedido)::bool
+    AND COALESCE(c.external_order_id,'')<>''
+    AND COALESCE(c.erp_order_status,'') NOT IN ('','cancelado','nao_encontrado')
+    THEN GREATEST(0,ci.quantity-ci.waitlisted_quantity-COALESCE(ci.erp_confirmed_quantity,0))
+    ELSE ci.quantity-ci.waitlisted_quantity END),0)::int
 FROM cart_items ci
 JOIN carts c ON c.id = ci.cart_id
 JOIN products p ON p.id = ci.product_id
@@ -1459,6 +1448,7 @@ WHERE p.external_id = sqlc.arg(external_product_id)
      OR c.erp_order_status = 'cancelado'
      OR c.erp_order_status = 'nao_encontrado'
      OR sqlc.arg(conta_com_pedido)::bool
+     OR ci.erp_pending_since IS NOT NULL
       )
   AND c.status NOT IN ('expired', 'cancelled')
   AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
@@ -1477,7 +1467,9 @@ INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_qu
 VALUES (sqlc.arg(cart_id)::uuid, sqlc.arg(product_id)::uuid, sqlc.arg(quantity), sqlc.arg(unit_price), 0)
 ON CONFLICT (cart_id, product_id) DO UPDATE
 SET quantity   = EXCLUDED.quantity + cart_items.waitlisted_quantity,
-    unit_price = EXCLUDED.unit_price;
+    unit_price = EXCLUDED.unit_price,
+    erp_confirmed_quantity = EXCLUDED.quantity
+WHERE cart_items.erp_pending_since IS NULL;
 
 -- name: RemoveCartItemFromERP :exec
 -- Tira do carrinho o item que o lojista apagou do pedido.
@@ -1516,10 +1508,12 @@ WHERE cart_id = sqlc.arg(cart_id)::uuid
 -- name: ConfirmarItemNoERP :exec
 -- Limpa a marca: o ERP conhece esta linha.
 UPDATE cart_items
-SET erp_pending_since = NULL
+SET erp_pending_since = NULL, erp_confirmed_quantity = quantity - waitlisted_quantity
 WHERE cart_id = sqlc.arg(cart_id)::uuid
   AND product_id = sqlc.arg(product_id)::uuid
-  AND erp_pending_since IS NOT NULL;
+  AND erp_pending_since IS NOT NULL
+  AND (erp_confirmed_quantity = quantity - waitlisted_quantity
+       OR EXISTS(SELECT 1 FROM carts c WHERE c.id=cart_items.cart_id AND c.erp_order_state='none' AND COALESCE(c.external_order_id,'')=''));
 
 -- name: ListarItensPendentesNoERP :many
 -- As linhas que o ERP não conhece, mais velhas que a carência.

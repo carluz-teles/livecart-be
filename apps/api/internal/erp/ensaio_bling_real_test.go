@@ -1,3 +1,5 @@
+//go:build external
+
 package erp
 
 // O ENSAIO: um carrinho de verdade virando pedido na conta REAL do Bling.

@@ -3704,6 +3704,13 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 	for attempt := 0; attempt <= productWebhookMaxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			var limited *ratelimit.ErrRateLimited
+			if errors.As(lastErr, &limited) {
+				backoff = max(backoff, limited.RetryAfter)
+			}
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= backoff {
+				return false, lastErr
+			}
 			s.anotarEspelho(ctx, "retentativa", externalProductID)
 			logger.From(ctx, s.logger).Warn("retrying product webhook processing",
 				zap.String("store_id", storeID),
@@ -4324,8 +4331,8 @@ func (s *Service) ResolvePaymentProvider(ctx context.Context, storeID, provider 
 // RestoreCancelledCartAsPaid satisfies payment.CartPaymentGateway (LIV-84 inverse
 // race): delega ao repo, que numa única tx restaura o cart cancelado pelo lojista
 // para pago e retoma o estoque. Mesmo repo/pool do resto do consumer.
-func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (bool, string, error) {
-	return s.repo.RestoreCancelledCartAsPaid(ctx, cartID, storeID, paymentStatus, paymentID, paidAt, paymentMethod)
+func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64, facts ...events.Envelope) (bool, string, error) {
+	return s.repo.RestoreCancelledCartAsPaid(ctx, cartID, storeID, paymentStatus, paymentID, paidAt, paymentMethod, amountCents, facts...)
 }
 
 // CartPaymentStatus returns the cart's current payment status ("" when the cart
@@ -4350,8 +4357,8 @@ func (s *Service) MarkCartRefunded(ctx context.Context, cartID string) (string, 
 // paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
 // cart expired/cancelled between the charge and the webhook, and the cart's
 // live_event_id (from the same RETURNING row) on success.
-func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (string, error) {
-	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod, amountCents)
+func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64, facts ...events.Envelope) (string, error) {
+	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod, amountCents, facts...)
 }
 
 // CartGMVCents returns the pure item sum (excludes shipping and coupon) via the

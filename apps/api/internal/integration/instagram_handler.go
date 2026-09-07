@@ -66,14 +66,10 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "empty body")
 	}
 
-	// Signature check. Deploy 1 runs in observation mode: the outcome is
-	// computed and logged, but the payload is processed regardless — a wrong
-	// INSTAGRAM_APP_SECRET in production would otherwise stop every comment
-	// from becoming a cart, and we would find out from the sales chart instead
-	// of an alert. Flip INSTAGRAM_WEBHOOK_ENFORCE_SIGNATURE once the logs show
-	// only "valid" for real Meta traffic.
+	// Reject unauthenticated deliveries by default. An explicit observation
+	// override remains available for a controlled credential investigation.
 	outcome := verifyInstagramSignature(body, c.Get("X-Hub-Signature-256"), config.InstagramAppSecret.String())
-	enforcing := config.InstagramWebhookEnforceSignature.BoolOr(false)
+	enforcing := config.InstagramWebhookEnforceSignature.BoolOr(true)
 
 	if !outcome.ok() {
 		log := logger.From(c.Context(), h.logger).With(
@@ -127,7 +123,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 					zap.String("field", change.Field),
 					zap.Error(err),
 				)
-				// Continue processing other changes
+				return err
 			}
 		}
 
@@ -138,7 +134,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 					zap.String("sender_id", msg.Sender.ID),
 					zap.Error(err),
 				)
-				// Continue processing other messages
+				return err
 			}
 		}
 	}
@@ -247,7 +243,7 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 			zap.String("comment_id", comment.CommentID),
 			zap.Error(err),
 		)
-		// Don't return error - we still want to acknowledge the webhook.
+		return err
 	}
 
 	return nil
@@ -308,7 +304,7 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 			zap.String("message_id", msg.Message.MID),
 			zap.Error(err),
 		)
-		// Don't return error - we still want to acknowledge the webhook
+		return err
 	}
 
 	return nil

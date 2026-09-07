@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -123,7 +124,7 @@ type commentCore interface {
 
 // ProcessInstagramComment processes a live comment from Instagram webhook.
 // All comments are saved to DB. Purchase intents trigger stock check → cart or waitlist.
-func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInstagramCommentInput) error {
+func (s *Service) processInstagramComment(ctx context.Context, input ProcessInstagramCommentInput) error {
 	logger.From(ctx, s.logger).Info("processing instagram comment",
 		zap.String("account_id", input.AccountID),
 		zap.String("media_id", input.MediaID),
@@ -178,22 +179,39 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Find live session by platform_live_id (media_id)
-	session, err := s.core.GetSessionByPlatformLiveID(ctx, input.MediaID)
-	if err != nil {
-		return fmt.Errorf("finding live session: %w", err)
+	var session *SessionOutput
+	var event *EventOutput
+	var err error
+	if commentWasAccepted(ctx) {
+		// A post can be released and reused in another campaign while an ERP
+		// retry is pending. Keep this purchase attached to its original session.
+		snapshot, err := commentSnapshot(ctx)
+		if err != nil {
+			return err
+		}
+		session, event = snapshot.Session, snapshot.Event
+	} else {
+		session, err = s.core.GetSessionByPlatformLiveID(ctx, input.MediaID)
+		if err != nil {
+			return fmt.Errorf("finding live session: %w", err)
+		}
 	}
 	if session == nil {
 		logger.From(ctx, s.logger).Warn("no active live session found for media_id",
 			zap.String("media_id", input.MediaID),
 		)
+		if _, durable := s.ingestRepo.(CommentWorkRepository); durable {
+			return ErrCommentMediaPending
+		}
 		return nil
 	}
 
 	// Get the event (which has store_id) from the session
-	event, err := s.core.GetEventByPlatformLiveID(ctx, input.MediaID)
-	if err != nil {
-		return fmt.Errorf("finding live event: %w", err)
+	if event == nil {
+		event, err = s.core.GetEventByPlatformLiveID(ctx, input.MediaID)
+		if err != nil {
+			return fmt.Errorf("finding live event: %w", err)
+		}
 	}
 	if event == nil {
 		trace.Warn(TracePrefix + "decision: dropped, media resolves to no event")
@@ -209,7 +227,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Paywall (PRD 007): blocked stores stop creating carts from comments.
 	// Existing checkouts and payment webhooks keep working elsewhere.
-	if s.billingGate != nil && s.billingGate.IsStoreBlocked(ctx, event.StoreID) {
+	if s.billingGate != nil && s.billingGate.IsStoreBlocked(ctx, event.StoreID) && !commentWasAccepted(ctx) {
 		logger.From(ctx, s.logger).Info("comment ignored: store subscription blocked",
 			zap.String("comment_id", input.CommentID),
 		)
@@ -224,7 +242,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			EventType:      "live_comments",
 			EventID:        input.CommentID,
 			Payload:        input.RawPayload,
-			SignatureValid: true, // Instagram webhook signature validation could be added
+			SignatureValid: input.SignatureValid,
 		}); err != nil {
 			logger.From(ctx, s.logger).Error("failed to store instagram webhook event",
 				zap.String("comment_id", input.CommentID),
@@ -235,18 +253,21 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	}
 
 	// Increment comment counter on session
-	if err := s.ingestRepo.IncrementLiveSessionComments(ctx, session.ID); err != nil {
-		logger.From(ctx, s.logger).Error("failed to increment comment counter",
-			zap.String("session_id", session.ID),
-			zap.Error(err),
-		)
+	if _, durable := s.ingestRepo.(CommentWorkRepository); !durable {
+		if err := s.ingestRepo.IncrementLiveSessionComments(ctx, session.ID); err != nil {
+			logger.From(ctx, s.logger).Error("failed to increment comment counter",
+				zap.String("session_id", session.ID),
+				zap.Error(err),
+			)
+		}
+
 	}
 
 	// Modo Live é estado EFÊMERO de execução da TRANSMISSÃO, não da campanha
 	// (D17, migration 000113). Ler do evento faria duas sessões simultâneas
 	// compartilharem a mesma pausa, e o estado residual de segunda contaminaria
 	// a live de quarta.
-	if session.ProcessingPaused {
+	if session.ProcessingPaused && !commentWasAccepted(ctx) {
 		logger.From(ctx, s.logger).Info("processing paused, storing comment only",
 			zap.String("event_id", event.ID),
 			zap.String("comment_id", input.CommentID),
@@ -267,6 +288,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		})
 		if err != nil {
 			logger.From(ctx, s.logger).Error("failed to save paused comment", zap.Error(err))
+			return err
 		}
 		return nil
 	}
@@ -277,10 +299,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// person is still trying to buy.
 	blocked, blockErr := s.ingestRepo.IsHandleBlocked(ctx, event.StoreID, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(input.Username), "@")))
 	if blockErr != nil {
-		logger.From(ctx, s.logger).Error("failed to check blocked handle, proceeding",
+		logger.From(ctx, s.logger).Error("failed to check blocked handle",
 			zap.String("username", input.Username),
 			zap.Error(blockErr),
 		)
+		return fmt.Errorf("checking blocked handle: %w", blockErr)
 	} else if blocked {
 		logger.From(ctx, s.logger).Info("comment from blocked handle ignored",
 			zap.String("event_id", event.ID),
@@ -300,6 +323,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		})
 		if err != nil {
 			logger.From(ctx, s.logger).Error("failed to save blocked comment", zap.Error(err))
+			return err
 		}
 		return nil
 	}
@@ -333,7 +357,15 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Cada item é resolvido no produto que ELE nomeia.
 	var resolvidos []pedidoResolvido
 	if hasPurchaseIntent {
-		resolvidos = s.resolverPedidos(ctx, event, session, pedidos)
+		if commentWasAccepted(ctx) {
+			var planErr error
+			resolvidos, planErr = acceptedPlan(ctx)
+			if planErr != nil {
+				return planErr
+			}
+		} else {
+			resolvidos = s.resolverPedidos(ctx, event, session, pedidos)
+		}
 	}
 	// `product` é o primeiro produto casado. As regras de post-commerce e o
 	// registro do comentário guardam um produto só, e é este.
@@ -355,18 +387,16 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	//
 	// Só vale com intenção de compra: comentário qualquer em campanha encerrada
 	// não merece resposta automática.
-	if hasPurchaseIntent {
+	if hasPurchaseIntent && !commentWasAccepted(ctx) {
 		switch WindowAt(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
 		case WindowNotStarted:
 			trace.Info(TracePrefix + "decision: refused, event window has not opened")
 			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowScheduled)
-			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
-			return nil
+			return s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
 		case WindowEnded:
 			trace.Info(TracePrefix + "decision: refused, event window has closed")
 			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowEventEnded)
-			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
-			return nil
+			return s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
 		}
 		// A transmissão pode ter acabado com a campanha ainda aberta — a venda
 		// não entra, mas o comprador é avisado (RN-18).
@@ -374,8 +404,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			trace.Info(TracePrefix+"decision: refused, session no longer accepts purchase",
 				zap.String("session_status", session.Status))
 			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowSessionEnded)
-			s.savePostComment(ctx, session.ID, event.ID, input, "session_ended")
-			return nil
+			return s.savePostComment(ctx, session.ID, event.ID, input, "session_ended")
 		}
 	}
 
@@ -386,11 +415,10 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	//
 	// A lista consultada é a DESTA transmissão, não a do evento: é o que permite
 	// que o post e o story da mesma campanha tenham barreiras diferentes.
-	if IsPostCommerceSessionType(session.Type) && hasPurchaseIntent {
+	if IsPostCommerceSessionType(session.Type) && hasPurchaseIntent && !commentWasAccepted(ctx) {
 		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, session, input, intent, product)
 		if handled {
-			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
-			return nil
+			return s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
 		}
 		product = resolved
 		// Post e story seguem com UM item por comentário. As regras de promoção
@@ -430,6 +458,17 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		matchedQuantity = intent.Quantity
 	}
 
+	if hasPurchaseIntent && product != nil {
+		if work, ok := s.ingestRepo.(CommentWorkRepository); ok {
+			plan, err := encodeAcceptedPlan(resolvidos, event, session)
+			if err != nil {
+				return err
+			}
+			if err := work.AcceptComment(ctx, input.CommentID, plan); err != nil {
+				return err
+			}
+		}
+	}
 	// Save ALL comments to DB
 	commentID, err := s.ingestRepo.CreateLiveComment(ctx, CreateLiveCommentParams{
 		SessionID:         session.ID,
@@ -446,7 +485,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	})
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to save live comment", zap.Error(err))
-		// Continue processing even if save fails
+		return fmt.Errorf("saving comment before purchase: %w", err)
 	}
 
 	// If no purchase intent or no product match, we're done
@@ -491,29 +530,35 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			adicionados = append(adicionados, *item)
 		}
 	}
+	if _, durable := s.ingestRepo.(CommentWorkRepository); durable && ultimoErro != nil {
+		return ultimoErro
+	}
 	if len(adicionados) == 0 {
 		// Nada entrou. Se houve erro, ele sobe para o retry tentar de novo; se
 		// não houve, o comentário simplesmente não gerou item (teto, fila).
 		return ultimoErro
 	}
 
-	// O contador de pedidos do evento conta CARRINHOS, e um comentário é um
-	// carrinho. Ele vivia dentro do corpo por item: com dois produtos no mesmo
-	// comentário, um evento com dez compradoras exibiria mais pedidos do que
-	// carrinhos existem. Hoje o segundo AddToCart devolve IsNewCart=false e o
-	// erro não aparece — mas isso é a implementação do carrinho protegendo o
-	// contador, não o contador estando certo.
-	for _, item := range adicionados {
-		if !item.carrinho.IsNewCart {
-			continue
+	if _, transactionalCounter := s.core.(commentItemWriter); !transactionalCounter {
+		// O contador de pedidos do evento conta CARRINHOS, e um comentário é um
+		// carrinho. Ele vivia dentro do corpo por item: com dois produtos no mesmo
+		// comentário, um evento com dez compradoras exibiria mais pedidos do que
+		// carrinhos existem. Hoje o segundo AddToCart devolve IsNewCart=false e o
+		// erro não aparece — mas isso é a implementação do carrinho protegendo o
+		// contador, não o contador estando certo.
+		for _, item := range adicionados {
+			if !item.carrinho.IsNewCart || item.replayed {
+				continue
+			}
+			if err := s.ingestRepo.IncrementLiveEventOrders(ctx, event.ID); err != nil {
+				logger.From(ctx, s.logger).Error("failed to increment order counter",
+					zap.String("event_id", event.ID),
+					zap.Error(err),
+				)
+			}
+			break
 		}
-		if err := s.ingestRepo.IncrementLiveEventOrders(ctx, event.ID); err != nil {
-			logger.From(ctx, s.logger).Error("failed to increment order counter",
-				zap.String("event_id", event.ID),
-				zap.Error(err),
-			)
-		}
-		break
+
 	}
 
 	// UMA mensagem para o comentário inteiro, e não uma por produto: o carrinho
@@ -556,6 +601,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			zap.Int("itens_pendentes", pendentes),
 			zap.Int("itens_no_comentario", len(adicionados)),
 		)
+		if _, durable := s.ingestRepo.(CommentWorkRepository); durable {
+			return ErrCommentERPPending
+		}
 		return nil
 	}
 
@@ -569,7 +617,14 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	//
 	// Um ERP lento não pode calar o comprador. Mesmo desacoplamento que o aviso
 	// de teto por item já usa.
-	s.sendImmediateNotification(contextoDaMensagem(ctx, event.StoreID), sendNotificationInput{
+	messageCtx, cancelMessage := context.WithTimeout(contextoDaMensagem(ctx, event.StoreID), 20*time.Second)
+	defer cancelMessage()
+	commentTime := time.Time{}
+	if input.Timestamp > 0 {
+		commentTime = time.Unix(input.Timestamp, 0)
+	}
+	if err := s.sendImmediateNotification(messageCtx, sendNotificationInput{
+		CommentCreatedAt:  commentTime,
 		StoreID:           event.StoreID,
 		EventID:           event.ID,
 		EventTitle:        event.Title,
@@ -586,7 +641,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		TotalCents:        ultimo.carrinho.TotalCents,
 		IsNewCart:         ultimo.carrinho.IsNewCart,
 		WaitlistedQty:     resumo.naFila,
-	})
+	}); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -789,6 +846,7 @@ type resultadoDoItem struct {
 	// lojista não tem o item é prometer o que o sistema não pode cumprir — e a
 	// compradora fica com a prova de uma compra que a loja não enxerga.
 	erpPendente bool
+	replayed    bool
 }
 
 // itensPendentesNoERP conta quantos itens do comentário o ERP NÃO confirmou.
@@ -833,6 +891,9 @@ func (s *Service) processarItemDoComentario(
 	product *ProductRow,
 	quantidade int,
 ) (*resultadoDoItem, error) {
+	if writer, ok := s.core.(commentItemWriter); ok && input.CommentID != "" {
+		return s.applyPersistentCommentItem(ctx, writer, event, session, input, commentID, product, quantidade)
+	}
 	logger.From(ctx, s.logger).Info("purchase intent detected with product match",
 		zap.String("username", input.Username),
 		zap.String("product_id", product.ID),
@@ -1082,6 +1143,7 @@ func (s *Service) processarItemDoComentario(
 
 // sendNotificationInput contains all data needed for immediate notifications.
 type sendNotificationInput struct {
+	CommentCreatedAt  time.Time
 	StoreID           string
 	EventID           string
 	EventTitle        string
@@ -1130,13 +1192,13 @@ func notificationTypeForComment(isNewCart bool, waitlistedQty int) notification.
 
 // sendImmediateNotification sends an immediate checkout notification via the notification service.
 // This is fire-and-forget - errors are logged but don't affect the main flow.
-func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotificationInput) {
+func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotificationInput) error {
 	// Skip if notification service not configured
 	if s.notificationSvc == nil {
 		logger.From(ctx, s.logger).Warn("no DM sent: notification service not configured",
 			zap.String("cart_id", input.CartID),
 		)
-		return
+		return nil
 	}
 
 	notifType := notificationTypeForComment(input.IsNewCart, input.WaitlistedQty)
@@ -1147,7 +1209,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		logger.From(ctx, s.logger).Warn("failed to check notification settings",
 			zap.Error(err),
 		)
-		return
+		return err
 	}
 	if !shouldNotify {
 		// O carrinho existe, o estoque já foi reservado e o comprador não vai
@@ -1162,7 +1224,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 			zap.String("notification_type", string(notifType)),
 			zap.Bool("is_new_cart", input.IsNewCart),
 		)
-		return
+		return nil
 	}
 
 	// Get store info for notification
@@ -1171,7 +1233,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		logger.From(ctx, s.logger).Warn("failed to get store info for notification",
 			zap.Error(err),
 		)
-		return
+		return err
 	}
 
 	// Build checkout URL
@@ -1200,6 +1262,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 
 	// Send notification
 	result, err := s.notificationSvc.Send(ctx, notification.SendInput{
+		CommentCreatedAt:  input.CommentCreatedAt,
 		StoreID:           input.StoreID,
 		EventID:           input.EventID,
 		CartID:            input.CartID,
@@ -1216,14 +1279,21 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 			zap.String("cart_id", input.CartID),
 			zap.Error(err),
 		)
-		return
+		return err
 	}
 
+	if result.Status == notification.StatusFailed && result.Error != nil {
+		var temporary interface{ Temporary() bool }
+		if errors.As(result.Error, &temporary) && temporary.Temporary() || errors.Is(result.Error, context.DeadlineExceeded) || errors.Is(result.Error, context.Canceled) {
+			return result.Error
+		}
+	}
 	logger.From(ctx, s.logger).Info("immediate notification processed",
 		zap.String("cart_id", input.CartID),
 		zap.String("status", string(result.Status)),
 		zap.Bool("is_new_cart", input.IsNewCart),
 	)
+	return nil
 }
 
 // sendMaxQuantityReply sends a reply to the user when they've reached or exceeded the max quantity limit.
@@ -1389,7 +1459,7 @@ func (s *Service) resolvePostEventProduct(
 }
 
 // savePostComment persists a post comment that was fully handled by the rules.
-func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string, input ProcessInstagramCommentInput, result string) {
+func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string, input ProcessInstagramCommentInput, result string) error {
 	if _, err := s.ingestRepo.CreateLiveComment(ctx, CreateLiveCommentParams{
 		SessionID:         sessionID,
 		EventID:           eventID,
@@ -1402,7 +1472,9 @@ func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string
 		Result:            result,
 	}); err != nil {
 		logger.From(ctx, s.logger).Error("failed to save post comment", zap.Error(err))
+		return err
 	}
+	return nil
 }
 
 // replyPostNotStarted privately tells the buyer the promotion hasn't started and

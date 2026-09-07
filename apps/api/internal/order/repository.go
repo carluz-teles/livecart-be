@@ -294,7 +294,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			COALESCE(op.payment_method, ''),
 			COALESCE(NULLIF(op.gateway_snapshot->>'installments', '')::int, 0),
 			COALESCE(o.discount_cents, 0),
-			COALESCE(o.paid_total_cents, 0)
+			COALESCE(o.paid_total_cents, 0),c.payment_review_required,(SELECT COUNT(*) FROM cart_items ci WHERE ci.cart_id=c.id AND ci.erp_pending_since IS NOT NULL)
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		JOIN stores s      ON s.id = e.store_id
@@ -372,6 +372,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.Installments,
 		&row.DiscountCents,
 		&row.PaidTotalCents,
+		&row.PaymentReviewRequired, &row.ERPPendingItems,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -1047,7 +1048,7 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 			"AND c.erp_order_status IN ('aberto','aprovado','dados_incompletos'))"
 
 		matcher := fmt.Sprintf(
-			"(COALESCE(op.erp_finalisation_status, '') = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)) OR %s)",
+			"(c.payment_review_required OR EXISTS(SELECT 1 FROM cart_items pending WHERE pending.cart_id=c.id AND pending.erp_pending_since IS NOT NULL) OR COALESCE(op.erp_finalisation_status, '') = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)) OR %s)",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
 			orfaoSegurandoPeca,

@@ -306,7 +306,7 @@ func (i *Instagram) sendDMRequest(ctx context.Context, url string, payload map[s
 			zap.String("body", bodyStr),
 			zap.String("recipient_id", recipientID),
 		)
-		return fmt.Errorf("instagram send dm failed: status %d, body: %s", resp.StatusCode, bodyStr)
+		return &providers.DeliveryError{Err: fmt.Errorf("instagram send dm failed: status %d, body: %s", resp.StatusCode, bodyStr), Retryable: resp.StatusCode == 429 || resp.StatusCode >= 500}
 	}
 
 	logger.From(ctx, i.logger).Info("instagram dm sent",
@@ -370,7 +370,7 @@ func (i *Instagram) ReplyToComment(ctx context.Context, commentID, text string) 
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
 		)
-		return fmt.Errorf("instagram reply failed: status %d, body: %s", resp.StatusCode, bodyStr)
+		return &providers.DeliveryError{Err: fmt.Errorf("instagram reply failed: status %d, body: %s", resp.StatusCode, bodyStr), Retryable: resp.StatusCode == 429 || resp.StatusCode >= 500}
 	}
 
 	logger.From(ctx, i.logger).Info("instagram comment reply sent",
@@ -486,8 +486,8 @@ func (i *Instagram) sendPrivateReplyOnce(ctx context.Context, commentID, text st
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
 		)
-		return fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr),
-			resp.StatusCode >= 500
+		return &providers.DeliveryError{Err: fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr), Retryable: resp.StatusCode == 429 || resp.StatusCode >= 500},
+			resp.StatusCode == 429 || resp.StatusCode >= 500
 	}
 
 	logger.From(ctx, i.logger).Info("instagram private reply sent",

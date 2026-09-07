@@ -85,14 +85,26 @@ func (m *mockGateway) CartPaymentStatus(_ context.Context, _ string) (string, er
 	return m.cartStatus, m.cartStatusErr
 }
 
-func (m *mockGateway) UpdateCartPaymentStatus(_ context.Context, _, paymentStatus, _ string, _ *time.Time, _ string, amountCents int64) (string, error) {
+func (m *mockGateway) UpdateCartPaymentStatus(_ context.Context, _, paymentStatus, _ string, _ *time.Time, _ string, amountCents int64, facts ...events.Envelope) (string, error) {
 	m.amountCents = amountCents
 	m.updateCalls = append(m.updateCalls, paymentStatus)
+	if m.updateErr == nil {
+		for _, fact := range facts {
+			fact.LiveEventID = m.liveEventID
+			_ = m.EmitEvent(context.Background(), fact)
+		}
+	}
 	return m.liveEventID, m.updateErr
 }
 
-func (m *mockGateway) RestoreCancelledCartAsPaid(_ context.Context, _, _, _, _ string, _ *time.Time, _ string) (bool, string, error) {
+func (m *mockGateway) RestoreCancelledCartAsPaid(_ context.Context, _, _, _, _ string, _ *time.Time, _ string, _ int64, facts ...events.Envelope) (bool, string, error) {
 	m.restoreCalls++
+	if m.restored && m.restoreErr == nil {
+		for _, fact := range facts {
+			fact.LiveEventID = m.liveEventID
+			_ = m.EmitEvent(context.Background(), fact)
+		}
+	}
 	return m.restored, m.liveEventID, m.restoreErr
 }
 

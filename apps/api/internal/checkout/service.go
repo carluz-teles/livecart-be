@@ -66,6 +66,7 @@ type PaymentService interface {
 	GeneratePixPayment(ctx context.Context, input payment.GeneratePixPaymentInput) (*payment.GeneratePixPaymentOutput, error)
 	// CancelPixPayment invalida no gateway uma cobranca PIX ainda nao paga.
 	CancelPixPayment(ctx context.Context, integrationID, storeID, cancelID string) error
+	AplicarStatusDePagamento(context.Context, payment.ProcessPaymentInput, *providers.PaymentStatus) error
 }
 
 // Service handles business logic for public checkout.
@@ -229,6 +230,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
 		Cart: CartDetails{
+			PaymentReviewRequired:   cart.PaymentReviewRequired,
 			ID:                      cart.ID,
 			EventID:                 cart.EventID,
 			PlatformUserID:          cart.PlatformUserID,
@@ -458,6 +460,10 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	failureURL := fmt.Sprintf("%s/cart/%s?status=failure", baseURL, cart.Token)
 
 	// Create checkout via integration service
+	attemptID, err := s.repo.createPaymentAttempt(ctx, s.pool, cart.ID, paymentIntegration.ID.String(), paymentIntegration.ProviderName, "hosted", totalAmount, checkoutItems)
+	if err != nil {
+		return nil, err
+	}
 	checkoutResult, err := s.paymentService.CreateCheckout(ctx, payment.CreateCheckoutInput{
 		IntegrationID:  paymentIntegration.ID.String(),
 		StoreID:        cart.StoreID,
@@ -473,10 +479,11 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		SuccessURL:  successURL,
 		FailureURL:  failureURL,
 		Metadata: map[string]any{
-			"cart_id":    cart.ID,
-			"cart_token": cart.Token,
-			"event_id":   cart.EventID,
-			"store_id":   cart.StoreID,
+			"livecart_attempt_id": attemptID,
+			"cart_id":             cart.ID,
+			"cart_token":          cart.Token,
+			"event_id":            cart.EventID,
+			"store_id":            cart.StoreID,
 		},
 	})
 	if err != nil {
@@ -485,6 +492,9 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 			zap.Error(err),
 		)
 		return nil, httpx.DomainError(422, httpx.CodePaymentLinkFailed, "erro ao gerar link de pagamento. Tente novamente.")
+	}
+	if err := s.repo.bindPaymentAttempt(ctx, s.pool, attemptID, checkoutResult.CheckoutID, ""); err != nil {
+		return nil, fmt.Errorf("recording payment reference: %w", err)
 	}
 
 	// Update cart with checkout info
@@ -828,6 +838,10 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	)
 
 	// Process payment via integration service
+	attemptID, err := s.repo.createPaymentAttempt(ctx, s.pool, cart.ID, paymentIntegration.ID.String(), paymentIntegration.ProviderName, "credit_card", totalAmount, checkoutItems)
+	if err != nil {
+		return nil, err
+	}
 	result, err := s.paymentService.ProcessCardPayment(ctx, payment.ProcessCardPaymentInput{
 		IntegrationID: paymentIntegration.ID.String(),
 		StoreID:       cart.StoreID,
@@ -850,10 +864,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		DeviceID:        input.DeviceID,
 		IPAddress:       input.IPAddress,
 		Metadata: map[string]any{
-			"cart_id":    cart.ID,
-			"cart_token": cart.Token,
-			"event_id":   cart.EventID,
-			"store_id":   cart.StoreID,
+			"livecart_attempt_id": attemptID,
+			"cart_id":             cart.ID,
+			"cart_token":          cart.Token,
+			"event_id":            cart.EventID,
+			"store_id":            cart.StoreID,
 		},
 	})
 	if err != nil {
@@ -878,50 +893,22 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		}
 		return nil, httpx.ErrUnprocessable("provedor de pagamento indisponível, tente novamente em instantes")
 	}
+	if err := s.repo.bindPaymentAttempt(ctx, s.pool, attemptID, result.PaymentID, ""); err != nil {
+		return nil, fmt.Errorf("recording payment reference: %w", err)
+	}
 
-	// Update cart payment status if approved. ERP finalisation is left to the
-	// provider webhook — running it here too caused a real race: both
-	// goroutines passed the cart.external_order_id idempotency check while
-	// empty and both called Tiny CreateOrder; one got rate-limited (429),
-	// and the other could just as easily have produced a duplicate Tiny order.
 	if result.Status == "approved" {
-		// Prefer the gateway-reported authorization instant (date_approved /
-		// charges[0].paid_at) over the server clock so the receipt and the
-		// ERP records match what the customer sees on the gateway dashboard
-		// and we don't drift if the API host's clock is skewed. Falls back
-		// to time.Now() when the provider omitted the field.
-		if err := s.repo.UpdatePaymentStatus(ctx, cart.ID, "paid", result.PaymentID, result.PaidAt); err != nil {
-			// Guard da corrida com a expiração: o UPDATE guarded volta 0 rows
-			// (ErrNotFound) quando o cart expirou/cancelou entre a aprovação no
-			// gateway e este write. NÃO finalizamos um cart não-pagável; o
-			// dinheiro entrou no gateway, então fica para a reconciliação (E6).
-			logger.From(ctx, s.logger).Warn("card approved at gateway but cart not payable (expired/cancelled) — skipping finalization, needs reconciliation",
-				zap.String("cart_id", cart.ID),
-				zap.String("payment_id", result.PaymentID),
-				zap.Error(err),
-			)
-		} else {
-			// Best-effort capture of card details for the post-payment receipt
-			// (public checkout `payment` block). Failure here must not break the
-			// happy path — the comprovante just renders without these fields.
-			if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments, result.AuthorizationCode); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to persist card payment details",
-					zap.String("cart_id", cart.ID),
-					zap.Error(err),
-				)
-			}
-			// Customer-facing post-payment flow (tracking token + timeline +
-			// receipt) NÃO roda mais inline aqui (Fatia A4): o token e a timeline
-			// `payment_confirmed` nascem na materialização da Order, disparada pelo
-			// fato cart.paid do webhook (order/listeners.OnCartPaid), e o recibo é
-			// reactor do domínio Notification. Tudo idempotente e ancorado no fato.
-			//
-			// The canonical cart.paid FACT is emitted only by the payment webhook
-			// consumer (ProcessPaymentNotification) — the single source of truth,
-			// carrying the fresh gateway snapshot the ERP reactor needs. The card
-			// path used to emit its own snapshot-less cart.paid too, which raced the
-			// webhook's and finalised ERP without payment details; centralising on
-			// the webhook fixes that.
+		if err := s.paymentService.AplicarStatusDePagamento(ctx, payment.ProcessPaymentInput{
+			StoreID: cart.StoreID, Provider: paymentIntegration.ProviderName, PaymentID: result.PaymentID,
+		}, &providers.PaymentStatus{
+			PaymentID: result.PaymentID, ExternalReference: cart.ID, Status: providers.PaymentApproved,
+			Amount: result.Amount, PaidAt: result.PaidAt, PaymentMethod: "credit_card", Installments: result.Installments,
+			Metadata: map[string]any{"livecart_attempt_id": attemptID},
+		}); err != nil {
+			return nil, fmt.Errorf("recording approved card payment: %w", err)
+		}
+		if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments, result.AuthorizationCode); err != nil {
+			s.logger.Warn("persisting card details", zap.Error(err))
 		}
 	}
 
@@ -1044,7 +1031,12 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	// duas ficam pagaveis ao mesmo tempo e o comprador escolhe, sem saber, qual
 	// valor manda. O caminho normal ja invalida na mutacao do carrinho — este
 	// aqui cobre gerar de novo sem mudar nada (QR expirado, aba reaberta).
-	s.invalidatePendingPix(ctx, cart)
+	if err := s.invalidatePendingPix(ctx, cart); err != nil {
+		if errors.Is(err, providers.ErrPixStillPayable) {
+			return nil, httpx.DomainError(409, httpx.CodePixStillPayable, err.Error())
+		}
+		return nil, httpx.DomainError(503, httpx.CodePaymentUnavailable, "não foi possível verificar o PIX anterior; tente novamente em instantes")
+	}
 
 	// Use the integration the cart was bound to during GetCheckoutConfig.
 	paymentIntegration, err := s.resolvePaymentIntegration(ctx, cart)
@@ -1069,6 +1061,10 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	)
 
 	// Generate PIX via integration service
+	attemptID, err := s.repo.createPaymentAttempt(ctx, s.pool, cart.ID, paymentIntegration.ID.String(), paymentIntegration.ProviderName, "pix", totalAmount, checkoutItems)
+	if err != nil {
+		return nil, err
+	}
 	result, err := s.paymentService.GeneratePixPayment(ctx, payment.GeneratePixPaymentInput{
 		IntegrationID: paymentIntegration.ID.String(),
 		StoreID:       cart.StoreID,
@@ -1085,10 +1081,11 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		Currency:    "BRL",
 		NotifyURL:   notifyURL,
 		Metadata: map[string]any{
-			"cart_id":    cart.ID,
-			"cart_token": cart.Token,
-			"event_id":   cart.EventID,
-			"store_id":   cart.StoreID,
+			"livecart_attempt_id": attemptID,
+			"cart_id":             cart.ID,
+			"cart_token":          cart.Token,
+			"event_id":            cart.EventID,
+			"store_id":            cart.StoreID,
 		},
 	})
 	if err != nil {
@@ -1108,6 +1105,9 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 			)
 		}
 		return nil, httpx.ErrUnprocessable("provedor de pagamento indisponível, tente novamente em instantes")
+	}
+	if err := s.repo.bindPaymentAttempt(ctx, s.pool, attemptID, result.PaymentID, result.CancelID); err != nil {
+		return nil, fmt.Errorf("recording payment reference: %w", err)
 	}
 
 	// Update cart with payment ID for tracking
@@ -1538,40 +1538,51 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 // /checkout fetch (or another mutation) will reconcile, so failing the
 // caller would leave the buyer staring at a successful mutation that
 // pretends it failed.
-// invalidatePendingPix mata, no gateway, o QR que o comprador ja tem na mao.
-//
-// Sem isto o codigo antigo continua pagavel ate expirar. O comprador que copiou
-// o "copia e cola", mexeu no carrinho e pagou pelo app do banco manda o valor
-// ANTIGO — e o webhook chega com uma quantia que nao corresponde a nenhum
-// carrinho atual. Some o QR da tela nao resolve: ele ja saiu da tela.
-//
-// A leitura LIMPA a coluna na mesma instrucao, entao duas mutacoes simultaneas
-// no mesmo carrinho nao disparam dois cancelamentos para a mesma cobranca.
-//
-// Best-effort de proposito. Se o gateway recusar — o caso normal e a cobranca ja
-// ter sido paga entre a leitura e a chamada — nao ha o que desfazer do lado do
-// comprador: a mutacao dele ja aconteceu, e transformar isso em erro seria
-// punir quem so mudou de ideia sobre a quantidade. Fica no log, alto, porque
-// significa QR vivo cobrando valor obsoleto.
-func (s *Service) invalidatePendingPix(ctx context.Context, cart *CartRow) {
+// invalidatePendingPix claims a cancellation lease and retains the charge until
+// the gateway confirms it cannot be paid. Pagar.me PIX must expire naturally:
+// its DELETE endpoint can refund captured money. A failed attempt keeps the
+// reference for retry, and an obsolete payment is held for quote review.
+func (s *Service) invalidatePendingPix(ctx context.Context, cart *CartRow) error {
 	cancelID, amountCents, err := s.repo.TakeCartPixCharge(ctx, cart.ID)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("could not read pending pix charge to invalidate",
 			zap.String("cart_id", cart.ID), zap.Error(err))
-		return
+		return err
 	}
 	if cancelID == "" {
-		return
+		return nil
 	}
 
-	integration, err := s.resolvePaymentIntegration(ctx, cart)
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := s.repo.ReleasePixCancellationLease(cleanup, cart.ID, cancelID); err != nil {
+			s.logger.Warn("releasing PIX cancellation lease", zap.Error(err))
+		}
+	}()
+
+	// Cancel through the integration that created this charge, even when the
+	// merchant has since selected a different gateway for new checkouts.
+	attemptIntegration, err := s.repo.pixAttemptIntegration(ctx, s.pool, cart.ID, cancelID)
+	if err != nil {
+		return err
+	}
+	var integration *IntegrationRow
+	if attemptIntegration != "" {
+		integration, err = s.repo.GetIntegrationByID(ctx, attemptIntegration)
+	} else {
+		integration, err = s.resolvePaymentIntegration(ctx, cart)
+	}
+	if err == nil && integration == nil {
+		err = fmt.Errorf("original PIX integration is unavailable")
+	}
 	if err != nil {
 		logger.From(ctx, s.logger).Error("PIX charge left alive: no payment integration to cancel it",
 			zap.String("cart_id", cart.ID),
 			zap.String("cancel_id", cancelID),
 			zap.Int64("amount_cents", amountCents),
 			zap.Error(err))
-		return
+		return err
 	}
 
 	if err := s.paymentService.CancelPixPayment(ctx, integration.ID.String(), cart.StoreID, cancelID); err != nil {
@@ -1581,7 +1592,11 @@ func (s *Service) invalidatePendingPix(ctx context.Context, cart *CartRow) {
 			zap.Int64("amount_cents", amountCents),
 			zap.String("provider", integration.ProviderName),
 			zap.Error(err))
-		return
+		return err
+	}
+
+	if err := s.repo.ClearCancelledPixCharge(ctx, cart.ID, cancelID); err != nil {
+		return err
 	}
 
 	logger.From(ctx, s.logger).Info("pending PIX invalidated after cart change",
@@ -1589,6 +1604,7 @@ func (s *Service) invalidatePendingPix(ctx context.Context, cart *CartRow) {
 		zap.String("cancel_id", cancelID),
 		zap.Int64("amount_cents", amountCents),
 	)
+	return nil
 }
 
 func (s *Service) reevaluateCouponAfterCartMutation(ctx context.Context, cartID string) {
@@ -1854,10 +1870,11 @@ func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusIn
 	}
 
 	return &GetPaymentStatusOutput{
-		Status:        cart.Status,
-		PaymentStatus: cart.PaymentStatus,
-		PaidAt:        cart.PaidAt,
-		Message:       message,
+		PaymentReviewRequired: cart.PaymentReviewRequired,
+		Status:                cart.Status,
+		PaymentStatus:         cart.PaymentStatus,
+		PaidAt:                cart.PaidAt,
+		Message:               message,
 	}, nil
 }
 
@@ -1905,4 +1922,13 @@ func splitQuantityChange(currentTotal, currentWaitlisted, newTotal int) (heldAft
 		waitlistedAfter = 0
 	}
 	return heldAfter, waitlistedAfter, heldAfter - heldBefore
+}
+
+// InvalidateCartPix is called after a committed coupon change.
+func (s *Service) InvalidateCartPix(ctx context.Context, token string) error {
+	cart, err := s.repo.GetCartByToken(ctx, token)
+	if err != nil {
+		return err
+	}
+	return s.invalidatePendingPix(ctx, cart)
 }

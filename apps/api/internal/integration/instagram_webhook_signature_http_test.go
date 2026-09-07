@@ -64,8 +64,8 @@ func TestInstagramWebhookSignatureGate(t *testing.T) {
 		{"observacao aceita sem assinatura", secret, "false", "", fiber.StatusOK},
 		{"observacao aceita assinatura errada", secret, "false", sign(t, []byte("outro corpo"), secret), fiber.StatusOK},
 		{"observacao aceita assinatura correta", secret, "false", valid, fiber.StatusOK},
-		// Default: sem a env var, o comportamento tem de ser observação.
-		{"sem a env var cai em observacao", secret, "", "", fiber.StatusOK},
+		// Production defaults to enforcing the configured application secret.
+		{"sem a env var rejeita assinatura ausente", secret, "", "", fiber.StatusUnauthorized},
 
 		// Deploy 2 — aplicando.
 		{"aplicando rejeita sem assinatura", secret, "true", "", fiber.StatusUnauthorized},

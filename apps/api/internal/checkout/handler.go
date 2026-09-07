@@ -316,10 +316,11 @@ func (h *Handler) GetPaymentStatus(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, GetPaymentStatusResponse{
-		Status:        output.Status,
-		PaymentStatus: output.PaymentStatus,
-		PaidAt:        output.PaidAt,
-		Message:       output.Message,
+		PaymentReviewRequired: output.PaymentReviewRequired,
+		Status:                output.Status,
+		PaymentStatus:         output.PaymentStatus,
+		PaidAt:                output.PaidAt,
+		Message:               output.Message,
 	})
 }
 
@@ -505,18 +506,19 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 	}
 
 	return CartForCheckoutResponse{
-		ID:                 output.Cart.ID,
-		Token:              output.Cart.Token,
-		Status:             output.Cart.Status,
-		CustomerEmail:      output.Cart.CustomerEmail,
-		PaymentStatus:      output.Cart.PaymentStatus,
-		CheckoutURL:        output.Cart.CheckoutURL,
-		PlatformHandle:     output.Cart.PlatformHandle,
-		AllowEdit:          output.Cart.AllowEdit,
-		MaxQuantityPerItem: output.Cart.MaxQuantityPerItem,
-		ExpiresAt:          output.Cart.ExpiresAt,
-		PaidAt:             output.Cart.PaidAt,
-		CreatedAt:          output.Cart.CreatedAt,
+		PaymentReviewRequired: output.Cart.PaymentReviewRequired,
+		ID:                    output.Cart.ID,
+		Token:                 output.Cart.Token,
+		Status:                output.Cart.Status,
+		CustomerEmail:         output.Cart.CustomerEmail,
+		PaymentStatus:         output.Cart.PaymentStatus,
+		CheckoutURL:           output.Cart.CheckoutURL,
+		PlatformHandle:        output.Cart.PlatformHandle,
+		AllowEdit:             output.Cart.AllowEdit,
+		MaxQuantityPerItem:    output.Cart.MaxQuantityPerItem,
+		ExpiresAt:             output.Cart.ExpiresAt,
+		PaidAt:                output.Cart.PaidAt,
+		CreatedAt:             output.Cart.CreatedAt,
 		Event: CartEventInfo{
 			ID:                 output.Cart.EventID,
 			Title:              output.Cart.EventTitle,

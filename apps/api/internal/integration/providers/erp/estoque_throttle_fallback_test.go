@@ -108,3 +108,27 @@ func TestEstoque404NaoApuraSaldoESaiSemEsperar(t *testing.T) {
 		t.Errorf("tentativas ao /estoque = %d, quero 1 — 404 não pode ser re-tentado como se fosse 429", got)
 	}
 }
+
+func TestEstoque429MinuteWindowDoesNotRetryWithinShortDeadline(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/estoque/") {
+			calls.Add(1)
+			w.Header().Set("X-RateLimit-Reset", "58")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, `{"id":555,"nome":"Produto","tipo":"P","precos":{"preco":10},"estoque":{"quantidade":7}}`)
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	product, err := tinyComSaldoDisponivel(t, srv).GetProduct(ctx, "555")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if product.StockKnown || calls.Load() != 1 || time.Since(start) > time.Second {
+		t.Fatalf("minute window shortened or physical stock substituted: known=%v calls=%d elapsed=%s", product.StockKnown, calls.Load(), time.Since(start))
+	}
+}

@@ -1,3 +1,5 @@
+//go:build external
+
 package integration
 
 // IMPORT DE PRODUTO DO BLING — contra a API REAL e o Postgres real.

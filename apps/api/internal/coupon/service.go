@@ -19,6 +19,9 @@ import (
 )
 
 type Service struct {
+	paymentInvalidator interface {
+		InvalidateCartPix(context.Context, string) error
+	}
 	repo   *Repository
 	pool   *pgxpool.Pool
 	logger *zap.Logger
@@ -311,6 +314,7 @@ func (s *Service) ApplyToCart(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
+	s.invalidatePix(ctx, cartToken)
 
 	// Group K: coupon.applied fact (best-effort, observability only).
 	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponApplied,
@@ -391,6 +395,7 @@ func (s *Service) RemoveFromCart(ctx context.Context, cartToken string) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+	s.invalidatePix(ctx, cartToken)
 
 	return nil
 }
@@ -727,4 +732,15 @@ func computeFreeShippingDiscount(selected, cheapestQuoted, maxDiscount int64) in
 		return 0
 	}
 	return cap
+}
+
+func (s *Service) SetPaymentInvalidator(invalidator interface {
+	InvalidateCartPix(context.Context, string) error
+}) { s.paymentInvalidator = invalidator }
+func (s *Service) invalidatePix(ctx context.Context, token string) {
+	if s.paymentInvalidator != nil {
+		if err := s.paymentInvalidator.InvalidateCartPix(ctx, token); err != nil {
+			s.logger.Warn("coupon changed but PIX cancellation remains pending", zap.Error(err))
+		}
+	}
 }

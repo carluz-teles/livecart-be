@@ -89,6 +89,9 @@ type StockCollaborators interface {
 // ele o pedido não reserva nada e a live venderia às cegas.
 func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
 	if _, err := s.repo.GetActiveERP(ctx, storeID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) && !httpx.IsNotFound(err) {
+			return fmt.Errorf("checking active ERP before reservation: %w", err)
+		}
 		logger.From(ctx, s.logger).Debug("no active ERP integration, skipping stock reservation",
 			zap.String("store_id", storeID),
 		)
@@ -99,11 +102,14 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	// comentário, o item somado depois do pix e a promoção de fila num único
 	// ponto — todos são "a grade do banco mudou, mande-a".
 	st, stErr := s.repo.GetCartERPOrderState(ctx, cartID)
+	if stErr != nil {
+		return fmt.Errorf("reading ERP state before reservation: %w", stErr)
+	}
 	switch {
-	case stErr != nil || st.State == OrderStateNone:
+	case st.State == OrderStateNone:
 		// segue para a criação, abaixo
 	case st.State == OrderStateCancelled:
-		return nil // carrinho encerrado; não ressuscita
+		return ErrCartNotConverted
 	case st.State == OrderStateConverting:
 		// 'converting' é ambíguo, e quem desfaz a ambiguidade é o relógio:
 		// criação em voo AGORA, ou criação que morreu antes do POST.
@@ -119,7 +125,14 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 		if err := s.EnsureERPOrderForCart(ctx, cartID, storeID); err != nil {
 			return fmt.Errorf("resuming order creation for cart %s: %w", cartID, err)
 		}
-		return nil
+		fresh, err := s.repo.GetCartERPOrderState(ctx, cartID)
+		if err != nil {
+			return err
+		}
+		if fresh.State == OrderStateConverting {
+			return ErrOrderBusy
+		}
+		return s.MutateERPOrderItems(ctx, cartID, storeID)
 	default:
 		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
 			return fmt.Errorf("applying grid to cart order: %w", mutErr)
@@ -136,6 +149,13 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	// meio-tempo é o contador do LiveCart.
 	if err := s.EnsureERPOrderDuranteALive(ctx, cartID, storeID); err != nil {
 		return fmt.Errorf("creating sales order for cart %s: %w", cartID, err)
+	}
+	fresh, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if fresh.State == OrderStateConverting {
+		return ErrOrderBusy
 	}
 	return nil
 }

@@ -152,3 +152,8 @@ const (
 	CodeStockMovementStale Code = "STOCK_MOVEMENT_STALE" // erp/movement_resolution.go: o CAS perdeu para o resolver; recarregar o painel
 
 )
+
+const (
+	CodePaymentReviewRequired Code = "PAYMENT_REVIEW_REQUIRED"
+	CodePixStillPayable       Code = "PIX_STILL_PAYABLE"
+)
