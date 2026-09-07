@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -15,11 +16,13 @@ var _ live.CommentWorkRepository = (*Repository)(nil)
 func (r *Repository) BeginCommentWork(ctx context.Context, commentID string, payload []byte) (string, bool, error) {
 	// Existing comments predate the recovery protocol and must never be replayed
 	// automatically: their local effects have no per-comment checkpoint.
+	// Production uses pgx simple protocol, where []byte is encoded as bytea.
+	// JSON columns must receive text to preserve the serialized document.
 	_, err := r.pool.Exec(ctx, `INSERT INTO live_comment_work(platform_comment_id,payload,completed_at)
         VALUES ($1,$2,CASE WHEN EXISTS(SELECT 1 FROM live_comments WHERE platform_comment_id=$1)
-            THEN now() ELSE NULL END) ON CONFLICT DO NOTHING`, commentID, payload)
+            THEN now() ELSE NULL END) ON CONFLICT DO NOTHING`, commentID, string(payload))
 	if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("creating comment recovery work: %w", err)
 	}
 	owner := uuid.NewString()
 	var claimed string
@@ -81,8 +84,11 @@ func (r *Repository) CommentWasAccepted(ctx context.Context, id string) (bool, e
 	return accepted, err
 }
 func (r *Repository) AcceptComment(ctx context.Context, id string, plan []byte) error {
-	_, err := r.pool.Exec(ctx, `UPDATE live_comment_work SET accepted_at=now(),accepted_plan=$2 WHERE platform_comment_id=$1 AND accepted_at IS NULL`, id, plan)
-	return err
+	_, err := r.pool.Exec(ctx, `UPDATE live_comment_work SET accepted_at=now(),accepted_plan=$2 WHERE platform_comment_id=$1 AND accepted_at IS NULL`, id, string(plan))
+	if err != nil {
+		return fmt.Errorf("accepting comment recovery plan: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) AcceptedCommentPlan(ctx context.Context, id string) ([]byte, error) {
