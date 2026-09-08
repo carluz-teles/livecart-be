@@ -51,11 +51,11 @@ func (r *Repository) FinishCommentWork(ctx context.Context, commentID, owner str
 		message = processingErr.Error()
 	}
 	_, err := r.pool.Exec(ctx, `WITH finished AS (UPDATE live_comment_work SET lease_owner=NULL,lease_until=NULL,last_error=$3,
-		completed_at=CASE WHEN $3::text IS NULL OR ($4 AND accepted_at IS NULL AND created_at<now()-interval '24 hours') THEN now() ELSE NULL END,
+		completed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,
         next_attempt_at=now()+make_interval(secs=>LEAST(900,5*power(2,LEAST(attempts,7)))::double precision)
         WHERE platform_comment_id=$1 AND lease_owner=$2 RETURNING platform_comment_id)
         UPDATE webhook_events SET processed=($3::text IS NULL),processed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,error_message=$3
-		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished)`, commentID, owner, message, errors.Is(processingErr, live.ErrCommentMediaPending))
+		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished)`, commentID, owner, message)
 	return err
 }
 

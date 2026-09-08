@@ -12,7 +12,6 @@ import (
 
 var ErrCommentBusy = errors.New("comment processing is already in progress")
 var ErrCommentERPPending = errors.New("comment is waiting for ERP confirmation")
-var ErrCommentMediaPending = errors.New("comment media has no session yet")
 
 // CommentWorkRepository keeps retries independent of the delivery queue's retry
 // budget. A lease coordinates webhook, polling and recovery workers.

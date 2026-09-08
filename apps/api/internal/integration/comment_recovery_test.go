@@ -104,33 +104,70 @@ func TestCommentWork_RetrySurvivesLeaseAndFailure(t *testing.T) {
 	}
 }
 
-func TestCommentWork_UnknownMediaExpiresButAcceptedPurchaseDoesNot(t *testing.T) {
+func TestCommentWork_UnknownMediaIsIgnored(t *testing.T) {
 	requireDB(t)
-	ctx := context.Background()
-	for _, accepted := range []bool{false, true} {
-		id := fmt.Sprintf("unbound-%v-%d", accepted, time.Now().UnixNano())
-		owner, _, err := testRepo.BeginCommentWork(ctx, id, []byte(`{}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if accepted {
-			if err := testRepo.AcceptComment(ctx, id, []byte(`[]`)); err != nil {
+	for _, name := range []string{"new comment", "previously pending comment"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			id := fmt.Sprintf("ignored-%d", time.Now().UnixNano())
+			input := live.ProcessInstagramCommentInput{
+				CommentID: id,
+				MediaID:   "unlinked-" + id,
+				UserID:    "buyer-" + id,
+				Text:      "Eu quero 1234",
+			}
+			svc := live.NewService(live.NewRepository(sqlc.New(testPool), testPool), zap.NewNop())
+			svc.SetIngestRepository(liveIngestRepoAdapter{testRepo})
+			if name == "previously pending comment" {
+				payload, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				owner, _, err := testRepo.BeginCommentWork(ctx, id, payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Simulate work left pending by the previous deployment.
+				if err := testRepo.FinishCommentWork(ctx, id, owner,
+					errors.New("comment media has no session yet")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := testPool.Exec(ctx, `UPDATE live_comment_work
+					SET next_attempt_at='2000-01-01' WHERE platform_comment_id=$1`, id); err != nil {
+					t.Fatal(err)
+				}
+				svc.RecoverPendingComments(ctx)
+			} else if err := svc.ProcessInstagramComment(ctx, input); err != nil {
+				t.Fatalf("ignore unlinked media: %v", err)
+			}
+
+			var done, accepted, hasError bool
+			var comments, items, attempts int
+			if err := testPool.QueryRow(ctx, `SELECT completed_at IS NOT NULL,
+				accepted_at IS NOT NULL, last_error IS NOT NULL, attempts,
+				(SELECT count(*) FROM live_comments WHERE platform_comment_id=$1),
+				(SELECT count(*) FROM cart_item_events WHERE platform_comment_id=$1)
+				FROM live_comment_work WHERE platform_comment_id=$1`, id).
+				Scan(&done, &accepted, &hasError, &attempts, &comments, &items); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if _, err := testPool.Exec(ctx, `UPDATE live_comment_work SET created_at=now()-interval '2 days' WHERE platform_comment_id=$1`, id); err != nil {
-			t.Fatal(err)
-		}
-		if err := testRepo.FinishCommentWork(ctx, id, owner, live.ErrCommentMediaPending); err != nil {
-			t.Fatal(err)
-		}
-		var done bool
-		if err := testPool.QueryRow(ctx, `SELECT completed_at IS NOT NULL FROM live_comment_work WHERE platform_comment_id=$1`, id).Scan(&done); err != nil {
-			t.Fatal(err)
-		}
-		if done == accepted {
-			t.Fatalf("accepted=%v completed=%v", accepted, done)
-		}
+			if !done || accepted || hasError || comments != 0 || items != 0 {
+				t.Fatalf("done=%v accepted=%v error=%v comments=%d items=%d",
+					done, accepted, hasError, comments, items)
+			}
+			// A duplicate webhook must not start processing this comment again.
+			if err := svc.ProcessInstagramComment(ctx, input); err != nil {
+				t.Fatal(err)
+			}
+			var after int
+			if err := testPool.QueryRow(ctx,
+				`SELECT attempts FROM live_comment_work WHERE platform_comment_id=$1`, id).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if after != attempts {
+				t.Fatalf("ignored comment retried: attempts before=%d after=%d", attempts, after)
+			}
+		})
 	}
 }
 

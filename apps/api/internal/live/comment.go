@@ -197,12 +197,13 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 	if session == nil {
-		logger.From(ctx, s.logger).Warn("no active live session found for media_id",
+		// Unlinked media is outside the merchant's sales flow. Returning nil
+		// completes durable work so recovery and duplicate deliveries skip it.
+		logger.From(ctx, s.logger).Info("comment ignored: media has no session",
+			zap.String("comment_id", input.CommentID),
+			zap.String("account_id", input.AccountID),
 			zap.String("media_id", input.MediaID),
 		)
-		if _, durable := s.ingestRepo.(CommentWorkRepository); durable {
-			return ErrCommentMediaPending
-		}
 		return nil
 	}
 
