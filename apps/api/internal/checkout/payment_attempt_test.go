@@ -4,9 +4,11 @@ package checkout
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/httpx"
 )
 
 func TestPaymentQuote_ValidatesItemsEvenWhenTotalIsUnchanged(t *testing.T) {
@@ -27,14 +29,21 @@ func TestPaymentQuote_ValidatesItemsEvenWhenTotalIsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	items := []providers.CheckoutItem{{ID: product, Name: "Quote", Quantity: 2, UnitPrice: 1000}}
-	id, err := testRepo.createPaymentAttempt(ctx, testPool, cart, integration, "pagarme", "pix", 2000, items)
-	if err != nil || id == "" {
-		t.Fatalf("valid quote: %s %v", id, err)
+	for _, method := range []string{"pix", "credit_card"} {
+		id, err := testRepo.createPaymentAttempt(ctx, testPool, cart, integration, "pagarme", method, 2000, items)
+		if err != nil || id == "" {
+			t.Fatalf("valid %s quote: %s %v", method, id, err)
+		}
 	}
 	if _, err := testPool.Exec(ctx, `UPDATE cart_items SET quantity=1,unit_price=2000 WHERE cart_id=$1`, cart); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := testRepo.createPaymentAttempt(ctx, testPool, cart, integration, "pagarme", "pix", 2000, items); err == nil {
+	if _, err := testRepo.createPaymentAttempt(ctx, testPool, cart, integration, "pagarme", "pix", 2000, items); err != nil {
+		var domain *httpx.ServiceError
+		if !errors.As(err, &domain) || domain.Reason != string(httpx.CodeCartItemChanged) {
+			t.Fatalf("expected item-change rejection, got: %v", err)
+		}
+	} else {
 		t.Fatal("same-total item change accepted")
 	}
 	if _, err := testPool.Exec(ctx, `UPDATE carts SET payment_review_required=true WHERE id=$1`, cart); err != nil {

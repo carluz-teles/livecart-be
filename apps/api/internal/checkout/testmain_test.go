@@ -71,7 +71,8 @@ func testMain(m *testing.M) int {
 		return 1
 	}
 
-	pool, err := pgxpool.New(ctx, testURL)
+	// Exercise the same parameter encoding mode used in production.
+	pool, err := database.NewPool(ctx, testURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conectando no database de teste: %v\n", err)
 		return 1

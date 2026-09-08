@@ -48,7 +48,8 @@ func (r *Repository) createPaymentAttempt(ctx context.Context, pool *pgxpool.Poo
 		return "", err
 	}
 	// Compare the quantities and prices actually sent, including same-total swaps.
-	if err = tx.QueryRow(ctx, `WITH sent AS (SELECT x->>'id' AS id,(x->>'quantity')::int AS qty,(x->>'unit_price')::bigint AS price FROM jsonb_array_elements($2::jsonb) x), current AS (SELECT product_id::text AS id,quantity-waitlisted_quantity AS qty,unit_price AS price FROM cart_items WHERE cart_id=$1 AND quantity>waitlisted_quantity) SELECT NOT EXISTS((SELECT * FROM sent EXCEPT SELECT * FROM current) UNION ALL (SELECT * FROM current EXCEPT SELECT * FROM sent))`, cartID, raw).Scan(&valid); err != nil {
+	// Simple protocol infers []byte as bytea; send JSON text for the jsonb cast.
+	if err = tx.QueryRow(ctx, `WITH sent AS (SELECT x->>'id' AS id,(x->>'quantity')::int AS qty,(x->>'unit_price')::bigint AS price FROM jsonb_array_elements($2::jsonb) x), current AS (SELECT product_id::text AS id,quantity-waitlisted_quantity AS qty,unit_price AS price FROM cart_items WHERE cart_id=$1 AND quantity>waitlisted_quantity) SELECT NOT EXISTS((SELECT * FROM sent EXCEPT SELECT * FROM current) UNION ALL (SELECT * FROM current EXCEPT SELECT * FROM sent))`, cartID, string(raw)).Scan(&valid); err != nil {
 		return "", err
 	}
 	if !valid {
