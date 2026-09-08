@@ -121,3 +121,43 @@ func TestRateBudget_LearnsMinuteQuotaWithoutConfusingBurst(t *testing.T) {
 		t.Fatalf("unknown write quota inherited read rate: %d", interval)
 	}
 }
+
+func TestBlingRateBudgetSharesReadsWritesAndCooldownAcrossReplicas(t *testing.T) {
+	requireDB(t)
+	fx := seedScaleEvent(t)
+	key := "bling:test:" + fx.storeID
+	a, b := ratelimit.NewManager(zap.NewNop()), ratelimit.NewManager(zap.NewNop())
+	a.SetSharedPool(testPool)
+	b.SetSharedPool(testPool)
+	first, second := a.GetOrCreateBling(key, 2), b.GetOrCreateBling(key, 2)
+	ctx := context.Background()
+	if err := first.WaitRequest(ctx, http.MethodGet); err != nil {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	if err := second.WaitRequest(short, http.MethodPost); !errors.Is(err, ratelimit.ErrNaoDespachado) {
+		t.Fatalf("replica write exceeded read quota: %v", err)
+	}
+	if err := second.BlockFor(ctx, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.ObserveResponse(ctx, http.MethodGet, 200, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.WaitRequest(short, http.MethodGet); !errors.Is(err, ratelimit.ErrNaoDespachado) {
+		t.Fatalf("old success cleared daily quota: %v", err)
+	}
+	var interval int64
+	var blocked bool
+	if err := testPool.QueryRow(ctx, `SELECT interval_ms,blocked_until>clock_timestamp()+interval '23 hours' FROM api_rate_budgets WHERE account_key=$1`, key).Scan(&interval, &blocked); err != nil {
+		t.Fatal(err)
+	}
+	if interval != 500 || !blocked {
+		t.Fatalf("shared budget lost: interval=%d blocked=%v", interval, blocked)
+	}
+	other := a.GetOrCreateBling(key+":other", 2)
+	if err := other.Wait(ctx); err != nil {
+		t.Fatalf("other account blocked: %v", err)
+	}
+}

@@ -11,10 +11,13 @@ package integration
 //
 // A regra é a de sempre: enquanto uma execução para aquela chave está rodando,
 // as que chegarem não enfileiram — marcam que ficou trabalho e voltam. Quem está
-// rodando repete UMA vez no fim se alguém marcou. O resultado é no máximo duas
-// execuções por rajada, e a última sempre enxerga o estado final.
+// rodando repete no fim se alguém marcou. Eventos que chegam durante uma
+// repetição também precisam de uma leitura posterior.
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 type coalescedor struct {
 	mu       sync.Mutex
@@ -41,25 +44,33 @@ func (c *coalescedor) Fazer(chave string, fn func() error) (bool, error) {
 	c.rodando[chave] = true
 	c.mu.Unlock()
 
+	liberado := false
 	defer func() {
+		if liberado {
+			return
+		}
+		// Também libera a chave se fn entrar em panic.
 		c.mu.Lock()
 		delete(c.rodando, chave)
 		delete(c.pendente, chave)
 		c.mu.Unlock()
 	}()
 
-	if err := fn(); err != nil {
-		return true, err
+	var resultado error
+	for {
+		resultado = errors.Join(resultado, fn())
+		c.mu.Lock()
+		repetir := c.pendente[chave]
+		delete(c.pendente, chave)
+		if !repetir {
+			// Observar a ausência de trabalho e liberar a chave são atômicos:
+			// um evento novo deve assumir a execução, nunca ser apagado pelo defer.
+			delete(c.rodando, chave)
+			liberado = true
+		}
+		c.mu.Unlock()
+		if !repetir {
+			return true, resultado
+		}
 	}
-
-	// Alguém chegou enquanto rodávamos: uma repetição basta, porque ela lê o
-	// estado final — e é o estado final que interessa.
-	c.mu.Lock()
-	repetir := c.pendente[chave]
-	delete(c.pendente, chave)
-	c.mu.Unlock()
-	if repetir {
-		return true, fn()
-	}
-	return true, nil
 }

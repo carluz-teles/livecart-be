@@ -19,10 +19,17 @@ const tinyDefaultIntervalMS int64 = 2500
 // replicas; other applications on the merchant's account remain outside it.
 type Tiny struct {
 	account string
-	pool    *pgxpool.Pool
-	mu      sync.Mutex
-	local   map[string]*tinyBudget
-	now     func() time.Time
+	*requestBudget
+}
+
+// requestBudget is the shared PostgreSQL/local dispatch clock. Provider adapters
+// choose account keys and feedback; claiming a slot has one implementation.
+type requestBudget struct {
+	pool              *pgxpool.Pool
+	defaultIntervalMS int64
+	mu                sync.Mutex
+	local             map[string]*tinyBudget
+	now               func() time.Time
 }
 
 type tinyBudget struct {
@@ -42,7 +49,7 @@ func (m *Manager) GetOrCreateTiny(account string) *Tiny {
 	if t := m.tiny[account]; t != nil {
 		return t
 	}
-	t := &Tiny{account: account, pool: m.pool, local: make(map[string]*tinyBudget), now: time.Now}
+	t := &Tiny{account: account, requestBudget: newRequestBudget(m.pool, tinyDefaultIntervalMS)}
 	m.tiny[account] = t
 	return t
 }
@@ -64,8 +71,12 @@ func (t *Tiny) Allow(ctx context.Context) (*Reservation, error) {
 func (t *Tiny) UpdateFromHeaders(int, int) {}
 
 func (t *Tiny) WaitRequest(ctx context.Context, method string) error {
+	return t.wait(ctx, t.category(method))
+}
+
+func (t *requestBudget) wait(ctx context.Context, key string) error {
 	for {
-		res, err := t.claim(ctx, t.category(method))
+		res, err := t.claim(ctx, key)
 		if err != nil {
 			return err
 		}
@@ -86,16 +97,16 @@ func (t *Tiny) WaitRequest(ctx context.Context, method string) error {
 	}
 }
 
-func (t *Tiny) localBudget(key string) *tinyBudget {
+func (t *requestBudget) localBudget(key string) *tinyBudget {
 	if t.local[key] == nil {
-		t.local[key] = &tinyBudget{interval: time.Duration(tinyDefaultIntervalMS) * time.Millisecond}
+		t.local[key] = &tinyBudget{interval: time.Duration(t.defaultIntervalMS) * time.Millisecond}
 	}
 	return t.local[key]
 }
 
 // Claim only the current slot. Waiting/cancelled callers never reserve future
 // capacity, and they recheck cooldowns announced while they were waiting.
-func (t *Tiny) claim(ctx context.Context, key string) (*Reservation, error) {
+func (t *requestBudget) claim(ctx context.Context, key string) (*Reservation, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrNaoDespachado, err)
 	}
@@ -109,7 +120,7 @@ func (t *Tiny) claim(ctx context.Context, key string) (*Reservation, error) {
 		}
 		return &Reservation{Allowed: wait == 0, RetryAfter: wait, Remaining: -1}, nil
 	}
-	if _, err := t.pool.Exec(ctx, `INSERT INTO api_rate_budgets(account_key,interval_ms) VALUES($1,$2) ON CONFLICT DO NOTHING`, key, tinyDefaultIntervalMS); err != nil {
+	if _, err := t.pool.Exec(ctx, `INSERT INTO api_rate_budgets(account_key,interval_ms) VALUES($1,$2) ON CONFLICT DO NOTHING`, key, t.defaultIntervalMS); err != nil {
 		return nil, fmt.Errorf("reserving API budget: %w", err)
 	}
 	tx, err := t.pool.Begin(ctx)
@@ -155,6 +166,10 @@ func (t *Tiny) ObserveResponse(ctx context.Context, method string, status int, h
 	if intervalMS == 0 && blocked == 0 {
 		return nil
 	}
+	return t.update(ctx, key, intervalMS, blocked)
+}
+
+func (t *requestBudget) update(ctx context.Context, key string, intervalMS int64, blocked time.Duration) error {
 	if t.pool == nil {
 		t.mu.Lock()
 		defer t.mu.Unlock()
@@ -169,7 +184,7 @@ func (t *Tiny) ObserveResponse(ctx context.Context, method string, status int, h
 	}
 	initialInterval := intervalMS
 	if initialInterval == 0 {
-		initialInterval = tinyDefaultIntervalMS
+		initialInterval = t.defaultIntervalMS
 	}
 	_, err := t.pool.Exec(ctx, `INSERT INTO api_rate_budgets(account_key,interval_ms,blocked_until)
   VALUES($1,$2,clock_timestamp()+$3*interval '1 millisecond')
@@ -178,4 +193,8 @@ func (t *Tiny) ObserveResponse(ctx context.Context, method string, status int, h
   blocked_until=GREATEST(api_rate_budgets.blocked_until,EXCLUDED.blocked_until)`,
 		key, initialInterval, blocked.Milliseconds(), intervalMS)
 	return err
+}
+
+func newRequestBudget(pool *pgxpool.Pool, intervalMS int64) *requestBudget {
+	return &requestBudget{pool: pool, defaultIntervalMS: intervalMS, local: make(map[string]*tinyBudget), now: time.Now}
 }

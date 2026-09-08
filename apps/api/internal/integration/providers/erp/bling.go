@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,7 +18,6 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
-	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
 
@@ -214,18 +214,21 @@ func blingTokenRequest(ctx context.Context, cli *http.Client, clientID, clientSe
 		return nil, fmt.Errorf("bling: chamando o token endpoint: %w", err)
 	}
 	defer resp.Body.Close()
-	corpo, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	corpo, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("bling: lendo resposta do token: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bling: token endpoint devolveu %d: %s", resp.StatusCode, blingErro(corpo))
+		return nil, novoBlingOAuthErro(resp.StatusCode, corpo)
 	}
 
 	var tr blingTokenResponse
 	if err := json.Unmarshal(corpo, &tr); err != nil {
 		return nil, fmt.Errorf("bling: resposta do token endpoint ilegível: %w", err)
 	}
-	if tr.AccessToken == "" {
-		return nil, fmt.Errorf("bling: token endpoint respondeu 200 sem access_token")
+	if tr.AccessToken == "" || tr.ExpiresIn <= 0 {
+		return nil, fmt.Errorf("bling: token endpoint respondeu 200 sem access_token ou validade")
 	}
 
 	return &providers.Credentials{
@@ -253,6 +256,14 @@ func (b *Bling) RefreshToken(ctx context.Context) (*providers.Credentials, error
 	// resposta vem sem ele e perder o antigo desconectaria a loja.
 	if novo.RefreshToken == "" {
 		novo.RefreshToken = b.credentials.RefreshToken
+	}
+	if novo.Extra == nil {
+		novo.Extra = map[string]any{}
+	}
+	for key, value := range b.credentials.Extra {
+		if _, exists := novo.Extra[key]; !exists {
+			novo.Extra[key] = value
+		}
 	}
 	b.credentials = novo
 	return novo, nil
@@ -330,7 +341,7 @@ type blingProduto struct {
 	PesoBruto      float64 `json:"pesoBruto"`
 	PesoLiquido    float64 `json:"pesoLiquido"`
 
-	Estoque struct {
+	Estoque *struct {
 		// ⚠ MESMO NOME, DESCRIÇÃO OPOSTA à de /estoques/saldos: aqui o spec diz
 		// "considerando a reserva de estoque"; lá diz "desconsiderando produtos
 		// reservados". Ver blingSaldo.
@@ -438,8 +449,7 @@ func (b *Bling) GetProduct(ctx context.Context, productID string) (*providers.ER
 		if err != nil {
 			// A grade faltar não pode derrubar a leitura do pai — o chamador
 			// decide se um pai sem filhos serve. Mas tem de aparecer no log.
-			logger.From(ctx, b.Logger).Warn("bling: não consegui ler as variações do produto",
-				zap.String("produto_id", productID), zap.Error(err))
+			return nil, fmt.Errorf("bling: lendo variações do produto %s: %w", productID, err)
 		} else {
 			p.Variants = filhos
 		}
@@ -480,8 +490,10 @@ func blingProdutoParaERP(p blingProduto) providers.ERPProduct {
 	// O saldo de /produtos é "considerando a reserva" segundo o spec. Ele é uma
 	// leitura CONHECIDA — o campo existe e veio. Quem quiser o número
 	// autoritativo usa GetProductStockBatch, que lê /estoques/saldos.
-	out.Stock = int(p.Estoque.SaldoVirtualTotal)
-	out.StockKnown = true
+	if p.Estoque != nil {
+		out.Stock = int(p.Estoque.SaldoVirtualTotal)
+		out.StockKnown = true
+	}
 
 	if p.IDProdutoPai != 0 {
 		out.ParentExternalID = strconv.FormatInt(p.IDProdutoPai, 10)
@@ -537,8 +549,14 @@ func blingFrete(p blingProduto) (*providers.ERPShippingProfile, int) {
 		return nil, gramas
 	}
 	cm := func(v float64) int { return int(v + 0.5) }
-	if d.UnidadeMedida == 2 { // metro
+	switch d.UnidadeMedida {
+	case 0: // metros
 		cm = func(v float64) int { return int(v*100 + 0.5) }
+	case 1: // centímetros
+	case 2: // milímetros: round up to avoid understating shipping dimensions
+		cm = func(v float64) int { return int(math.Ceil(v / 10)) }
+	default:
+		return nil, gramas
 	}
 	return &providers.ERPShippingProfile{
 		WeightGrams: gramas,
@@ -587,38 +605,58 @@ func (b *Bling) GetProductStockBatch(ctx context.Context, externalIDs []string) 
 		return out, nil
 	}
 
-	// 0 zerado, 1 positivo, 2 negativo — a união dos três é o catálogo inteiro.
-	for _, filtro := range []string{"1", "0", "2"} {
-		q := url.Values{}
-		for _, id := range externalIDs {
-			q.Add("idsProdutos[]", id)
+	// Keep requests bounded, deduplicate IDs and stop querying other balance
+	// filters once every requested product has an authoritative result.
+	ids := make([]string, 0, len(externalIDs))
+	seen := make(map[string]bool, len(externalIDs))
+	for _, id := range externalIDs {
+		if n, err := strconv.ParseInt(id, 10, 64); err != nil || n <= 0 {
+			return nil, fmt.Errorf("bling: ID de produto inválido no saldo")
 		}
-		q.Set("filtroSaldoEstoque", filtro)
-
-		var env struct {
-			Data []blingSaldo `json:"data"`
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
 		}
-		if err := b.get(ctx, "/estoques/saldos", q, &env); err != nil {
-			return nil, err
+	}
+	for start := 0; start < len(ids); start += 100 {
+		end := start + 100
+		if end > len(ids) {
+			end = len(ids)
 		}
-		for _, s := range env.Data {
-			id := strconv.FormatInt(s.Produto.ID, 10)
-			if _, jaTem := out[id]; jaTem {
-				continue
+		pending := append([]string(nil), ids[start:end]...)
+		for _, filtro := range []string{"1", "0", "2"} {
+			if len(pending) == 0 {
+				break
 			}
-			fisico := int(s.SaldoFisicoTotal)
-			virtual := int(s.SaldoVirtualTotal)
-			reservado := fisico - virtual
-			if reservado < 0 {
-				reservado = 0
+			q := url.Values{"idsProdutos[]": pending, "filtroSaldoEstoque": {filtro}}
+			var env struct {
+				Data []blingSaldo `json:"data"`
 			}
-			out[id] = providers.ERPStockDetail{
-				Balance:  fisico,
-				Reserved: reservado,
-				// O disponível é o VIRTUAL, nunca o físico: o físico conta peça
-				// já reservada por outro pedido, e vendê-la é oversell.
-				Available: virtual,
+			if err := b.get(ctx, "/estoques/saldos", q, &env); err != nil {
+				return nil, err
 			}
+			for _, balance := range env.Data {
+				id := strconv.FormatInt(balance.Produto.ID, 10)
+				if !seen[id] {
+					continue
+				}
+				if _, exists := out[id]; exists {
+					continue
+				}
+				physical, available := int(balance.SaldoFisicoTotal), int(balance.SaldoVirtualTotal)
+				reserved := physical - available
+				if reserved < 0 {
+					reserved = 0
+				}
+				out[id] = providers.ERPStockDetail{Balance: physical, Reserved: reserved, Available: available}
+			}
+			next := pending[:0]
+			for _, id := range pending {
+				if _, ok := out[id]; !ok {
+					next = append(next, id)
+				}
+			}
+			pending = next
 		}
 	}
 	return out, nil
@@ -687,7 +725,7 @@ func (b *Bling) get(ctx context.Context, caminho string, q url.Values, destino a
 	// espera não cabe no prazo do chamador, em vez de dormir 60 s dentro de um
 	// checkout. O Bling NÃO manda Retry-After (medido), então o fallback
 	// hardcoded seria uma bomba.
-	resp, corpo, err := b.DoRequestRetrying429(ctx, 2, http.MethodGet, endereco, nil, b.authHeaders())
+	resp, corpo, err := b.request(ctx, http.MethodGet, endereco, nil)
 	if err != nil {
 		return fmt.Errorf("bling GET %s: %w", caminho, err)
 	}
@@ -788,8 +826,7 @@ func blingErroDeStatus(status int, corpo []byte, requestID string) error {
 	case status == http.StatusUnauthorized:
 		return base
 	case status == http.StatusTooManyRequests:
-		return fmt.Errorf("%w — o teto do Bling é 3 req/s POR CONTA somando TODOS os apps do lojista, "+
-			"e não há Retry-After para reconciliar", base)
+		return fmt.Errorf("%w: %w — limite da conta Bling: 3 req/s ou 120.000/dia; aguardar a janela indicada", providers.ErrProvenUndelivered, base)
 	case status >= 400 && status < 500:
 		// 4xx é recusa de validação: o provedor PROCESSOU e rejeitou antes de
 		// aplicar. Marcar como comprovadamente não entregue é o que deixa o

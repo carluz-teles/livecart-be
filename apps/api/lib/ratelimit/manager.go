@@ -12,6 +12,7 @@ import (
 type Manager struct {
 	pool     *pgxpool.Pool
 	tiny     map[string]*Tiny
+	bling    map[string]*Bling
 	mu       sync.RWMutex
 	limiters map[string]*AdaptiveLimiter
 	fixos    map[string]*Fixo

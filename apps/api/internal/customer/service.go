@@ -177,16 +177,16 @@ func (s *Service) List(ctx context.Context, input ListCustomersInput) ([]*domain
 	for _, value := range []string{input.Filters.DateFrom, input.Filters.DateTo} {
 		if value != "" {
 			if _, err := time.Parse("2006-01-02", value); err != nil {
-				return nil, input.Pagination, 0, httpx.ErrBadRequest("data inválida: use AAAA-MM-DD")
+				return nil, input.Pagination, 0, httpx.DomainError(400, httpx.CodeValidationFailed, "data inválida: use AAAA-MM-DD")
 			}
 		}
 	}
 	if input.Filters.DateFrom != "" && input.Filters.DateTo != "" && input.Filters.DateFrom > input.Filters.DateTo {
-		return nil, input.Pagination, 0, httpx.ErrBadRequest("a data inicial deve preceder a final")
+		return nil, input.Pagination, 0, httpx.DomainError(400, httpx.CodeValidationFailed, "a data inicial deve preceder a final")
 	}
 	for _, value := range []*int{input.Filters.OrderCountMin, input.Filters.OrderCountMax} {
 		if value != nil && (*value < 0 || *value > math.MaxInt32) {
-			return nil, input.Pagination, 0, httpx.ErrBadRequest("quantidade de pedidos fora do intervalo permitido")
+			return nil, input.Pagination, 0, httpx.DomainError(400, httpx.CodeValidationFailed, "quantidade de pedidos fora do intervalo permitido")
 		}
 	}
 	input.Pagination.Normalize()

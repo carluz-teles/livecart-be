@@ -2,7 +2,9 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -33,7 +35,7 @@ import (
 func (s *Service) getBlingOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 	clientID := config.BlingClientID.String()
 	if clientID == "" {
-		return nil, httpx.ErrUnprocessable("Aplicativo Bling não configurado no servidor")
+		return nil, httpx.DomainError(422, httpx.CodeValidationFailed, "Aplicativo Bling não configurado no servidor")
 	}
 
 	ctx := logger.WithStore(context.Background(), storeID, "")
@@ -42,11 +44,8 @@ func (s *Service) getBlingOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 	// loja integra UM ERP. Descobrir isso DEPOIS de autorizar seria fazer o
 	// lojista percorrer a tela de consentimento para nada — e ainda gastaria uma
 	// das vagas do teto de usuários do aplicativo não homologado.
-	if existente, err := s.repo.GetActiveERP(ctx, storeID); err == nil && existente != nil &&
-		existente.Provider != string(providers.ProviderBling) {
-		return nil, httpx.ErrUnprocessable(
-			"Esta loja já usa o " + nomeAmigavelDoERP(existente.Provider) +
-				". Só é possível manter um ERP conectado por vez — desconecte-o antes de conectar o Bling.")
+	if err := s.checkBlingERPConnection(ctx, storeID); err != nil {
+		return nil, err
 	}
 
 	state := uuid.New().String()
@@ -58,6 +57,19 @@ func (s *Service) getBlingOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 		AuthURL: providererp.BlingAuthorizeURL(clientID, state),
 		State:   state,
 	}, nil
+}
+
+func (s *Service) checkBlingERPConnection(ctx context.Context, storeID string) error {
+	existing, err := s.repo.GetAnyByType(ctx, storeID, string(providers.ProviderTypeERP))
+	if err != nil {
+		return fmt.Errorf("verificando a integração de ERP da loja: %w", err)
+	}
+	if existing != nil && existing.Provider != string(providers.ProviderBling) {
+		return httpx.DomainError(422, httpx.CodeValidationFailed,
+			"Esta loja já usa o "+nomeAmigavelDoERP(existing.Provider)+
+				". Só é possível manter um ERP conectado por vez — desconecte-o antes de conectar o Bling.")
+	}
+	return nil
 }
 
 func nomeAmigavelDoERP(provider string) string {
@@ -76,7 +88,7 @@ func (s *Service) handleBlingCallback(ctx context.Context, input OAuthCallbackIn
 	clientID := config.BlingClientID.String()
 	clientSecret := config.BlingClientSecret.String()
 	if clientID == "" || clientSecret == "" {
-		return nil, httpx.ErrUnprocessable("Aplicativo Bling não configurado no servidor")
+		return nil, httpx.DomainError(422, httpx.CodeValidationFailed, "Aplicativo Bling não configurado no servidor")
 	}
 
 	// Consumo ATÔMICO: valida e apaga numa query só.
@@ -86,20 +98,27 @@ func (s *Service) handleBlingCallback(ctx context.Context, input OAuthCallbackIn
 	// pela validação e tentariam trocar o MESMO code. A doc do Bling avisa que
 	// reusar um code válido REVOGA o acesso do usuário — o custo de errar aqui
 	// não é um erro na tela, é a loja desconectada.
-	estado, err := s.repo.ConsumeOAuthState(ctx, input.State)
+	estado, err := s.repo.consumeBlingOAuthState(ctx, input.State)
 	if err != nil {
-		logger.From(ctx, s.logger).Error("bling: state de OAuth inválido ou já consumido",
-			zap.String("state", input.State), zap.Error(err))
-		return nil, httpx.ErrUnprocessable("Autorização expirada ou já utilizada. Tente conectar novamente.")
+		return nil, err
 	}
 
 	storeID := uuidToString(estado.StoreID)
 	ctx = logger.WithStore(ctx, storeID, "")
+	if err := s.checkBlingERPConnection(ctx, storeID); err != nil {
+		return nil, err
+	}
 
 	// SEM RETRY, deliberadamente. O code vale 1 minuto e uma segunda tentativa
 	// com o mesmo code revoga o lojista — repetir não é uma chance a mais.
+	if err := s.factory.WaitBlingToken(ctx); err != nil {
+		return nil, fmt.Errorf("aguardando cota de autenticação do Bling: %w", err)
+	}
 	creds, err := providererp.BlingExchangeCode(ctx, nil, clientID, clientSecret, input.Code)
 	if err != nil {
+		if observeErr := s.factory.ObserveBlingTokenError(ctx, err); observeErr != nil {
+			return nil, errors.Join(err, observeErr)
+		}
 		return nil, fmt.Errorf("trocando o code do Bling: %w", err)
 	}
 
@@ -120,15 +139,22 @@ func (s *Service) handleBlingCallback(ctx context.Context, input OAuthCallbackIn
 	if err != nil {
 		return nil, fmt.Errorf("lendo a identidade da conta Bling: %w", err)
 	}
+	if empresa == nil || strings.TrimSpace(empresa.ID) == "" {
+		return nil, httpx.DomainError(422, httpx.CodeValidationFailed, "O Bling não retornou a identificação da empresa. Tente conectar novamente.")
+	}
+	empresa.ID = strings.TrimSpace(empresa.ID)
 
 	// Duas lojas LiveCart na MESMA empresa Bling dividiriam o teto de 3 req/s
 	// sem saber uma da outra, e o webhook de URL única não teria como decidir
 	// para qual entregar. O banco também recusa (uniq_integrations_erp_account),
 	// mas recusar aqui dá uma mensagem que o lojista entende.
-	if dono, err := s.repo.GetActiveERPByAccount(ctx, string(providers.ProviderBling), empresa.ID); err == nil &&
-		dono != nil && dono.StoreID != storeID {
-		return nil, httpx.ErrUnprocessable(
-			"Esta conta Bling (" + empresa.Nome + ") já está conectada a outra loja do LiveCart.")
+	dono, err := s.repo.GetActiveERPByAccount(ctx, string(providers.ProviderBling), empresa.ID)
+	if err != nil && !httpx.IsNotFound(err) {
+		return nil, fmt.Errorf("verificando a loja da conta Bling: %w", err)
+	}
+	if dono != nil && dono.StoreID != storeID {
+		return nil, httpx.DomainError(422, httpx.CodeValidationFailed,
+			"Esta conta Bling ("+empresa.Nome+") já está conectada a outra loja do LiveCart.")
 	}
 
 	// A regra de UM ERP tem de valer AQUI também, e não só no botão.
@@ -137,11 +163,8 @@ func (s *Service) handleBlingCallback(ctx context.Context, input OAuthCallbackIn
 	// do Bling — e entre uma coisa e outra cabe uma conexão de Tiny em outra
 	// aba. Aplicá-la só lá deixa a janela aberta, e o resultado é uma loja com
 	// dois ERPs ativos: um estado que nada no fluxo de pedido sabe resolver.
-	if existente, err := s.repo.GetActiveERP(ctx, storeID); err == nil && existente != nil &&
-		existente.Provider != string(providers.ProviderBling) {
-		return nil, httpx.ErrUnprocessable(
-			"Esta loja já usa o " + nomeAmigavelDoERP(existente.Provider) +
-				". Só é possível manter um ERP conectado por vez — desconecte-o antes de conectar o Bling.")
+	if err := s.checkBlingERPConnection(ctx, storeID); err != nil {
+		return nil, err
 	}
 
 	metadata := map[string]any{
@@ -153,12 +176,6 @@ func (s *Service) handleBlingCallback(ctx context.Context, input OAuthCallbackIn
 	integracaoID, err := s.upsertBlingIntegration(ctx, storeID, creds, metadata)
 	if err != nil {
 		return nil, err
-	}
-
-	// A coluna é a fonte da verdade para o lookup indexado do webhook; o
-	// metadata é espelho, para o factory não precisar de consulta a mais.
-	if err := s.repo.SetERPAccountID(ctx, integracaoID, empresa.ID); err != nil {
-		return nil, fmt.Errorf("gravando a identidade da conta Bling: %w", err)
 	}
 
 	logger.From(ctx, s.logger).Info("bling conectado",
@@ -183,37 +200,24 @@ func (s *Service) handleBlingCallback(ctx context.Context, input OAuthCallbackIn
 func (s *Service) upsertBlingIntegration(
 	ctx context.Context, storeID string, creds *providers.Credentials, metadata map[string]any,
 ) (string, error) {
+	accountID, _ := metadata[providers.MetadataBlingCompanyID].(string)
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return "", httpx.DomainError(422, httpx.CodeValidationFailed, "Não é possível conectar o Bling sem a identificação da empresa.")
+	}
+	if creds == nil || creds.AccessToken == "" {
+		return "", httpx.DomainError(422, httpx.CodeValidationFailed, "Não é possível conectar o Bling sem credenciais válidas.")
+	}
 	cifradas, err := s.encryptor.EncryptJSON(creds)
 	if err != nil {
 		return "", fmt.Errorf("encrypting credentials: %w", err)
 	}
-	expira := creds.ExpiresAt
-
-	existente, _ := s.repo.GetByProvider(ctx, storeID, string(providers.ProviderTypeERP), string(providers.ProviderBling))
-	if existente != nil {
-		if err := s.repo.UpdateCredentials(ctx, existente.ID, cifradas, &expira); err != nil {
-			return "", fmt.Errorf("updating credentials: %w", err)
-		}
-		if err := s.repo.UpdateMetadata(ctx, existente.ID, metadata); err != nil {
-			return "", fmt.Errorf("updating metadata: %w", err)
-		}
-		if err := s.repo.UpdateStatus(ctx, existente.ID, "active"); err != nil {
-			return "", fmt.Errorf("updating status: %w", err)
-		}
-		return existente.ID, nil
+	// Only account identity comes from OAuth. Other settings are merged from
+	// the current database row, never replaced with an earlier snapshot.
+	identity := map[string]any{
+		providers.MetadataBlingCompanyID: accountID,
+		"bling_company_name":             metadata["bling_company_name"],
+		"bling_company_document":         metadata["bling_company_document"],
 	}
-
-	row, err := s.repo.Create(ctx, CreateIntegrationParams{
-		StoreID:        storeID,
-		Type:           string(providers.ProviderTypeERP),
-		Provider:       string(providers.ProviderBling),
-		Status:         "active",
-		Credentials:    cifradas,
-		TokenExpiresAt: &expira,
-		Metadata:       metadata,
-	})
-	if err != nil {
-		return "", fmt.Errorf("creating integration: %w", err)
-	}
-	return row.ID, nil
+	return s.repo.saveBlingOAuthConnection(ctx, storeID, accountID, cifradas, creds.ExpiresAt, identity)
 }
