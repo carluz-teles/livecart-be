@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -98,63 +99,43 @@ func (r *Repository) List(ctx context.Context, params ListCustomersParams) ([]*d
 		return nil, 0, fmt.Errorf("parsing store id: %w", err)
 	}
 
-	// Get total count
-	count, err := r.queries.CountCustomers(ctx, uuidToPgtype(storeUUID))
+	filters := params.Filters
+	search := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(params.Search), "@"))
+	pattern := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(search) + "%"
+	countParams := sqlc.CountFilteredCustomersParams{
+		StoreID: uuidToPgtype(storeUUID), Search: search, SearchPattern: pattern,
+		BlockedOnly: filters.BlockedOnly,
+		DateFrom:    optionalDate(filters.DateFrom), DateTo: optionalDate(filters.DateTo),
+		OrderCountMin: optionalInt4(filters.OrderCountMin), OrderCountMax: optionalInt4(filters.OrderCountMax),
+		TotalSpentMin: optionalInt8(filters.TotalSpentMin), TotalSpentMax: optionalInt8(filters.TotalSpentMax),
+	}
+	if filters.HasOrders != nil {
+		countParams.HasOrders = pgtype.Bool{Bool: *filters.HasOrders, Valid: true}
+	}
+	count, err := r.queries.CountFilteredCustomers(ctx, countParams)
 	if err != nil {
-		return nil, 0, fmt.Errorf("counting customers: %w", err)
+		return nil, 0, fmt.Errorf("counting filtered customers: %w", err)
 	}
 	total := int(count)
-
-	// Pagination
-	limit := int32(params.Pagination.Limit)
-	if limit <= 0 {
-		limit = 20
+	sortBy := params.Sorting.SortBy
+	switch sortBy {
+	case "last_order_at", "first_order_at", "total_orders", "total_spent", "platform_handle":
+	default:
+		sortBy = "last_order_at"
 	}
-	offset := int32((params.Pagination.Page - 1) * params.Pagination.Limit)
-	if offset < 0 {
-		offset = 0
-	}
-
-	var rows []sqlc.ListCustomersRow
-
-	// Use search if provided
-	if params.Search != "" {
-		searchPattern := "%" + params.Search + "%"
-		searchRows, err := r.queries.SearchCustomers(ctx, sqlc.SearchCustomersParams{
-			StoreID:        uuidToPgtype(storeUUID),
-			PlatformHandle: searchPattern,
-			Limit:          limit,
-			Offset:         offset,
-		})
-		if err != nil {
-			return nil, 0, fmt.Errorf("searching customers: %w", err)
-		}
-		// Convert search rows to list rows
-		for _, sr := range searchRows {
-			rows = append(rows, sqlc.ListCustomersRow{
-				ID:             sr.ID,
-				StoreID:        sr.StoreID,
-				PlatformUserID: sr.PlatformUserID,
-				PlatformHandle: sr.PlatformHandle,
-				Email:          sr.Email,
-				Phone:          sr.Phone,
-				FirstOrderAt:   sr.FirstOrderAt,
-				LastOrderAt:    sr.LastOrderAt,
-				CreatedAt:      sr.CreatedAt,
-				UpdatedAt:      sr.UpdatedAt,
-				TotalOrders:    sr.TotalOrders,
-				TotalSpent:     sr.TotalSpent,
-			})
-		}
-	} else {
-		rows, err = r.queries.ListCustomers(ctx, sqlc.ListCustomersParams{
-			StoreID: uuidToPgtype(storeUUID),
-			Limit:   limit,
-			Offset:  offset,
-		})
-		if err != nil {
-			return nil, 0, fmt.Errorf("listing customers: %w", err)
-		}
+	pagination := params.Pagination
+	pagination.Normalize()
+	rows, err := r.queries.ListFilteredCustomers(ctx, sqlc.ListFilteredCustomersParams{
+		StoreID: countParams.StoreID, Search: search, SearchPattern: pattern,
+		DateFrom: countParams.DateFrom, DateTo: countParams.DateTo,
+		BlockedOnly: countParams.BlockedOnly, HasOrders: countParams.HasOrders,
+		OrderCountMin: countParams.OrderCountMin, OrderCountMax: countParams.OrderCountMax,
+		TotalSpentMin: countParams.TotalSpentMin, TotalSpentMax: countParams.TotalSpentMax,
+		SortBy: sortBy, SortOrder: strings.ToLower(params.Sorting.OrderSQL()),
+		RowLimit: int32(pagination.Limit), RowOffset: int32((pagination.Page - 1) * pagination.Limit),
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing filtered customers: %w", err)
 	}
 
 	customers := make([]*domain.Customer, len(rows))
@@ -181,7 +162,7 @@ func (r *Repository) List(ctx context.Context, params ListCustomersParams) ([]*d
 			lastOrderAt,
 			firstOrderAt,
 			nil, // shipping address: only enriched on detail
-		)
+		).WithBlockStatus(row.Blocked)
 	}
 
 	return customers, total, nil
@@ -387,4 +368,22 @@ func (r *Repository) toDomainCustomer(c sqlc.Customer) *domain.Customer {
 		firstOrderAt,
 		nil, // shipping address
 	)
+}
+
+func optionalInt4(value *int) pgtype.Int4 {
+	if value == nil {
+		return pgtype.Int4{}
+	}
+	return pgtype.Int4{Int32: int32(*value), Valid: true}
+}
+func optionalInt8(value *int) pgtype.Int8 {
+	if value == nil {
+		return pgtype.Int8{}
+	}
+	return pgtype.Int8{Int64: int64(*value), Valid: true}
+}
+
+func optionalDate(value string) pgtype.Date {
+	date, err := time.Parse("2006-01-02", value)
+	return pgtype.Date{Time: date, Valid: err == nil}
 }

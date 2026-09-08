@@ -157,6 +157,20 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 		// erro para dentro do ERP.
 		desconto = 0
 	}
+	// Bling accepts a real commercial discount in the order total. Adding
+	// the same discount as a receivable installment would count it twice.
+	if commercial, ok := erpProvider.(interface {
+		GetOrderCommercialDiscount(context.Context, string) (int64, error)
+	}); ok {
+		included, err := commercial.GetOrderCommercialDiscount(ctx, st.ExternalOrderID)
+		if err != nil {
+			return nil, fmt.Errorf("reading order commercial discount: %w", err)
+		}
+		if included > desconto {
+			return nil, fmt.Errorf("ERP commercial discount exceeds payment ledger discount; reconciliation required")
+		}
+		desconto -= included
+	}
 
 	split := &SplitDePagamento{
 		TotalCents:    total,

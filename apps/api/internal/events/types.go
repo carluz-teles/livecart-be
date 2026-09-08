@@ -214,6 +214,8 @@ const (
 	// percorre a lista em sequência deixa o limitador adaptativo espaçar as
 	// chamadas com os headers do próprio Tiny.
 	ERPResyncProducts Name = "erp.products_resync"
+	// ERPWebhookProcess consumes an authenticated ERP webhook persisted before ACK.
+	ERPWebhookProcess Name = "erp.webhook.process"
 	CouponApplied     Name = "coupon.applied"
 	CouponConfirmed   Name = "coupon.confirmed"
 	CouponRefunded    Name = "coupon.refunded"
@@ -232,6 +234,7 @@ const (
 	SourceMercadoPago    Source = "mercadopago"
 	SourceStripe         Source = "stripe"
 	SourceClerk          Source = "clerk"
+	SourceBling          Source = "bling"
 	// SourceInternal marks events emitted by internal domain transitions and
 	// background workers (e.g. cart expiry) rather than an inbound webhook.
 	SourceInternal Source = "internal"
@@ -270,8 +273,9 @@ var DefaultPolicies = map[string]QueuePolicy{
 // "Em aberto" no Tiny e a aprovação nunca roda. Em 16/08 foram 3 pedidos
 // pagos nesse estado, 2 deles sem sequer registrar o id de volta.
 var EventTimeouts = map[Name]time.Duration{
-	OrderPaid:     90 * time.Second,
-	OrderRefunded: 90 * time.Second,
+	ERPWebhookProcess: 90 * time.Second,
+	OrderPaid:         90 * time.Second,
+	OrderRefunded:     90 * time.Second,
 	// `comment.received` passou a criar o pedido de venda no ERP — antes ele só
 	// lançava um movimento de estoque. O trabalho agora é resolver o contato do
 	// comprador (busca + criação, para quem é novo) e criar o pedido, tudo em
@@ -282,6 +286,16 @@ var EventTimeouts = map[Name]time.Duration{
 	// a vez, e o carrinho ficava sem segurar estoque. O teto tem de caber no
 	// trabalho — é a mesma lição do order.paid, uma linha acima.
 	CommentReceived: 90 * time.Second,
+}
+
+// ERP webhook reconciliation must survive an ERP's daily quota reset. Normal
+// events retain their existing queue policy. Expired webhook tasks remain in
+// the dead-letter queue for inspection rather than being retried indefinitely.
+const ERPWebhookMaxRetries = 25
+const ERPWebhookRetryWindow = 72 * time.Hour
+
+func (e Envelope) ERPWebhookExpired(now time.Time) bool {
+	return e.Name == ERPWebhookProcess && (e.OccurredAt.IsZero() || !now.Before(e.OccurredAt.Add(ERPWebhookRetryWindow)))
 }
 
 // Envelope is the canonical wire format for every event. It is serialized as

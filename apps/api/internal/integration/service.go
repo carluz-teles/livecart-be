@@ -6219,12 +6219,7 @@ func (s *Service) createProviderFromRow(ctx context.Context, integration *Integr
 		)
 		creds, err = s.refreshToken(ctx, integration, creds)
 		if err != nil {
-			logger.From(ctx, s.logger).Warn("failed to refresh token",
-				zap.String("integration_id", integration.ID),
-				zap.Error(err),
-			)
-			// Continue with possibly expired credentials
-			// The provider will fail if they're truly invalid
+			return nil, fmt.Errorf("refreshing integration credentials: %w", err)
 		}
 	}
 
@@ -6252,6 +6247,94 @@ func (s *Service) decryptCredentials(encrypted []byte) (*providers.Credentials, 
 }
 
 func (s *Service) refreshToken(ctx context.Context, integration *IntegrationRow, creds *providers.Credentials) (*providers.Credentials, error) {
+	var refreshed *providers.Credentials
+	var err error
+	if integration.Provider == string(providers.ProviderBling) {
+		if fresh, lookupErr := s.reusableBlingCredentials(ctx, integration, creds); lookupErr != nil {
+			return nil, lookupErr
+		} else if fresh != nil {
+			return fresh, nil
+		}
+		if waitErr := s.factory.WaitBlingToken(ctx); waitErr != nil {
+			// A concurrent worker may have saved a token while this request
+			// waited for admission. A token quota does not invalidate that token.
+			fresh, lookupErr := s.reusableBlingCredentials(ctx, integration, creds)
+			if lookupErr == nil && fresh != nil {
+				return fresh, nil
+			}
+			return nil, errors.Join(fmt.Errorf("waiting for Bling token quota: %w", waitErr), lookupErr)
+		}
+		refreshed, err = s.refreshBlingToken(ctx, integration, creds)
+		if observeErr := s.factory.ObserveBlingTokenError(ctx, err); observeErr != nil {
+			err = errors.Join(err, observeErr)
+		}
+	} else {
+		refreshed, err = s.refreshTokenWithRepository(ctx, s.repo, integration, creds)
+	}
+	if err != nil {
+		return nil, err
+	}
+	logger.From(ctx, s.logger).Info("token refresh completed",
+		zap.String("integration_id", integration.ID),
+		zap.String("provider", integration.Provider),
+	)
+	return refreshed, nil
+}
+
+// Reuse a completed rotation before consuming the global token-endpoint budget.
+func (s *Service) reusableBlingCredentials(ctx context.Context, integration *IntegrationRow, previous *providers.Credentials) (*providers.Credentials, error) {
+	current, err := s.repo.GetByID(ctx, integration.ID, integration.StoreID)
+	if err != nil {
+		return nil, fmt.Errorf("reading current Bling credentials: %w", err)
+	}
+	if current.Status != "active" {
+		return nil, fmt.Errorf("bling integration is not active; reconnect before refreshing")
+	}
+	latest, err := s.decryptCredentials(current.Credentials)
+	if err != nil {
+		return nil, err
+	}
+	if previous != nil && !latest.IsExpired() && (latest.AccessToken != previous.AccessToken || latest.ExpiresAt.After(previous.ExpiresAt)) {
+		return latest, nil
+	}
+	return nil, nil
+}
+
+func (s *Service) refreshBlingToken(ctx context.Context, integration *IntegrationRow, creds *providers.Credentials) (*providers.Credentials, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	var refreshed *providers.Credentials
+	var refreshErr error
+	err := s.repo.withIntegrationRefreshLock(ctx, integration.ID, integration.StoreID,
+		func(repo *Repository, current *IntegrationRow) error {
+			if current.Status != "active" {
+				return fmt.Errorf("bling integration is not active; reconnect before refreshing")
+			}
+			latest, err := s.decryptCredentials(current.Credentials)
+			if err != nil {
+				return err
+			}
+			// The worker and an order may have read the same expiring token.
+			// After waiting for the lock, reuse the token another caller saved.
+			if creds != nil && !latest.IsExpired() &&
+				(latest.AccessToken != creds.AccessToken || latest.ExpiresAt.After(creds.ExpiresAt)) {
+				refreshed = latest
+				return nil
+			}
+			refreshed, refreshErr = s.refreshTokenWithRepository(ctx, repo, current, latest)
+			// Permanent OAuth failures update status inside this transaction.
+			// Commit that diagnostic while returning the provider error below.
+			return nil
+		})
+	if err != nil {
+		return nil, errors.Join(refreshErr, err)
+	}
+	return refreshed, refreshErr
+}
+
+func (s *Service) refreshTokenWithRepository(
+	ctx context.Context, repo *Repository, integration *IntegrationRow, creds *providers.Credentials,
+) (*providers.Credentials, error) {
 	provider, err := s.factory.CreateProvider(providers.ProviderConfig{
 		IntegrationID: integration.ID,
 		StoreID:       integration.StoreID,
@@ -6266,8 +6349,17 @@ func (s *Service) refreshToken(ctx context.Context, integration *IntegrationRow,
 
 	newCreds, err := provider.RefreshToken(ctx)
 	if err != nil {
-		// Mark integration as error state
-		_ = s.repo.UpdateStatus(ctx, integration.ID, "error")
+		permanent := true
+		if integration.Provider == string(providers.ProviderBling) {
+			var classified interface{ Permanent() bool }
+			permanent = errors.As(err, &classified) && classified.Permanent()
+		}
+		if permanent {
+			if statusErr := repo.UpdateStatus(ctx, integration.ID, "error"); statusErr != nil {
+				return nil, errors.Join(fmt.Errorf("refreshing token: %w", err),
+					fmt.Errorf("saving token failure status: %w", statusErr))
+			}
+		}
 		return nil, fmt.Errorf("refreshing token: %w", err)
 	}
 
@@ -6287,13 +6379,9 @@ func (s *Service) refreshToken(ctx context.Context, integration *IntegrationRow,
 		tokenExpiresAt = &newCreds.ExpiresAt
 	}
 
-	if err := s.repo.UpdateCredentials(ctx, integration.ID, encrypted, tokenExpiresAt); err != nil {
+	if err := repo.UpdateCredentials(ctx, integration.ID, encrypted, tokenExpiresAt); err != nil {
 		return nil, fmt.Errorf("saving new credentials: %w", err)
 	}
-
-	logger.From(ctx, s.logger).Info("token refreshed successfully",
-		zap.String("integration_id", integration.ID),
-	)
 
 	return newCreds, nil
 }

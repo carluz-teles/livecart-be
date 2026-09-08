@@ -40,6 +40,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Param        limit query int false "Items per page" default(20)
 // @Param        sortBy query string false "Sort field" default(last_order_at)
 // @Param        sortOrder query string false "Sort order (asc, desc)" default(desc)
+// @Param        dateFrom query string false "Registration date from (YYYY-MM-DD, America/Sao_Paulo)"
+// @Param        dateTo query string false "Registration date through (YYYY-MM-DD, inclusive)"
+// @Param        blockedOnly query bool false "Only currently blocked customers"
+// @Param        totalSpentMin query int false "Minimum paid amount (cents)"
+// @Param        totalSpentMax query int false "Maximum paid amount (cents)"
 // @Param        hasOrders query bool false "Filter customers with orders"
 // @Param        orderCountMin query int false "Minimum order count"
 // @Param        orderCountMax query int false "Maximum order count"
@@ -142,7 +147,7 @@ func (h *Handler) ListOrders(c *fiber.Ctx) error {
 }
 
 func parseCustomerFilters(c *fiber.Ctx) CustomerFilters {
-	var filters CustomerFilters
+	filters := CustomerFilters{BlockedOnly: c.Query("blockedOnly") == "true", DateFrom: c.Query("dateFrom"), DateTo: c.Query("dateTo")}
 
 	if hasOrders := c.Query("hasOrders"); hasOrders != "" {
 		val := hasOrders == "true"

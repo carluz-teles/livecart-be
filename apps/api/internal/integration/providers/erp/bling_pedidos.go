@@ -11,10 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
-
 	"livecart/apps/api/internal/integration/providers"
-	"livecart/apps/api/lib/logger"
 )
 
 // Pedidos de venda no Bling.
@@ -104,7 +101,14 @@ func (b *Bling) CreateOrder(ctx context.Context, order providers.ERPOrder) (*pro
 	// CLAIM ANTES DO POST. Sem 409, é a única defesa contra duplicata: se uma
 	// tentativa anterior morreu DEPOIS de o Bling gravar, o pedido já existe e
 	// criar outro venderia a mesma peça duas vezes.
-	if existente, err := b.FindOrderIDByMarker(ctx, marcador); err == nil && existente != "" {
+	if strings.TrimSpace(order.ExternalID) == "" {
+		return nil, fmt.Errorf("bling: pedido sem identificador de origem")
+	}
+	existente, err := b.FindOrderIDByMarker(ctx, marcador)
+	if err != nil {
+		return nil, fmt.Errorf("bling: verificando pedido existente antes da criação: %w", err)
+	}
+	if existente != "" {
 		return &providers.OrderResult{OrderID: existente, Status: "adopted"}, nil
 	}
 
@@ -147,8 +151,15 @@ func (b *Bling) CreateOrder(ctx context.Context, order providers.ERPOrder) (*pro
 			Alertas []string `json:"alertas"`
 		} `json:"data"`
 	}
-	if err := b.escrever(ctx, http.MethodPost, "/pedidos/vendas", p, &env); err != nil {
+	payload, err := blingInitialCheckout(p, order)
+	if err != nil {
 		return nil, err
+	}
+	if err := b.escrever(ctx, http.MethodPost, "/pedidos/vendas", payload, &env); err != nil {
+		return nil, err
+	}
+	if env.Data.ID <= 0 {
+		return nil, fmt.Errorf("bling: criação respondeu sem ID de pedido; conferir a âncora antes de repetir")
 	}
 	// ⚠ O 201 NÃO devolve `numero` (medido) — só id, alertas e rastreamento.
 	// O número humano do pedido só aparece na primeira leitura. É diferença
@@ -213,6 +224,7 @@ func (b *Bling) FindOrderIDByMarker(ctx context.Context, marker string) (string,
 	if err := b.get(ctx, "/pedidos/vendas", q, &env); err != nil {
 		return "", err
 	}
+	var found string
 	for _, p := range env.Data {
 		if p.Situacao != nil {
 			// De graça, e no melhor momento possível: este GET precede TODA
@@ -223,10 +235,13 @@ func (b *Bling) FindOrderIDByMarker(ctx context.Context, marker string) (string,
 		// Conferência explícita: o filtro é do servidor, e confiar nele sem
 		// checar o que voltou é como se adota o pedido errado.
 		if p.NumeroLoja == marker {
-			return strconv.FormatInt(p.ID, 10), nil
+			if p.ID <= 0 || found != "" {
+				return "", fmt.Errorf("bling: âncora do pedido ambígua ou sem ID válido")
+			}
+			found = strconv.FormatInt(p.ID, 10)
 		}
 	}
-	return "", nil
+	return found, nil
 }
 
 func (b *Bling) pedido(ctx context.Context, orderID string) (*blingPedido, map[string]any, error) {
@@ -289,7 +304,7 @@ func (b *Bling) GetOrderItems(ctx context.Context, orderID string) ([]providers.
 // que não modela `transporte`, `desconto`, `categoria`, `vendedor`, `taxas`,
 // `intermediador` os apagaria com HTTP 200 e em silêncio.
 func (b *Bling) UpdateOrderItems(ctx context.Context, orderID string, itens []providers.ERPOrderItem) error {
-	_, cru, err := b.pedido(ctx, orderID)
+	before, cru, err := b.pedido(ctx, orderID)
 	if err != nil {
 		return err
 	}
@@ -328,12 +343,20 @@ func (b *Bling) UpdateOrderItems(ctx context.Context, orderID string, itens []pr
 	if gradeIgual(cru["itens"], novos) {
 		return nil
 	}
+	if before.NotaFiscal != nil && before.NotaFiscal.ID != 0 {
+		return fmt.Errorf("bling: invoiced order requires manual item reconciliation")
+	}
+	if err := blingCheckoutCanReplaceInstallments(cru); err != nil {
+		return err
+	}
 	cru["itens"] = novos
 
 	// A grade nova muda o TOTAL, e o Bling valida que a soma das parcelas bate
 	// com ele. Sem isto o pedido trava com o primeiro item para sempre: todo
 	// PUT seguinte morre em 400 e nenhum segundo produto entra.
-	rebasearParcelas(cru, totalDaVenda(cru, blingItens(itens)))
+	if err := b.rebaseBlingItemInstallments(ctx, cru, totalDaVenda(cru, blingItens(itens))); err != nil {
+		return err
+	}
 	limparReadOnly(cru)
 
 	return b.escrever(ctx, http.MethodPut, "/pedidos/vendas/"+url.PathEscape(orderID), cru, nil)
@@ -831,6 +854,9 @@ func (b *Bling) CreateContact(ctx context.Context, contato providers.ERPContactI
 	if err := b.escrever(ctx, http.MethodPost, "/contatos", corpo, &env); err != nil {
 		return nil, err
 	}
+	if env.Data.ID <= 0 {
+		return nil, fmt.Errorf("bling: criação respondeu sem ID de contato")
+	}
 	return &providers.ERPContactResult{
 		ContactID: strconv.FormatInt(env.Data.ID, 10),
 		Name:      contato.Name,
@@ -838,7 +864,20 @@ func (b *Bling) CreateContact(ctx context.Context, contato providers.ERPContactI
 }
 
 func (b *Bling) UpdateContact(ctx context.Context, contactID string, contato providers.ERPContactInput) error {
-	corpo := map[string]any{"nome": contato.Name}
+	var env struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := b.get(ctx, "/contatos/"+url.PathEscape(contactID), nil, &env); err != nil {
+		return err
+	}
+	corpo := env.Data
+	if corpo == nil || corpo["nome"] == nil || corpo["situacao"] == nil || corpo["tipo"] == nil {
+		return fmt.Errorf("bling: cadastro de contato incompleto; atualização não enviada")
+	}
+	delete(corpo, "id")
+	if contato.Name != "" {
+		corpo["nome"] = contato.Name
+	}
 	if d := somenteDigitos(contato.CpfCnpj); d != "" {
 		corpo["numeroDocumento"] = d
 	}
@@ -900,7 +939,7 @@ func (b *Bling) SyncProduct(ctx context.Context, product providers.ERPProduct) (
 // escrever manda um verbo de escrita e decodifica a resposta.
 func (b *Bling) escrever(ctx context.Context, metodo, caminho string, corpo any, destino any) error {
 	endereco := blingAPIBaseURL + caminho
-	resp, bruto, err := b.DoRequestRetrying429(ctx, 2, metodo, endereco, corpo, b.authHeaders())
+	resp, bruto, err := b.request(ctx, metodo, endereco, corpo)
 	if err != nil {
 		return fmt.Errorf("bling %s %s: %w", metodo, caminho, err)
 	}
@@ -923,34 +962,28 @@ func (b *Bling) escrever(ctx context.Context, metodo, caminho string, corpo any,
 // a primeira ativa. Sem nenhuma, RECUSA — criar pedido com forma arbitrária
 // bagunça o financeiro dele de um jeito que só aparece no fechamento do caixa.
 func (b *Bling) formaPagamentoPadrao(ctx context.Context) (int64, error) {
-	b.mu.Lock()
-	if b.formaPagamentoCache != 0 {
-		id := b.formaPagamentoCache
-		b.mu.Unlock()
-		return id, nil
-	}
-	// Já tem alguém buscando: espera o resultado dele em vez de gastar outra
-	// requisição da cota para descobrir a mesma coisa.
-	if espera := b.formaPagamentoEmVoo; espera != nil {
-		b.mu.Unlock()
-		select {
-		case <-espera:
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		}
+	var espera chan struct{}
+	for {
 		b.mu.Lock()
-		id := b.formaPagamentoCache
-		b.mu.Unlock()
-		if id != 0 {
+		if b.formaPagamentoCache != 0 {
+			id := b.formaPagamentoCache
+			b.mu.Unlock()
 			return id, nil
 		}
-		// Quem estava em voo falhou. Cai para a busca própria — uma falha
-		// transitória não pode condenar todo mundo que veio depois.
-		b.mu.Lock()
+		if inflight := b.formaPagamentoEmVoo; inflight != nil {
+			b.mu.Unlock()
+			select {
+			case <-inflight:
+				continue
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		espera = make(chan struct{})
+		b.formaPagamentoEmVoo = espera
+		b.mu.Unlock()
+		break
 	}
-	espera := make(chan struct{})
-	b.formaPagamentoEmVoo = espera
-	b.mu.Unlock()
 
 	defer func() {
 		b.mu.Lock()
@@ -975,36 +1008,45 @@ func (b *Bling) formaPagamentoPadrao(ctx context.Context) (int64, error) {
 			Finalidade int `json:"finalidade"`
 		} `json:"data"`
 	}
-	if err := b.get(ctx, "/formas-pagamentos", nil, &env); err != nil {
-		return 0, err
-	}
-
 	var primeiraAtiva, padrao int64
 	porTipo := map[int]int64{}
-	for _, f := range env.Data {
-		// A conferência em CÓDIGO fica mesmo que um dia se mande situacao=1 na
-		// query: servidor que ignora o parâmetro em silêncio devolve a lista
-		// inteira, e escolher uma forma inativa não daria erro nenhum. É a
-		// armadilha já registrada no adapter do Tiny.
-		if f.Situacao != 1 {
-			continue
+	padraoPorTipo := map[int]bool{}
+	for pagina := 1; ; pagina++ {
+		q := url.Values{"pagina": {strconv.Itoa(pagina)}, "limite": {"100"}, "situacao": {"1"}}
+		if err := b.get(ctx, "/formas-pagamentos", q, &env); err != nil {
+			return 0, err
 		}
-		// Finalidade 1 é só para PAGAR. Pedido de venda gera conta a receber.
-		if f.Finalidade != 0 && f.Finalidade != 2 && f.Finalidade != 3 {
-			continue
-		}
-		if f.TipoPagamento != 0 {
-			// Empate no mesmo tipo (esta conta tem duas formas de tipo 21):
-			// a padrão vence, senão o menor id — critério estável.
-			if atual, ja := porTipo[f.TipoPagamento]; !ja || f.Padrao == 1 || f.ID < atual {
-				porTipo[f.TipoPagamento] = f.ID
+		for _, f := range env.Data {
+			// A conferência em CÓDIGO fica mesmo que um dia se mande situacao=1 na
+			// query: servidor que ignora o parâmetro em silêncio devolve a lista
+			// inteira, e escolher uma forma inativa não daria erro nenhum. É a
+			// armadilha já registrada no adapter do Tiny.
+			if f.Situacao != 1 {
+				continue
+			}
+			// Finalidade 1 é só para PAGAR. Pedido de venda gera conta a receber.
+			if f.Finalidade != 0 && f.Finalidade != 2 && f.Finalidade != 3 {
+				continue
+			}
+			if f.TipoPagamento != 0 {
+				// Empate no mesmo tipo (esta conta tem duas formas de tipo 21):
+				// a padrão vence, senão o menor id — critério estável.
+				if atual, ja := porTipo[f.TipoPagamento]; !ja ||
+					(f.Padrao == 1 && !padraoPorTipo[f.TipoPagamento]) ||
+					((f.Padrao == 1) == padraoPorTipo[f.TipoPagamento] && f.ID < atual) {
+					porTipo[f.TipoPagamento] = f.ID
+					padraoPorTipo[f.TipoPagamento] = f.Padrao == 1
+				}
+			}
+			if f.Padrao == 1 {
+				padrao = f.ID
+			}
+			if primeiraAtiva == 0 {
+				primeiraAtiva = f.ID
 			}
 		}
-		if f.Padrao == 1 {
-			padrao = f.ID
-		}
-		if primeiraAtiva == 0 {
-			primeiraAtiva = f.ID
+		if len(env.Data) < 100 {
+			break
 		}
 	}
 	if padrao == 0 {
@@ -1057,7 +1099,7 @@ func blingTipoDePagamento(metodo string) []int {
 // Três desfechos, e o terceiro é o que impede o alarme de morrer de ruído:
 //
 //	método conhecido e a conta tem a forma  → a forma certa
-//	método conhecido e a conta NÃO tem      → a padrão, com AVISO
+//	método conhecido e a conta NÃO tem      → erro de configuração
 //	método vazio (DESCONTO, A PAGAR, …)     → a padrão, em silêncio
 func (b *Bling) formaPagamentoPara(ctx context.Context, metodo string) (int64, error) {
 	padrao, err := b.formaPagamentoPadrao(ctx)
@@ -1079,14 +1121,7 @@ func (b *Bling) formaPagamentoPara(ctx context.Context, metodo string) (int64, e
 		}
 	}
 
-	// Esta conta não tem forma daquele tipo — a do teste não tem cartão de
-	// crédito, por exemplo. Recusar o pedido seria pior: a venda existe.
-	logger.From(ctx, b.Logger).Warn("bling: a conta não tem forma de pagamento para o método; usando a padrão",
-		zap.String("metodo", metodo),
-		zap.Ints("tipos_procurados", tipos),
-		zap.Int64("forma_usada", padrao),
-	)
-	return padrao, nil
+	return 0, fmt.Errorf("bling: configure uma forma de recebimento ativa para %s (tipos %v); o pagamento não será registrado como outro método", metodo, tipos)
 }
 
 // guardarFormasDePagamento guarda o padrão e o mapa por tipo, de uma leitura só.
@@ -1109,21 +1144,22 @@ func (b *Bling) guardarFormasDePagamento(padrao int64, porTipo map[int]int64) {
 // TEM de dar o total do pedido, ou o ERP a reescreve sozinho".
 //
 // Read-modify-write não protege disso. A defesa é: escrever, RELER, e conferir
-// que a soma e a quantidade de parcelas sobreviveram. Nunca confiar no 200.
+// que cada valor, vencimento e instrumento sobreviveram. Nunca confiar no 200.
 func (b *Bling) SetOrderInstallments(ctx context.Context, orderID string, parcelas []providers.ERPInstallment) error {
 	if len(parcelas) == 0 {
 		return fmt.Errorf("bling: parcelas[] é obrigatório no pedido de venda")
 	}
 
-	_, cru, err := b.pedido(ctx, orderID)
+	before, cru, err := b.pedido(ctx, orderID)
 	if err != nil {
 		return err
 	}
 
-	var somaEnviada int64
 	novas := make([]any, 0, len(parcelas))
 	for _, p := range parcelas {
-		somaEnviada += p.AmountCents
+		if p.AmountCents < 0 {
+			return fmt.Errorf("bling: installment value cannot be negative")
+		}
 		// POR PARCELA, e não uma vez para a chamada: um carrinho pode ter dois
 		// pagamentos com instrumentos diferentes (PIX + cartão), e as linhas
 		// DESCONTO e A PAGAR não têm método nenhum. Resolver uma vez só
@@ -1142,6 +1178,15 @@ func (b *Bling) SetOrderInstallments(ctx context.Context, orderID string, parcel
 			"formaPagamento": map[string]any{"id": forma},
 		})
 	}
+	if blingInstallmentsEqual(cru["parcelas"], novas) {
+		return nil
+	}
+	if before.NotaFiscal != nil && before.NotaFiscal.ID != 0 {
+		return fmt.Errorf("bling: invoiced order requires manual payment reconciliation")
+	}
+	if err := blingCheckoutCanReplaceInstallments(cru); err != nil {
+		return err
+	}
 	cru["parcelas"] = novas
 	limparReadOnly(cru)
 
@@ -1151,20 +1196,14 @@ func (b *Bling) SetOrderInstallments(ctx context.Context, orderID string, parcel
 
 	// A RELEITURA é a parte que não pode ser cortada. Um 200 aqui significa
 	// "aceitei", não "gravei o que você mandou".
-	depois, _, err := b.pedido(ctx, orderID)
+	_, verified, err := b.pedido(ctx, orderID)
 	if err != nil {
 		// Não dá para afirmar que as parcelas ficaram erradas — só que não
 		// conseguimos conferir. Quem chama precisa saber a diferença.
 		return fmt.Errorf("bling: parcelas enviadas mas NÃO CONFERIDAS (releitura falhou): %w", err)
 	}
-	var somaGravada int64
-	for _, p := range depois.Parcelas {
-		somaGravada += int64(p.Valor*100 + 0.5)
-	}
-	if len(depois.Parcelas) != len(parcelas) || somaGravada != somaEnviada {
-		return fmt.Errorf("bling: o ERP REESCREVEU as parcelas — enviei %d somando %d centavos, "+
-			"gravou %d somando %d. O registro financeiro do lojista não é o que mandamos",
-			len(parcelas), somaEnviada, len(depois.Parcelas), somaGravada)
+	if !blingInstallmentsEqual(verified["parcelas"], novas) {
+		return fmt.Errorf("bling: o ERP REESCREVEU as parcelas — valor, vencimento, observação ou forma de pagamento divergente")
 	}
 	return nil
 }
@@ -1191,4 +1230,79 @@ func (b *Bling) UpdateOrderPayment(ctx context.Context, orderID string, pagament
 		// observação dizia "pix" e a formaPagamento dizia Dinheiro.
 		Method: pagamento.Method,
 	}})
+}
+
+// Compare commercial installment fields while ignoring ERP-generated row IDs.
+func blingInstallmentsEqual(actual any, wanted []any) bool {
+	rows, ok := actual.([]any)
+	if !ok || len(rows) != len(wanted) {
+		return false
+	}
+	for i, row := range rows {
+		got, ok := row.(map[string]any)
+		want, valid := wanted[i].(map[string]any)
+		if !ok || !valid {
+			return false
+		}
+		gotForm, _ := got["formaPagamento"].(map[string]any)
+		wantForm, _ := want["formaPagamento"].(map[string]any)
+		gotNote, _ := got["observacoes"].(string)
+		wantNote, _ := want["observacoes"].(string)
+		if blingMoney(got["valor"]) != blingMoney(want["valor"]) || got["dataVencimento"] != want["dataVencimento"] || gotNote != wantNote || numeroDoCru(gotForm["id"]) != numeroDoCru(wantForm["id"]) {
+			return false
+		}
+	}
+	return true
+}
+
+// Paid rows represent money already received, so a new item may only increase
+// the unpaid balance. Proportional rebasing would invent additional payments
+// before the subsequent ledger reconciliation can run.
+func (b *Bling) rebaseBlingItemInstallments(ctx context.Context, raw map[string]any, total int64) error {
+	rows, _ := raw["parcelas"].([]any)
+	hasPaid := false
+	for _, row := range rows {
+		p, _ := row.(map[string]any)
+		note, _ := p["observacoes"].(string)
+		hasPaid = hasPaid || strings.HasPrefix(strings.TrimSpace(note), "PAGO ")
+	}
+	if !hasPaid {
+		rebasearParcelas(raw, total)
+		return nil
+	}
+	kept := make([]any, 0, len(rows)+1)
+	var covered int64
+	var balance map[string]any
+	for _, row := range rows {
+		p, _ := row.(map[string]any)
+		note, _ := p["observacoes"].(string)
+		if strings.HasPrefix(strings.TrimSpace(note), "A PAGAR") {
+			if balance == nil {
+				balance = p
+			}
+			continue
+		}
+		covered += blingMoney(p["valor"])
+		kept = append(kept, p)
+	}
+	if total < covered {
+		return fmt.Errorf("bling: item total is below already recorded payments; reconciliation required")
+	}
+	if remaining := total - covered; remaining > 0 {
+		if balance == nil {
+			form, err := b.formaPagamentoPara(ctx, "")
+			if err != nil {
+				return err
+			}
+			balance = map[string]any{
+				"dataVencimento": time.Now().In(blingLocation).AddDate(0, 0, 7).Format("2006-01-02"),
+				"observacoes":    "A PAGAR — saldo não coberto pelos pagamentos LiveCart",
+				"formaPagamento": map[string]any{"id": form},
+			}
+		}
+		balance["valor"] = float64(remaining) / 100
+		kept = append(kept, balance)
+	}
+	raw["parcelas"] = kept
+	return nil
 }

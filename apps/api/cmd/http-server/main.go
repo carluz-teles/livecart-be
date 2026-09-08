@@ -1258,6 +1258,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := orderListener.OnCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents, p.PaymentSnapshot); err != nil {
 				return err
 			}
+			// Later payments must also synchronize an already confirmed Bling order.
+			if err := integrationSvc.ERP().OnCartPaidBlingCheckout(ctx, p.CartID, p.StoreID); err != nil {
+				return err
+			}
 			// Coupon reactor: confirm the redemption (reserved → confirmed) in
 			// reaction to cart.paid, replacing the inline coupon confirm that ran
 			// first in integration's fan-out. Idempotent (no-op unless 'reserved');
@@ -1638,6 +1642,24 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				return asynq.SkipRetry
 			}
 			return integrationSvc.RunScheduledPublish(ctx, p.JobID)
+		})
+
+		eventsServer.Register(events.ERPWebhookProcess, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			if env.Name != events.ERPWebhookProcess || env.Source != events.SourceBling {
+				return asynq.SkipRetry
+			}
+			if env.ERPWebhookExpired(time.Now()) {
+				return fmt.Errorf("erp webhook retry window expired: %w", asynq.SkipRetry)
+			}
+			var command integration.BlingWebhookCommand
+			if err := json.Unmarshal(env.Payload, &command); err != nil {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.ProcessBlingWebhook(ctx, command)
 		})
 
 		// Releitura em massa dos produtos de um ERP.

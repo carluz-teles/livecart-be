@@ -14,11 +14,14 @@ import (
 // ============================================
 
 type CustomerFilters struct {
-	HasOrders     *bool `query:"hasOrders"`
-	OrderCountMin *int  `query:"orderCountMin"`
-	OrderCountMax *int  `query:"orderCountMax"`
-	TotalSpentMin *int  `query:"totalSpentMin"`
-	TotalSpentMax *int  `query:"totalSpentMax"`
+	DateFrom      string `query:"dateFrom"`
+	DateTo        string `query:"dateTo"`
+	BlockedOnly   bool   `query:"blockedOnly"`
+	HasOrders     *bool  `query:"hasOrders"`
+	OrderCountMin *int   `query:"orderCountMin"`
+	OrderCountMax *int   `query:"orderCountMax"`
+	TotalSpentMin *int   `query:"totalSpentMin"`
+	TotalSpentMax *int   `query:"totalSpentMax"`
 }
 
 // ============================================
@@ -40,10 +43,11 @@ type CustomerShippingAddressResponse struct {
 }
 
 type CustomerResponse struct {
-	ID     string  `json:"id"`
-	Handle string  `json:"handle"`
-	Email  *string `json:"email,omitempty"`
-	Phone  *string `json:"phone,omitempty"`
+	Blocked *bool   `json:"blocked,omitempty"`
+	ID      string  `json:"id"`
+	Handle  string  `json:"handle"`
+	Email   *string `json:"email,omitempty"`
+	Phone   *string `json:"phone,omitempty"`
 	// Identity fields captured at the most recent checkout. Empty until the
 	// buyer fills the public cart form. Surfaced on the detail drawer so the
 	// merchant can address the customer by name and call them via WhatsApp.
@@ -64,6 +68,7 @@ type CustomerResponse struct {
 func NewCustomerResponse(c *domain.Customer) CustomerResponse {
 	resp := CustomerResponse{
 		ID:           c.ID().String(),
+		Blocked:      c.Blocked(),
 		Handle:       c.Handle(),
 		Email:        c.Email(),
 		Phone:        c.Phone(),

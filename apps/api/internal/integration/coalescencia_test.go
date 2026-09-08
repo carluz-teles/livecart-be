@@ -5,10 +5,86 @@ package integration
 // a repetição vai enxergar o estado que ele acabou de gravar.
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 )
+
+func TestCoalescenciaPreservaEventoDuranteRepeticao(t *testing.T) {
+	c := novoCoalescedor()
+	entrou := make(chan int, 3)
+	liberar := make(chan struct{})
+	concluiu := make(chan error, 1)
+	go func() {
+		n := 0
+		_, err := c.Fazer("pedido", func() error {
+			n++
+			entrou <- n
+			if n < 3 {
+				<-liberar
+			}
+			return nil
+		})
+		concluiu <- err
+	}()
+	defer close(liberar)
+	for esperado := 1; esperado <= 2; esperado++ {
+		if n := <-entrou; n != esperado {
+			t.Fatalf("execução = %d, esperada %d", n, esperado)
+		}
+		rodou, err := c.Fazer("pedido", func() error {
+			t.Error("evento concorrente deveria ser absorvido")
+			return nil
+		})
+		if rodou || err != nil {
+			t.Fatalf("evento concorrente: rodou=%v err=%v", rodou, err)
+		}
+		liberar <- struct{}{}
+	}
+	if err := <-concluiu; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-entrou:
+		if n != 3 {
+			t.Fatalf("última execução = %d, esperada 3", n)
+		}
+	default:
+		t.Fatal("evento recebido durante a repetição foi perdido")
+	}
+}
+
+func TestCoalescenciaDrenaPendenciaMesmoAposErro(t *testing.T) {
+	c := novoCoalescedor()
+	entrou := make(chan struct{})
+	liberar := make(chan struct{})
+	concluiu := make(chan error, 1)
+	var execucoes atomic.Int32
+	go func() {
+		_, err := c.Fazer("pedido", func() error {
+			if execucoes.Add(1) == 1 {
+				close(entrou)
+				<-liberar
+				return errFalhaDeTeste
+			}
+			return nil
+		})
+		concluiu <- err
+	}()
+	<-entrou
+	rodou, err := c.Fazer("pedido", func() error { return nil })
+	close(liberar)
+	if rodou || err != nil {
+		t.Fatalf("evento concorrente: rodou=%v err=%v", rodou, err)
+	}
+	if err := <-concluiu; !errors.Is(err, errFalhaDeTeste) {
+		t.Fatalf("erro original não foi preservado: %v", err)
+	}
+	if n := execucoes.Load(); n != 2 {
+		t.Fatalf("execuções = %d, esperadas 2", n)
+	}
+}
 
 func TestCoalescenciaAbsorveARajadaMasNaoPerdeAUltima(t *testing.T) {
 	c := novoCoalescedor()

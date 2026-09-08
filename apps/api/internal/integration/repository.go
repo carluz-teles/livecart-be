@@ -169,6 +169,48 @@ func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*Integrat
 	return r.toIntegrationRow(row), nil
 }
 
+// withIntegrationRefreshLock serializes rotating OAuth credentials across API
+// instances. All reads and writes inside fn use the connection holding the row
+// lock, so a refresh nested in cart finalisation cannot exhaust the pool by
+// acquiring a third connection.
+func (r *Repository) withIntegrationRefreshLock(
+	ctx context.Context, id, storeID string,
+	fn func(*Repository, *IntegrationRow) error,
+) (err error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning token refresh transaction: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		// A successful commit already closed the transaction. On failure pgx
+		// closes the connection if rollback cannot complete.
+		if rollbackErr := tx.Rollback(cleanupCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			err = errors.Join(err, fmt.Errorf("rolling back token refresh: %w", rollbackErr))
+		}
+	}()
+	var lockedID string
+	if err := tx.QueryRow(ctx,
+		"SELECT id::text FROM integrations WHERE id = $1::uuid AND store_id = $2::uuid FOR NO KEY UPDATE",
+		id, storeID,
+	).Scan(&lockedID); err != nil {
+		return fmt.Errorf("locking integration for token refresh: %w", err)
+	}
+	lockedRepo := &Repository{queries: r.queries.WithTx(tx)}
+	row, err := lockedRepo.GetByID(ctx, id, storeID)
+	if err != nil {
+		return err
+	}
+	if err := fn(lockedRepo, row); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing token refresh: %w", err)
+	}
+	return nil
+}
+
 // GetByIDOnly retrieves an integration by ID only (for webhook handlers).
 func (r *Repository) GetByIDOnly(ctx context.Context, id string) (*IntegrationRow, error) {
 	integrationID, err := parseUUID(id)

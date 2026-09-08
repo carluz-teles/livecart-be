@@ -295,11 +295,14 @@ func TestBlingRefreshPreservaTokenAntigoQuandoRespostaNaoTraz(t *testing.T) {
 	defer func() { blingTokenURL = antes }()
 
 	b, _ := bancadaBling(t, respJSON(`{}`))
-	b.credentials = &providers.Credentials{AccessToken: "velho", RefreshToken: "rt-VELHO"}
+	b.credentials = &providers.Credentials{AccessToken: "velho", RefreshToken: "rt-VELHO", Extra: map[string]any{"client_id": "private-id", "client_secret": "private-secret"}}
 
 	novo, err := b.RefreshToken(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if novo.Extra["client_id"] != "private-id" || novo.Extra["client_secret"] != "private-secret" {
+		t.Fatal("private app credentials lost on refresh")
 	}
 	if novo.RefreshToken != "rt-VELHO" {
 		t.Errorf("perdemos o refresh token: %q", novo.RefreshToken)
@@ -364,7 +367,7 @@ func TestBling429ExplicaACotaPorConta(t *testing.T) {
 	if err == nil {
 		t.Fatal("queria erro")
 	}
-	for _, esperado := range []string{"3 req/s", "POR CONTA", "Retry-After"} {
+	for _, esperado := range []string{"3 req/s", "conta Bling", "120.000/dia"} {
 		if !strings.Contains(err.Error(), esperado) {
 			t.Errorf("a mensagem do 429 não menciona %q: %v", esperado, err)
 		}
@@ -1018,13 +1021,13 @@ func TestFormaDePagamentoSaiDoMetodoENaoDoPadraoDaConta(t *testing.T) {
 	casos := []struct {
 		metodo    string
 		queroID   int64
-		queroWarn bool
+		queroErro bool
 		porque    string
 	}{
 		{"pix", 11010305, false, "o defeito que o lojista viu: hoje isto daria 11010299 (Dinheiro)"},
 		{"boleto", 11010300, false, "tipoPagamento 15"},
-		{"debit_card", 11010299, true, "a conta não tem débito — cai na padrão, COM aviso"},
-		{"credit_card", 11010299, true, "a conta não tem cartão de crédito — o caso que o desenho tem de aguentar"},
+		{"debit_card", 0, true, "a conta não tem débito — exige configuração"},
+		{"credit_card", 0, true, "a conta não tem cartão de crédito — o caso que o desenho tem de aguentar"},
 		{"", 11010299, false, "DESCONTO e A PAGAR não têm instrumento: padrão em SILÊNCIO"},
 		{"manual", 11010299, false, "pagamento por fora: instrumento mesmo desconhecido"},
 		{"erp_manual", 11010299, false, "baixa lançada no ERP"},
@@ -1035,6 +1038,12 @@ func TestFormaDePagamentoSaiDoMetodoENaoDoPadraoDaConta(t *testing.T) {
 		t.Run(c.metodo+" → "+strconv.FormatInt(c.queroID, 10), func(t *testing.T) {
 			b, _ := bancadaDeFormas(t, `[]`)
 			got, err := b.formaPagamentoPara(context.Background(), c.metodo)
+			if c.queroErro {
+				if err == nil || got != 0 {
+					t.Fatalf("método conhecido ausente aceito como outro: id=%d err=%v", got, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1052,8 +1061,10 @@ func TestResolverFormaPorMetodoNaoGastaRequisicaoAMais(t *testing.T) {
 	ctx := context.Background()
 
 	for _, m := range []string{"pix", "credit_card", "boleto", "", "pix", "debit_card"} {
-		if _, err := b.formaPagamentoPara(ctx, m); err != nil {
-			t.Fatal(err)
+		_, err := b.formaPagamentoPara(ctx, m)
+		wantError := m == "credit_card" || m == "debit_card"
+		if (err != nil) != wantError {
+			t.Fatalf("método %s: erro=%v, esperado=%v", m, err, wantError)
 		}
 	}
 	if *leituras != 1 {
@@ -1074,7 +1085,7 @@ func TestCadaParcelaLevaAFormaDoSeuProprioMetodo(t *testing.T) {
 	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/formas-pagamentos") {
 			leiturasDeFormas++
-			respJSON(formasDaContaReal)(w, r)
+			respJSON(strings.Replace(formasDaContaReal, `]}`, `,{"id":11010306,"descricao":"Cartão","situacao":1,"tipoPagamento":3,"finalidade":2}]}`, 1))(w, r)
 			return
 		}
 		if r.Method == http.MethodPut {
@@ -1111,9 +1122,8 @@ func TestCadaParcelaLevaAFormaDoSeuProprioMetodo(t *testing.T) {
 	if formaDa(0) != 11010305 {
 		t.Errorf("a parcela do PIX saiu com a forma %d, queria 11010305 (Pix)", formaDa(0))
 	}
-	if formaDa(1) != 11010299 {
-		t.Errorf("a parcela do cartão saiu com %d; esta conta não tem cartão, "+
-			"então o esperado é a padrão 11010299", formaDa(1))
+	if formaDa(1) != 11010306 {
+		t.Errorf("a parcela do cartão saiu com %d, queria 11010306", formaDa(1))
 	}
 	if formaDa(2) != 11010299 {
 		t.Errorf("a linha de DESCONTO saiu com %d, queria a padrão 11010299", formaDa(2))
@@ -1140,10 +1150,7 @@ func TestFormaInativaNuncaEhEscolhida(t *testing.T) {
 		respJSON(`{"data":{"id":1}}`)(w, r)
 	})
 	got, err := b.formaPagamentoPara(context.Background(), "pix")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == 1 {
+	if err == nil || got != 0 {
 		t.Error("escolheu uma forma INATIVA — a conferência em código existe porque " +
 			"servidor que ignora o filtro em silêncio devolve a lista inteira")
 	}
@@ -1163,10 +1170,7 @@ func TestFormaDeFinalidadeDePagamentoNaoServeParaVenda(t *testing.T) {
 		respJSON(`{"data":{"id":1}}`)(w, r)
 	})
 	got, err := b.formaPagamentoPara(context.Background(), "pix")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == 1 {
+	if err == nil || got != 0 {
 		t.Error("escolheu forma de finalidade 1 (só pagamentos) para um pedido de venda — " +
 			"o lançamento iria para o lugar errado")
 	}

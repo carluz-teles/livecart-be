@@ -165,7 +165,7 @@ func (w *TokenRefreshWorker) refreshExpiringTokens() {
 		)
 	}
 
-	var refreshed, failed int
+	var refreshed, failed, skipped int
 	for i, integration := range integrations {
 		if i > 0 && espacamento > 0 {
 			select {
@@ -177,33 +177,33 @@ func (w *TokenRefreshWorker) refreshExpiringTokens() {
 			}
 		}
 		itemCtx := logger.WithStore(ctx, integration.StoreID, "")
-		if err := w.refreshToken(itemCtx, &integration); err != nil {
+		updated, err := w.refreshToken(itemCtx, &integration)
+		if err != nil {
 			logger.From(itemCtx, w.logger).Warn("failed to refresh token",
 				zap.String("integration_id", integration.ID),
 				zap.String("provider", integration.Provider),
 				zap.Error(err),
 			)
 			failed++
-		} else {
-			logger.From(itemCtx, w.logger).Info("token refreshed successfully",
-				zap.String("integration_id", integration.ID),
-				zap.String("provider", integration.Provider),
-			)
+		} else if updated {
 			refreshed++
+		} else {
+			skipped++
 		}
 	}
 
 	logger.From(ctx, w.logger).Info("token refresh cycle completed",
 		zap.Int("refreshed", refreshed),
 		zap.Int("failed", failed),
+		zap.Int("skipped", skipped),
 	)
 }
 
-func (w *TokenRefreshWorker) refreshToken(ctx context.Context, integration *IntegrationRow) error {
+func (w *TokenRefreshWorker) refreshToken(ctx context.Context, integration *IntegrationRow) (bool, error) {
 	// Decrypt credentials
 	creds, err := w.service.decryptCredentials(integration.Credentials)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Sem credencial de renovação, não há o que fazer aqui.
@@ -220,12 +220,12 @@ func (w *TokenRefreshWorker) refreshToken(ctx context.Context, integration *Inte
 			zap.String("integration_id", integration.ID),
 			zap.String("provider", integration.Provider),
 		)
-		return nil
+		return false, nil
 	}
 
 	// Attempt refresh
 	_, err = w.service.refreshToken(ctx, integration, creds)
-	return err
+	return err == nil, err
 }
 
 // providerSelfRefreshes diz se a renovação do provider usa o PRÓPRIO access

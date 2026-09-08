@@ -108,8 +108,8 @@ func TestFactoryBlingUsaLimitadorPreditivoENaoOAdaptativo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ehFixo := p.(*blingFalso).cfg.RateLimiter.(*ratelimit.Fixo); !ehFixo {
-		t.Errorf("o Bling recebeu %T; sem header de cota, só o Fixo freia de verdade",
+	if _, ehFixo := p.(*blingFalso).cfg.RateLimiter.(*ratelimit.Bling); !ehFixo {
+		t.Errorf("o Bling recebeu %T; sem header de cota, o limitador compartilhado precisa frear sem headers",
 			p.(*blingFalso).cfg.RateLimiter)
 	}
 }

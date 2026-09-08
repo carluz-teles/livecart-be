@@ -400,7 +400,7 @@ func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 			//    Sem conta conhecida ainda (primeira conexão), cai no id da
 			//    integração: um balde a mais é melhor do que balde nenhum.
 			chave := chaveDeCotaBling(cfg)
-			limiter = f.rateLimitManager.GetOrCreateFixo(chave, BlingRPSPadrao)
+			limiter = f.rateLimitManager.GetOrCreateBling(chave, BlingRPSPadrao)
 		} else if cfg.Name == ProviderTiny {
 			key := "tiny:" + cfg.StoreID
 			if cnpj, ok := cfg.Metadata["cnpj"].(string); ok && cnpj != "" {

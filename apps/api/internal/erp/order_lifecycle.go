@@ -45,7 +45,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/jackc/pgx/v5"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -153,12 +155,16 @@ func (s *Service) garantirPedidoDoCarrinho(ctx context.Context, cartID, storeID 
 
 	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
-		return nil // loja sem ERP ligado
+		if errors.Is(err, pgx.ErrNoRows) || httpx.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("loading ERP integration before order creation: %w", err)
 	}
 
 	if respeitaModo {
 		if modo := ModoDeReservaDaIntegracao(erpIntegration.Provider, erpIntegration.Metadata); modo != ReservaNativaDoERP {
-			logger.From(ctx, s.logger).Debug("modo de reserva local: o pedido no ERP nasce no pagamento",
+			logger.From(ctx, s.logger).Info("ERP order deferred until payment",
+				zap.String("store_id", storeID), zap.String("reason", "local_reservation_mode"),
 				zap.String("cart_id", cartID),
 				zap.String("provider", erpIntegration.Provider),
 				zap.String("modo", string(modo)),
@@ -970,7 +976,13 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
-	if status != nil {
+	checkoutSynced, checkoutErr := s.syncPaidCheckout(ctx, erpProvider, cartID, storeID, fresh.ExternalOrderID)
+	if checkoutErr != nil {
+		s.collab.MarkFinalisationFailed(ctx, cartID, "sincronização dos valores do checkout falhou: "+checkoutErr.Error())
+		return fmt.Errorf("synchronizing paid checkout before approval: %w", checkoutErr)
+	}
+
+	if status != nil && !checkoutSynced {
 		items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
 		if err != nil {
 			return fmt.Errorf("listing cart items for payment total: %w", err)
@@ -1045,9 +1057,10 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		)
 	}
 	s.collab.EmitERPOrderFinalized(ctx, storeID, cartID)
-	logger.From(ctx, s.logger).Info("ERP order payment confirmed — two PUTs, zero stock movement",
+	logger.From(ctx, s.logger).Info("ERP order payment confirmed",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", fresh.ExternalOrderID),
+		zap.Bool("checkout_synchronized", checkoutSynced),
 	)
 	s.collab.MirrorToOrder(ctx, cartID)
 	return nil

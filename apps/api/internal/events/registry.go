@@ -96,6 +96,8 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger, exporter Exporter) {
 	mux.HandleFunc(string(NotificationFailed), logAndExport(log, exporter))
 	mux.HandleFunc(string(NotificationSkipped), logEvent(log))
 
+	// ERPWebhookProcess is registered in the composition root with the durable
+	// integration consumer, never with a log-only handler.
 	// Group G — ERP / Tiny.
 	mux.HandleFunc(string(ERPOrderCreated), logEvent(log))
 	mux.HandleFunc(string(ERPOrderFinalized), logEvent(log))

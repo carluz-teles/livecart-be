@@ -412,6 +412,13 @@ func (s *Service) RunERPOrderStatusSweep(ctx context.Context, staleAfter time.Du
 // O snapshot do gateway é relido do banco: é o mesmo que o webhook original
 // congelou, e sem ele o reenvio aprovaria a venda sem o financeiro junto.
 func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID string) error {
+	orderState, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("loading ERP order state for retry: %w", err)
+	}
+	if orderState.State == OrderStateConfirmed {
+		return s.OnCartPaidBlingCheckout(ctx, cartID, storeID)
+	}
 	st, err := s.repo.GetCartERPFinalisationStatus(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("loading cart finalisation status: %w", err)
