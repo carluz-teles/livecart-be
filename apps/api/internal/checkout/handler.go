@@ -506,6 +506,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 	}
 
 	return CartForCheckoutResponse{
+		ERPItemSync:           output.ERPItemSync,
 		PaymentReviewRequired: output.Cart.PaymentReviewRequired,
 		ID:                    output.Cart.ID,
 		Token:                 output.Cart.Token,

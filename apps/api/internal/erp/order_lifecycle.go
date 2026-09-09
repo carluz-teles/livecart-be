@@ -369,6 +369,11 @@ func (s *Service) MutateERPOrderItems(ctx context.Context, cartID, storeID strin
 // a mais contra o teto da conta. nil significa "não sei o que o pedido tem", e
 // aí a primeira passada sempre envia.
 func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaAplicada []providers.ERPOrderItem) error {
+	var err error
+	ctx, err = s.withPendingERPGridOwnership(ctx, cartID)
+	if err != nil {
+		return err
+	}
 	// Reconfere DEPOIS de soltar 'mutating'.
 	//
 	// A passada interna já repete enquanto o banco muda, mas ela termina numa
@@ -380,6 +385,14 @@ func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaApli
 	// Soltar e reconferir fecha o vão, porque a releitura acontece com o estado
 	// já em 'open' — quem chegar a partir dali ganha o CAS e cuida de si.
 	ja := jaAplicada
+	started := time.Now()
+	waits := 0
+	defer func() {
+		if waits > 0 {
+			logger.From(ctx, s.logger).Info("ERP order mutation wait completed",
+				zap.String("cart_id", cartID), zap.String("store_id", storeID), zap.Int("waits", waits), zap.Duration("duration", time.Since(started)))
+		}
+	}()
 	for tentativa := 1; tentativa <= 3; tentativa++ {
 		aplicada, err := s.umaPassadaDeMutacao(ctx, cartID, storeID, ja)
 		if errors.Is(err, providers.ErrOrderNotFound) {
@@ -397,7 +410,8 @@ func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaApli
 			return s.recriarPedidoSumido(ctx, cartID, storeID)
 		}
 		if errors.Is(err, ErrOrderBusy) {
-			timer := time.NewTimer(100 * time.Millisecond)
+			waits++
+			timer := time.NewTimer(time.Duration(min(waits, 5)) * 100 * time.Millisecond)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -485,7 +499,7 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 		// dois comentários que se cruzassem por ~1s custavam uma venda — e o
 		// caso passava despercebido porque a rajada mais antiga descartava o
 		// erro com `_ =`.
-		logger.From(ctx, s.logger).Info("order mutation already in flight, latest grid will win",
+		logger.From(ctx, s.logger).Debug("order mutation already in flight, latest grid will win",
 			zap.String("cart_id", cartID),
 		)
 		return nil, ErrOrderBusy
@@ -511,7 +525,7 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 	if !won {
 		// Outra mutação em voo: ela reconstrói a grade do banco, que já contém a
 		// mudança deste chamador, e reconfere depois de soltar o estado.
-		logger.From(ctx, s.logger).Info("order mutation already in flight, latest grid will win",
+		logger.From(ctx, s.logger).Debug("order mutation already in flight, latest grid will win",
 			zap.String("cart_id", cartID),
 		)
 		return nil, ErrOrderBusy
@@ -586,6 +600,11 @@ func pedidoJaFaturado(situacao string) (bool, string) {
 // a apenas reservar, que é onde ele deveria estar. Não relançamos depois: quem
 // lança é o faturamento.
 func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, orderID string, jaAplicada []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
+	var err error
+	ctx, err = s.withPendingERPGridOwnership(ctx, cartID)
+	if err != nil {
+		return nil, err
+	}
 	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("loading ERP integration: %w", err)
@@ -622,12 +641,16 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 			}
 			return enviada, nil // convergiu: o pedido já reflete o carrinho
 		}
-		final, mergeErr := s.preservarLinhasDoLojista(ctx, erpProvider, orderID, grid)
+		final, unchanged, mergeErr := s.preservarLinhasDoLojista(ctx, erpProvider, orderID, grid)
 		if mergeErr != nil {
 			return nil, mergeErr
 		}
-		if err := s.enviarGrade(ctx, erpProvider, cartID, storeID, orderID, final); err != nil {
-			return nil, err
+		if !unchanged {
+			if err := s.enviarGrade(ctx, erpProvider, cartID, storeID, orderID, final); err != nil {
+				return nil, err
+			}
+		} else {
+			logger.From(ctx, s.logger).Info("ERP order grid already matches; write skipped", zap.String("cart_id", cartID), zap.String("store_id", storeID))
 		}
 		if ack, ok := s.repo.(ERPGridAcknowledger); ok {
 			if err := ack.ConfirmERPGrid(ctx, cartID, grid); err != nil {
@@ -696,7 +719,7 @@ func mesmaGrade(a, b []providers.ERPOrderItem) bool {
 // Falha de leitura NÃO vira escrita cega. Pular a mutação adia o ajuste da
 // reserva, e a próxima tentativa a faz; escrever sem saber apaga o trabalho de
 // alguém.
-func (s *Service) preservarLinhasDoLojista(ctx context.Context, erpProvider providers.ERPProvider, orderID string, nossa []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
+func (s *Service) preservarLinhasDoLojista(ctx context.Context, erpProvider providers.ERPProvider, orderID string, nossa []providers.ERPOrderItem) ([]providers.ERPOrderItem, bool, error) {
 	atuais, err := erpProvider.GetOrderItems(ctx, orderID)
 	if err != nil {
 		// Nota fiscal emitida não é falha de leitura a ser reententada: é uma
@@ -704,12 +727,15 @@ func (s *Service) preservarLinhasDoLojista(ctx context.Context, erpProvider prov
 		// último ponto em que dá para saber disso, e é o mais confiável — o
 		// `idNotaFiscal` vem do próprio pedido, sem depender de webhook.
 		if errors.Is(err, providers.ErrPedidoComNotaFiscal) {
-			return nil, fmt.Errorf("cart order %s: %w: %w", orderID, ErrPedidoFaturado, err)
+			return nil, false, fmt.Errorf("cart order %s: %w: %w", orderID, ErrPedidoFaturado, err)
 		}
-		return nil, fmt.Errorf("relendo o pedido antes de escrever (mutação adiada para não apagar linha do lojista): %w", err)
+		return nil, false, fmt.Errorf("relendo o pedido antes de escrever (mutação adiada para não apagar linha do lojista): %w", err)
 	}
 
 	noCarrinho := make(map[string]bool, len(nossa))
+	for _, id := range EditedProducts(ctx) {
+		noCarrinho[id] = true
+	}
 	for _, it := range nossa {
 		noCarrinho[it.ProductID] = true
 	}
@@ -730,12 +756,18 @@ func (s *Service) preservarLinhasDoLojista(ctx context.Context, erpProvider prov
 			zap.Int("theirs", len(final)-len(nossa)),
 		)
 	}
-	return final, nil
+	return final, mesmaGrade(final, atuais), nil
 }
 
 // enviarGrade manda a grade e trata a única recusa que autoriza um estorno.
-func (s *Service) enviarGrade(ctx context.Context, erpProvider providers.ERPProvider, cartID, storeID, orderID string, grid []providers.ERPOrderItem) error {
-	err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+func (s *Service) enviarGrade(ctx context.Context, erpProvider providers.ERPProvider, cartID, storeID, orderID string, grid []providers.ERPOrderItem) (err error) {
+	started := time.Now()
+	defer func() {
+		logger.From(ctx, s.logger).Info("ERP order grid write finished", zap.String("cart_id", cartID),
+			zap.String("store_id", storeID), zap.Duration("duration", time.Since(started)), zap.Bool("success", err == nil))
+	}()
+
+	err = s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
 		return erpProvider.UpdateOrderItems(ctx, orderID, grid)
 	})
 	if errors.Is(err, providers.ErrPedidoComNotaFiscal) {
@@ -753,9 +785,13 @@ func (s *Service) enviarGrade(ctx context.Context, erpProvider providers.ERPProv
 		if _, checkErr := erpProvider.GetOrderItems(ctx, orderID); checkErr != nil {
 			return fmt.Errorf("checking order before reversing stock: %w", checkErr)
 		}
+		reversalStarted := time.Now()
 		revErr := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
 			return erpProvider.ReverseOrderStock(ctx, orderID)
 		})
+		logger.From(ctx, s.logger).Info("ERP stock reversal finished",
+			zap.String("cart_id", cartID), zap.String("store_id", storeID),
+			zap.Duration("duration", time.Since(reversalStarted)), zap.Bool("success", revErr == nil))
 		if revErr != nil {
 			return fmt.Errorf("reversing manually launched stock to edit order: %w", revErr)
 		}
@@ -782,8 +818,8 @@ func (s *Service) enviarGrade(ctx context.Context, erpProvider providers.ERPProv
 }
 
 // cartGrid monta a grade do pedido a partir dos itens do carrinho vinculados ao
-// ERP. Grade vazia é aceita pela API mas nunca é o que o comprador quer, então
-// vira erro aqui: um pedido sem itens não segura nada.
+// ERP. Uma remoção explícita enfileirada pode esvaziar o pedido existente;
+// os demais fluxos não criam/aprovam pedidos sem itens.
 func (s *Service) cartGrid(ctx context.Context, cartID string) ([]providers.ERPOrderItem, error) {
 	// A grade é a do GRUPO: este carrinho mais os que foram juntados a ele. Um
 	// pedido só no ERP carrega o conteúdo de todos.
@@ -813,7 +849,7 @@ func (s *Service) cartGrid(ctx context.Context, cartID string) ([]providers.ERPO
 			Note: strings.TrimSpace(providers.LiveCartItemMarker + " " + item.ProductKeyword),
 		})
 	}
-	if len(grid) == 0 {
+	if len(grid) == 0 && len(EditedProducts(ctx)) == 0 {
 		return nil, fmt.Errorf("cart %s sem itens vinculados ao ERP para aplicar no pedido", cartID)
 	}
 	return grid, nil

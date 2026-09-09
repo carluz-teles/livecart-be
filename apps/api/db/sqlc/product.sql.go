@@ -14,7 +14,9 @@ import (
 const applyERPStockMirror = `-- name: ApplyERPStockMirror :execrows
 UPDATE products
 SET stock = GREATEST($1::int, 0), updated_at = now()
-WHERE id = $2 AND erp_seq = $3::bigint
+WHERE products.id = $2 AND products.erp_seq = $3::bigint
+AND NOT EXISTS (SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
+    WHERE r.product_id=products.id AND r.revision>w.synced_revision)
 `
 
 type ApplyERPStockMirrorParams struct {

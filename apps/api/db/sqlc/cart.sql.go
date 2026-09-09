@@ -4790,6 +4790,8 @@ SET erp_order_state = $1::varchar,
     erp_op_resting_state = CASE WHEN $1::varchar IN ('mutating','reflecting') THEN $2::text ELSE NULL END
 WHERE carts.id = (SELECT COALESCE(j.joined_to_cart_id, j.id) FROM carts j WHERE j.id = $3)
   AND carts.erp_order_state = $2
+AND ($1::varchar <> 'reflecting' OR NOT EXISTS (
+    SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=carts.id AND w.revision>w.synced_revision))
 `
 
 type TransitionCartERPOrderStateParams struct {

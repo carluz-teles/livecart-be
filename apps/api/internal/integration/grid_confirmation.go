@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/integration/providers"
 )
 
@@ -48,6 +49,7 @@ func (r *Repository) ConfirmERPGrid(ctx context.Context, cartID string, grid []p
 func (s *Service) RecoverPendingERPItems(ctx context.Context) {
 	rows, err := s.repo.pool.Query(ctx, `WITH candidates AS (
         SELECT c.id FROM carts c WHERE c.status NOT IN ('cancelled','expired')
+        AND NOT EXISTS (SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=c.id AND w.revision>w.synced_revision)
         AND (c.erp_items_retry_at IS NULL OR c.erp_items_retry_at<now())
         AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id=c.id
             AND ci.erp_pending_since<now()-interval '30 seconds' AND ci.erp_confirmed_quantity IS NOT NULL)
@@ -118,4 +120,8 @@ func (s *Service) RecoverPendingERPItems(ctx context.Context) {
 		s.logger.Info("ERP item recovery acknowledged", zap.String("cart_id", c.cart),
 			zap.String("store_id", c.store), zap.String("event_id", c.event), zap.Int("items", len(items)))
 	}
+}
+
+func (r *Repository) PendingERPGridProducts(ctx context.Context, cartID string) ([]string, error) {
+	return cartedit.PendingProducts(ctx, r.pool, cartID)
 }

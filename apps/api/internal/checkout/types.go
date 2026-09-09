@@ -1,6 +1,7 @@
 package checkout
 
 import (
+	"livecart/apps/api/internal/cartedit"
 	"time"
 )
 
@@ -17,6 +18,7 @@ import (
 // "data unavailable" (older paid carts may have nothing recorded for
 // card-specific fields, since they were not persisted before this change).
 type CartForCheckoutResponse struct {
+	ERPItemSync           *cartedit.Status             `json:"erpItemSync,omitempty"`
 	PaymentReviewRequired bool                         `json:"paymentReviewRequired"`
 	ID                    string                       `json:"id"`
 	Token                 string                       `json:"token"`
@@ -332,6 +334,7 @@ type GetCartForCheckoutInput struct {
 // "paid" — see Service.GetCartForCheckout. The handler propagates them as-is
 // to the public response so unpaid carts never leak PII via the public token.
 type GetCartForCheckoutOutput struct {
+	ERPItemSync     *cartedit.Status
 	Cart            CartDetails
 	Items           []CartItemDetails
 	WaitlistItems   []WaitlistItemDetails

@@ -131,7 +131,9 @@ LIMIT 1;
 -- zero (gravado na bateria de sandbox) e copiar isso propagaria o defeito.
 UPDATE products
 SET stock = GREATEST(sqlc.arg(erp_stock)::int, 0), updated_at = now()
-WHERE id = sqlc.arg(id) AND erp_seq = sqlc.arg(seen_seq)::bigint;
+WHERE products.id = sqlc.arg(id) AND products.erp_seq = sqlc.arg(seen_seq)::bigint
+AND NOT EXISTS (SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
+    WHERE r.product_id=products.id AND r.revision>w.synced_revision);
 
 -- name: ListERPLinkedProductsSample :many
 -- Uma amostra pequena de produtos ligados ao ERP, dos que TÊM estoque — são os

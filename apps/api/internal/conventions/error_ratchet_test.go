@@ -290,8 +290,6 @@ var baselineRawThrows = map[string]bool{
 	"checkout.Repository.ReadCartShipping:\"invalid cart ID\"":        true,
 	"checkout.Repository.ReadCouponSummary:\"invalid coupon ID\"":     true,
 	"checkout.Repository.ReadShippingQuoteCache:\"invalid cart ID\"":  true,
-	"checkout.Repository.RecordMutation:\"invalid cart ID\"":          true,
-	"checkout.Repository.RecordMutation:\"invalid product ID\"":       true,
 	"checkout.Repository.SaveShippingQuoteCache:\"invalid cart ID\"":  true,
 	"checkout.Repository.SetCartItemQuantity:\"invalid item ID\"":     true,
 	// Mesma validação de UUID da irmã acima, no wrapper que substituiu o

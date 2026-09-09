@@ -647,13 +647,19 @@ type MutationParams struct {
 // checkout item edit (add/qty/remove) funnels through here, so this is the
 // single canonical emission point for buyer-checkout cart mutations.
 func (r *Repository) RecordMutation(ctx context.Context, pool *pgxpool.Pool, p MutationParams) error {
+	return dbtx.InTx(ctx, pool, r.q, func(q *sqlc.Queries) error {
+		return recordMutation(ctx, q, p)
+	})
+}
+
+func recordMutation(ctx context.Context, q *sqlc.Queries, p MutationParams) error {
 	cID, err := uuid.Parse(p.CartID)
 	if err != nil {
-		return httpx.ErrBadRequest("invalid cart ID")
+		return httpx.DomainError(400, httpx.CodeValidationFailed, "invalid cart ID")
 	}
 	pID, err := uuid.Parse(p.ProductID)
 	if err != nil {
-		return httpx.ErrBadRequest("invalid product ID")
+		return httpx.DomainError(400, httpx.CodeValidationFailed, "invalid product ID")
 	}
 	source := p.Source
 	if source == "" {
@@ -662,43 +668,42 @@ func (r *Repository) RecordMutation(ctx context.Context, pool *pgxpool.Pool, p M
 
 	// Record the mutation and, when it maps to a canonical event, emit it in the
 	// SAME tx (keyed by the mutation id) via the shared runner.
-	return dbtx.InTx(ctx, pool, r.q, func(q *sqlc.Queries) error {
-		mutation, err := q.CreateCartMutation(ctx, sqlc.CreateCartMutationParams{
-			CartID:         pgtype.UUID{Bytes: cID, Valid: true},
-			ProductID:      pgtype.UUID{Bytes: pID, Valid: true},
-			MutationType:   p.MutationType,
-			QuantityBefore: int32(p.QuantityBefore),
-			QuantityAfter:  int32(p.QuantityAfter),
-			UnitPrice:      p.UnitPrice,
-			Source:         source,
-			ErpMovementID:  pgtype.Text{String: p.ERPMovementID, Valid: p.ERPMovementID != ""},
-		})
-		if err != nil {
-			return fmt.Errorf("recording cart mutation: %w", err)
-		}
 
-		name := cartMutationEventName(p.MutationType)
-		if name == "" {
-			return nil
-		}
-		mutationID := uuid.UUID(mutation.ID.Bytes).String()
-		return events.EmitInternal(ctx, q, name, string(name)+":"+mutationID, struct {
-			MutationID     string `json:"mutation_id"`
-			CartID         string `json:"cart_id"`
-			ProductID      string `json:"product_id"`
-			MutationType   string `json:"mutation_type"`
-			QuantityBefore int    `json:"quantity_before"`
-			QuantityAfter  int    `json:"quantity_after"`
-			Source         string `json:"source"`
-		}{
-			MutationID:     mutationID,
-			CartID:         p.CartID,
-			ProductID:      p.ProductID,
-			MutationType:   p.MutationType,
-			QuantityBefore: p.QuantityBefore,
-			QuantityAfter:  p.QuantityAfter,
-			Source:         source,
-		})
+	mutation, err := q.CreateCartMutation(ctx, sqlc.CreateCartMutationParams{
+		CartID:         pgtype.UUID{Bytes: cID, Valid: true},
+		ProductID:      pgtype.UUID{Bytes: pID, Valid: true},
+		MutationType:   p.MutationType,
+		QuantityBefore: int32(p.QuantityBefore),
+		QuantityAfter:  int32(p.QuantityAfter),
+		UnitPrice:      p.UnitPrice,
+		Source:         source,
+		ErpMovementID:  pgtype.Text{String: p.ERPMovementID, Valid: p.ERPMovementID != ""},
+	})
+	if err != nil {
+		return fmt.Errorf("recording cart mutation: %w", err)
+	}
+
+	name := cartMutationEventName(p.MutationType)
+	if name == "" {
+		return nil
+	}
+	mutationID := uuid.UUID(mutation.ID.Bytes).String()
+	return events.EmitInternal(ctx, q, name, string(name)+":"+mutationID, struct {
+		MutationID     string `json:"mutation_id"`
+		CartID         string `json:"cart_id"`
+		ProductID      string `json:"product_id"`
+		MutationType   string `json:"mutation_type"`
+		QuantityBefore int    `json:"quantity_before"`
+		QuantityAfter  int    `json:"quantity_after"`
+		Source         string `json:"source"`
+	}{
+		MutationID:     mutationID,
+		CartID:         p.CartID,
+		ProductID:      p.ProductID,
+		MutationType:   p.MutationType,
+		QuantityBefore: p.QuantityBefore,
+		QuantityAfter:  p.QuantityAfter,
+		Source:         source,
 	})
 }
 

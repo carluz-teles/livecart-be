@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -486,6 +487,12 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	// to render the retry banner based on Status.
 	out.PaymentReviewRequired = row.PaymentReviewRequired
 	out.ERPPendingItems = row.ERPPendingItems
+	if s.repo.db != nil {
+		out.ERPItemSync, err = cartedit.Read(ctx, s.repo.db, id)
+		if err != nil {
+			return nil, err
+		}
+	}
 	out.ERPFinalisation = &ERPFinalisationOutput{
 		Status:        row.ERPFinalisationStatus,
 		LastError:     row.ERPLastError,

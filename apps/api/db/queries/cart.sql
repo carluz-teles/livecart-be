@@ -1187,7 +1187,9 @@ SET erp_order_state = sqlc.arg(to_state)::varchar,
     erp_op_started_at = CASE WHEN sqlc.arg(to_state)::varchar IN ('converting','mutating','reflecting') THEN now() ELSE erp_op_started_at END,
     erp_op_resting_state = CASE WHEN sqlc.arg(to_state)::varchar IN ('mutating','reflecting') THEN sqlc.arg(from_state)::text ELSE NULL END
 WHERE carts.id = (SELECT COALESCE(j.joined_to_cart_id, j.id) FROM carts j WHERE j.id = sqlc.arg(cart_id))
-  AND carts.erp_order_state = sqlc.arg(from_state);
+  AND carts.erp_order_state = sqlc.arg(from_state)
+AND (sqlc.arg(to_state)::varchar <> 'reflecting' OR NOT EXISTS (
+    SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=carts.id AND w.revision>w.synced_revision));
 
 -- name: GetCartERPOrderState :one
 -- A situação do pedido e o quanto já foi pago vêm na MESMA linha, de propósito.

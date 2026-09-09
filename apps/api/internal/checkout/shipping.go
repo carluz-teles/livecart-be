@@ -9,10 +9,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -173,7 +175,12 @@ func (r *Repository) GetShippingContextByToken(ctx context.Context, pool *pgxpoo
 
 // UpdateCartShipping persists the freight option chosen by the customer.
 // When clear is true, the shipping fields are set to NULL (unselect).
-func (r *Repository) UpdateCartShipping(ctx context.Context, pool *pgxpool.Pool, cartID string, sel *CartShippingSelection) error {
+type shippingWriter interface {
+	cartedit.Reader
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func (r *Repository) UpdateCartShipping(ctx context.Context, pool shippingWriter, cartID string, sel *CartShippingSelection) error {
 	uid, err := uuid.Parse(cartID)
 	if err != nil {
 		return httpx.ErrBadRequest("invalid cart ID")
@@ -197,7 +204,24 @@ func (r *Repository) UpdateCartShipping(ctx context.Context, pool *pgxpool.Pool,
 		return nil
 	}
 
-	_, err = pool.Exec(ctx, `
+	// Lock first, then inspect the queue in a fresh statement. A NOT EXISTS
+	// in the UPDATE alone can see a snapshot from before a concurrent edit.
+	var shippingTx pgx.Tx
+	if p, ok := pool.(*pgxpool.Pool); ok {
+		shippingTx, err = p.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer shippingTx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+		pool = shippingTx
+	}
+	if _, err := pool.Exec(ctx, `SELECT id FROM carts WHERE id=$1 FOR UPDATE`, cartID); err != nil {
+		return err
+	}
+	if err := cartedit.AssertReady(ctx, pool, cartID); err != nil {
+		return err
+	}
+	result, err := pool.Exec(ctx, `
 		UPDATE carts
 		SET shipping_provider        = $2,
 		    shipping_service_id      = $3,
@@ -220,6 +244,12 @@ func (r *Repository) UpdateCartShipping(ctx context.Context, pool *pgxpool.Pool,
 	)
 	if err != nil {
 		return fmt.Errorf("updating cart shipping: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return httpx.DomainError(404, httpx.CodeCartItemNotFound, "carrinho não encontrado")
+	}
+	if shippingTx != nil {
+		return shippingTx.Commit(ctx)
 	}
 	return nil
 }

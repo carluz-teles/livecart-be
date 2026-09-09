@@ -263,8 +263,18 @@ func (s *Service) escreverNoERP(ctx context.Context, storeID, chave string, fn f
 		provider = integracao.Provider
 	}
 
+	queuedAt := time.Now()
 	return s.escrita.fila.Do(ctx, chave, func(ctx context.Context) error {
-		if err := s.escrita.balde(storeID, provider).Wait(ctx); err != nil {
+		quotaAt := time.Now()
+		err := s.escrita.balde(storeID, provider).Wait(ctx)
+		dispatchedAt := time.Now()
+		queueWait, quotaWait := quotaAt.Sub(queuedAt), dispatchedAt.Sub(quotaAt)
+		if queueWait+quotaWait >= time.Second || err != nil {
+			s.logger.Info("ERP write budget wait", zap.String("store_id", storeID), zap.String("cart_id", chave),
+				zap.String("provider", provider), zap.Duration("queue_wait", queueWait),
+				zap.Duration("quota_wait", quotaWait), zap.Error(err))
+		}
+		if err != nil {
 			return err
 		}
 		return fn(ctx)

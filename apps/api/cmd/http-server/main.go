@@ -1729,12 +1729,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	}
 	eventsRelay.Start()
 	// Reverse stop order: relay (producer) -> server (consumer) -> client close.
-	startRecovery := func(name string, recoverBatch func(context.Context)) {
+	startRecovery := func(name string, recoverBatch func(context.Context), intervals ...time.Duration) {
 		recoveryCtx, stop := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			ticker := time.NewTicker(15 * time.Second)
+			interval := 15 * time.Second
+			if len(intervals) > 0 {
+				interval = intervals[0]
+			}
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -1748,6 +1752,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 		}()
 		lifecycle.add(name, func() { stop(); <-done })
+	}
+	if checkoutSvc != nil {
+		startRecovery("merchant-edit-recovery", checkoutSvc.RecoverMerchantEdits, 2*time.Second)
 	}
 	startRecovery("comment-recovery", liveSvc.RecoverPendingComments)
 	if integrationSvc != nil {
