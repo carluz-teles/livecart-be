@@ -157,3 +157,9 @@ const (
 	CodePaymentReviewRequired Code = "PAYMENT_REVIEW_REQUIRED"
 	CodePixStillPayable       Code = "PIX_STILL_PAYABLE"
 )
+
+// Durable merchant edit conflicts are actionable in both checkout and dashboard.
+const (
+	CodeCartERPSyncPending Code = "CART_ERP_SYNC_PENDING"
+	CodeCartItemNotFound   Code = "CART_ITEM_NOT_FOUND"
+)

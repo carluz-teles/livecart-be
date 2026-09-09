@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"livecart/apps/api/internal/cartedit"
 	"strings"
 	"time"
 
@@ -3053,6 +3054,11 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(payment_status,''),COALESCE(checkout_id,'') FROM carts WHERE id=$1 FOR UPDATE`, cID).Scan(&currentStatus, &currentID); err != nil {
 		return "", err
 	}
+	if paymentMethod == "manual" {
+		if err := cartedit.AssertReady(ctx, tx, cartID); err != nil {
+			return "", err
+		}
+	}
 	var recorded bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cart_payments WHERE cart_id=$1 AND checkout_id=$2)`, cID, paymentID).Scan(&recorded); err != nil {
 		return "", err
@@ -3919,13 +3925,37 @@ func (r *Repository) TransitionCartERPOrderState(ctx context.Context, cartID, fr
 	if err != nil {
 		return false, err
 	}
-	rows, err := r.queries.TransitionCartERPOrderState(ctx, sqlc.TransitionCartERPOrderStateParams{
+	q := r.queries
+	var tx pgx.Tx
+	if to == "reflecting" {
+		tx, err = r.pool.Begin(ctx)
+		if err != nil {
+			return false, err
+		}
+		defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+		var hostID string
+		if err := tx.QueryRow(ctx, `SELECT c.id::text FROM carts c WHERE c.id=(SELECT COALESCE(joined_to_cart_id,id) FROM carts WHERE id=$1) FOR UPDATE`, cartID).Scan(&hostID); err != nil {
+			return false, err
+		}
+		pending, err := cartedit.Read(ctx, tx, hostID)
+		if err != nil {
+			return false, err
+		}
+		if pending.Pending {
+			return false, nil
+		}
+		q = r.queries.WithTx(tx)
+	}
+	rows, err := q.TransitionCartERPOrderState(ctx, sqlc.TransitionCartERPOrderStateParams{
 		CartID:    id,
 		FromState: from,
 		ToState:   to,
 	})
 	if err != nil {
 		return false, err
+	}
+	if tx != nil {
+		return rows > 0, tx.Commit(ctx)
 	}
 	return rows > 0, nil
 }
@@ -4587,8 +4617,24 @@ func (r *Repository) JoinCartIntoHost(ctx context.Context, cartID, hostID string
 	if err != nil {
 		return false, err
 	}
-	n, err := r.queries.JoinCartIntoHost(ctx, sqlc.JoinCartIntoHostParams{CartID: cID, HostID: hID})
-	return n > 0, err
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE id IN ($1,$2) ORDER BY id FOR UPDATE`, cartID, hostID); err != nil {
+		return false, err
+	}
+	for _, id := range []string{cartID, hostID} {
+		if err := cartedit.AssertReady(ctx, tx, id); err != nil {
+			return false, err
+		}
+	}
+	n, err := r.queries.WithTx(tx).JoinCartIntoHost(ctx, sqlc.JoinCartIntoHostParams{CartID: cID, HostID: hID})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, tx.Commit(ctx)
 }
 
 // ListJoinCandidates lista os pedidos que podem ser juntados a este.

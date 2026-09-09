@@ -306,6 +306,10 @@ func TestERPPedidoTravadoPorLancamentoManualDestravaComUmEstorno(t *testing.T) {
 	if err := svc.EnsureERPOrderForCart(ctx, fx.cartID, fx.storeID); err != nil {
 		t.Fatalf("criando: %v", err)
 	}
+	// A grade precisa mudar para exigir um PUT; grade igual agora poupa a escrita.
+	if _, err := testPool.Exec(ctx, `UPDATE cart_items SET quantity=3 WHERE cart_id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
 	// O ERP recusa a PRIMEIRA edição por estoque lançado.
 	fake.bloqueiaProximosPuts = 1
 
@@ -334,6 +338,10 @@ func TestERPErroNaMutacaoNaoEstornaEDevolveOCarrinho(t *testing.T) {
 
 	if err := svc.EnsureERPOrderForCart(ctx, fx.cartID, fx.storeID); err != nil {
 		t.Fatalf("criando: %v", err)
+	}
+	// A grade precisa mudar para exigir um PUT; grade igual agora poupa a escrita.
+	if _, err := testPool.Exec(ctx, `UPDATE cart_items SET quantity=3 WHERE cart_id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
 	}
 	fake.failures["UpdateOrderItems"] = 1
 	if err := svc.MutateERPOrderItems(ctx, fx.cartID, fx.storeID); err == nil {
@@ -755,5 +763,42 @@ func TestEdicaoDoLojistaCriaOPedidoQuandoAindaNaoExiste(t *testing.T) {
 	}
 	if estado != "open" {
 		t.Errorf("estado = %q, quero 'open'", estado)
+	}
+}
+
+func TestMerchantEditCrashSweepCanClearLastItem(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 2, 0)
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+	ctx := t.Context()
+	if err := svc.EnsureERPOrderForCart(ctx, fx.cartID, fx.storeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(ctx, `INSERT INTO cart_erp_edits(cart_id,revision) VALUES($1,1)`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(ctx, `INSERT INTO cart_erp_edit_requests(id,cart_id,revision,request,product_id,retained_quantity)
+        VALUES(gen_random_uuid(),$1,1,'{}',$2,2)`, fx.cartID, fx.productID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(ctx, `DELETE FROM cart_items WHERE cart_id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE carts SET erp_order_state='mutating',erp_op_started_at=now()-interval '3 minutes',erp_op_resting_state='open' WHERE id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
+	svc.RunERPOrderOpsSweep(ctx)
+	if state, _, _, _ := cartERPState(t, fx.cartID); state != "open" {
+		t.Fatalf("recovery trapped empty grid in %s", state)
+	}
+	if fake.count("PutItens:") != 1 {
+		t.Fatalf("sweep did not clear ERP grid: %v", fake.calls)
+	}
+	if err := svc.MutateERPOrderItems(ctx, fx.cartID, fx.storeID); err != nil {
+		t.Fatal(err)
+	}
+	if fake.count("PutItens:") != 1 {
+		t.Fatal("queue retry rewrote the already recovered grid")
 	}
 }

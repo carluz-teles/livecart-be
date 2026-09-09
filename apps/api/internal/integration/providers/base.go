@@ -74,6 +74,7 @@ func NewBaseProvider(cfg BaseProviderConfig) *BaseProvider {
 func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body any, headers map[string]string) (*http.Response, []byte, error) {
 	// Throttle request based on API rate limit headers
 	if b.RateLimiter != nil {
+		quotaStarted := time.Now()
 		var waitErr error
 		if limiter, ok := b.RateLimiter.(interface {
 			WaitRequest(context.Context, string) error
@@ -81,6 +82,11 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 			waitErr = limiter.WaitRequest(ctx, method)
 		} else {
 			waitErr = b.RateLimiter.Wait(ctx)
+		}
+		if elapsed := time.Since(quotaStarted); elapsed >= time.Second || waitErr != nil {
+			logger.From(ctx, b.Logger).Info("provider request quota wait",
+				zap.String("store_id", b.StoreID), zap.String("integration_id", b.IntegrationID),
+				zap.String("method", method), zap.Duration("quota_wait", elapsed), zap.Error(waitErr))
 		}
 		if err := waitErr; err != nil {
 			return nil, nil, err

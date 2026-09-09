@@ -142,6 +142,28 @@ type Cart struct {
 	PixCancelLeaseUntil   pgtype.Timestamptz `json:"pix_cancel_lease_until"`
 }
 
+type CartErpEdit struct {
+	CartID         pgtype.UUID        `json:"cart_id"`
+	Revision       int64              `json:"revision"`
+	SyncedRevision int64              `json:"synced_revision"`
+	QueuedAt       pgtype.Timestamptz `json:"queued_at"`
+	NextAttemptAt  pgtype.Timestamptz `json:"next_attempt_at"`
+	Attempts       int32              `json:"attempts"`
+	LeaseOwner     pgtype.UUID        `json:"lease_owner"`
+	LeaseUntil     pgtype.Timestamptz `json:"lease_until"`
+	LastError      pgtype.Text        `json:"last_error"`
+}
+
+type CartErpEditRequest struct {
+	ID               pgtype.UUID        `json:"id"`
+	CartID           pgtype.UUID        `json:"cart_id"`
+	Revision         int64              `json:"revision"`
+	Request          json.RawMessage    `json:"request"`
+	ProductID        pgtype.UUID        `json:"product_id"`
+	RetainedQuantity int32              `json:"retained_quantity"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
 type CartInitialItem struct {
 	CartID    pgtype.UUID `json:"cart_id"`

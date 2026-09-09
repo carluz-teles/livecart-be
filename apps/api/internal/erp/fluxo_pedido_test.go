@@ -798,10 +798,9 @@ func TestPagamentoReconciliaAGradeAntesDeAprovar(t *testing.T) {
 	}
 }
 
-// E custa UM PUT por venda, não mais — o preço da garantia acima. Daqui não dá
-// para saber o que o pedido tem sem perguntar, e perguntar custaria o mesmo que
-// escrever.
-func TestPagamentoGastaExatamenteUmPutDeGrade(t *testing.T) {
+// A releitura já necessária para preservar linhas manuais evita um PUT quando
+// a grade está correta. A reconciliação divergente é coberta no teste anterior.
+func TestPagamentoNaoReescreveGradeJaConfirmada(t *testing.T) {
 	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 100})
 	ctx := context.Background()
 	repo.criarCarrinho("cart-1", item("p1", 2))
@@ -811,8 +810,8 @@ func TestPagamentoGastaExatamenteUmPutDeGrade(t *testing.T) {
 	if err := svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil); err != nil {
 		t.Fatalf("confirmando: %v", err)
 	}
-	if got := erp.puts - putsAntes; got != 1 {
-		t.Errorf("PUTs de grade no pagamento = %d, quero exatamente 1 — mais do que "+
+	if got := erp.puts - putsAntes; got != 0 {
+		t.Errorf("PUTs de grade no pagamento = %d, quero 0 — mais do que "+
 			"isso é orçamento de escrita gasto por venda contra um teto de 30 por "+
 			"minuto", got)
 	}
@@ -1135,5 +1134,71 @@ func TestSetWriteLimitsSobrepoeOTetoDoProvider(t *testing.T) {
 	if !svc.escrita.sobreposto {
 		t.Error("SetWriteLimits deixou de marcar a sobreposição — os testes de fluxo " +
 			"voltariam a esperar a janela real do limitador")
+	}
+}
+
+func TestMerchantQueueRemovesLastLegacyLineAndRetryDoesNotWriteAgain(t *testing.T) {
+	svc, repo, provider, _ := montar(map[string]int{"ext-p1": 10})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@test"); err != nil {
+		t.Fatal(err)
+	}
+	orderID := repo.carrinho("cart-1").externalOrderID
+	// Orders created before line markers still need their deleted product
+	// identified after its local cart_items row no longer exists.
+	provider.pedido(orderID).notas["ext-p1"] = ""
+	repo.definirItens("cart-1")
+	ctx = WithEditedProducts(ctx, []string{"ext-p1"})
+	for range 2 {
+		if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := provider.estoque("ext-p1").reservado; got != 0 {
+		t.Fatalf("last item still reserved: %d", got)
+	}
+	if provider.puts != 1 || provider.criacoes != 1 || provider.estornos != 0 {
+		t.Fatalf("puts=%d creates=%d reversals=%d", provider.puts, provider.criacoes, provider.estornos)
+	}
+}
+
+func TestMerchantQueueRemovesLegacyLineAndKeepsManualProduct(t *testing.T) {
+	svc, repo, provider, _ := montar(map[string]int{"ext-p1": 10, "ext-p2": 10})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@test"); err != nil {
+		t.Fatal(err)
+	}
+	orderID := repo.carrinho("cart-1").externalOrderID
+	if err := provider.UpdateOrderItems(ctx, orderID, []providers.ERPOrderItem{{ProductID: "ext-p1", Quantity: 2, UnitPrice: 2000}, {ProductID: "ext-p2", Quantity: 3, UnitPrice: 2000}}); err != nil {
+		t.Fatal(err)
+	}
+	repo.definirItens("cart-1")
+	if err := svc.MutateERPOrderItems(WithEditedProducts(ctx, []string{"ext-p1"}), "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	if provider.estoque("ext-p1").reservado != 0 || provider.estoque("ext-p2").reservado != 3 {
+		t.Fatal("deleted a merchant line or preserved removed LiveCart line")
+	}
+}
+
+func TestReadbackSkipsUnchangedGridWithStockLaunched(t *testing.T) {
+	svc, repo, provider, _ := montar(map[string]int{"ext-p1": 10})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@test"); err != nil {
+		t.Fatal(err)
+	}
+	orderID := repo.carrinho("cart-1").externalOrderID
+	if err := provider.LaunchOrderStock(ctx, orderID); err != nil {
+		t.Fatal(err)
+	}
+	before := provider.estoque("ext-p1")
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	if provider.puts != 0 || provider.estornos != 0 || provider.estoque("ext-p1") != before {
+		t.Fatalf("unchanged order touched stock: puts=%d reversals=%d", provider.puts, provider.estornos)
 	}
 }

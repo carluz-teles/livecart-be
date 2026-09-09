@@ -5,6 +5,7 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/lib/query"
 )
 
@@ -254,8 +255,9 @@ type OrderWaitlistJourneyOutput struct {
 }
 
 type OrderDetailResponse struct {
-	PaymentReviewRequired bool `json:"paymentReviewRequired"`
-	ERPPendingItems       int  `json:"erpPendingItems"`
+	ERPItemSync           *cartedit.Status `json:"erpItemSync,omitempty"`
+	PaymentReviewRequired bool             `json:"paymentReviewRequired"`
+	ERPPendingItems       int              `json:"erpPendingItems"`
 	OrderResponse
 	// Cart token; the public buyer link is `${frontend_origin}/cart/${token}`.
 	// Detail-only — the list endpoint does not expose this to keep the surface
@@ -615,7 +617,7 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 	}
 
 	resp := OrderDetailResponse{
-		PaymentReviewRequired: o.PaymentReviewRequired, ERPPendingItems: o.ERPPendingItems,
+		PaymentReviewRequired: o.PaymentReviewRequired, ERPPendingItems: o.ERPPendingItems, ERPItemSync: o.ERPItemSync,
 		OrderResponse:              NewOrderResponse(o.OrderOutput),
 		Token:                      o.Token,
 		Comments:                   comments,
@@ -1183,6 +1185,7 @@ type OrderShipmentOutput struct {
 }
 
 type OrderDetailOutput struct {
+	ERPItemSync           *cartedit.Status `json:"erpItemSync,omitempty"`
 	PaymentReviewRequired bool
 	ERPPendingItems       int
 	OrderOutput

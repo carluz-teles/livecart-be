@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 )
@@ -22,6 +23,9 @@ func (r *Repository) createPaymentAttempt(ctx context.Context, pool *pgxpool.Poo
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 	var review, payable bool
 	if err = tx.QueryRow(ctx, `SELECT payment_review_required,status IN ('active','checkout') AND COALESCE(payment_status,'pending') NOT IN ('paid','refunded') FROM carts WHERE id=$1 FOR UPDATE`, cartID).Scan(&review, &payable); err != nil {
+		return "", err
+	}
+	if err := cartedit.AssertReady(ctx, tx, cartID); err != nil {
 		return "", err
 	}
 	if review {

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/payment"
@@ -69,8 +70,15 @@ type PaymentService interface {
 	AplicarStatusDePagamento(context.Context, payment.ProcessPaymentInput, *providers.PaymentStatus) error
 }
 
+// merchantEditERP is the existing ERP lifecycle and waitlist boundary.
+type merchantEditERP interface {
+	MutateERPOrderItems(context.Context, string, string) error
+	ProcessWaitlistForProduct(context.Context, string, string, string)
+}
+
 // Service handles business logic for public checkout.
 type Service struct {
+	merchantEditERP    merchantEditERP
 	repo               *Repository
 	pool               *pgxpool.Pool
 	integrationService *integration.Service
@@ -92,6 +100,7 @@ func NewService(
 		repo:               repo,
 		pool:               pool,
 		integrationService: integrationService,
+		merchantEditERP:    integrationService,
 		paymentService:     paymentService,
 		logger:             logger.Named("checkout"),
 	}
@@ -227,8 +236,15 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		cart.EventType = eventType
 	}
 
+	// Expose durable edits to the buyer without leaking integration errors.
+	editStatus, err := cartedit.Read(ctx, s.pool, cart.ID)
+	if err != nil {
+		return nil, err
+	}
+	editStatus.LastError = ""
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
+		ERPItemSync: editStatus,
 		Cart: CartDetails{
 			PaymentReviewRequired:   cart.PaymentReviewRequired,
 			ID:                      cart.ID,
@@ -286,12 +302,15 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// Substitui um worker dedicado — a fila só precisa "andar" quando
 	// alguém está olhando para o checkout. Best-effort: erro aqui só vira
 	// log, a leitura segue mesmo com o sweep meio rodado.
-	if processed, err := s.integrationService.ExpireNotifiedWaitlistSweep(ctx); err != nil {
-		logger.From(ctx, s.logger).Warn("inline waitlist expiration sweep failed",
-			zap.String("cart_id", cart.ID),
-			zap.Int("processed_before_err", processed),
-			zap.Error(err),
-		)
+	if !editStatus.Pending {
+		if processed, err := s.integrationService.ExpireNotifiedWaitlistSweep(ctx); err != nil {
+			logger.From(ctx, s.logger).Warn("inline waitlist expiration sweep failed",
+				zap.String("cart_id", cart.ID),
+				zap.Int("processed_before_err", processed),
+				zap.Error(err),
+			)
+		}
+
 	}
 
 	// Hidrata a fila de espera vinculada ao cart (waiting + notified). É
@@ -362,7 +381,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			// Cliente recorrente com dados conhecidos: pré-aquece o contato no
 			// Tiny em background para a conversão na iniciação do pagamento
 			// encontrar o cache quente (design C). Best-effort.
-			if customer != nil {
+			if customer != nil && !editStatus.Pending {
 				go s.integrationService.PrewarmERPContact(
 					logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug),
 					cart.StoreID, cart.PlatformUserID, cart.PlatformHandle,
@@ -1634,33 +1653,45 @@ func (s *Service) reevaluateCouponAfterCartMutation(ctx context.Context, cartID 
 
 // AddCartItemAsMerchant adiciona produto do catálogo ao carrinho pelo painel.
 func (s *Service) AddCartItemAsMerchant(ctx context.Context, token, productID string, quantity int) error {
-	_, err := s.AddCartItem(ctx, MutateCartItemInput{
+	input := MutateCartItemInput{
 		Token:      token,
 		ProductID:  productID,
 		Quantity:   quantity,
 		ByMerchant: true,
-	})
+	}
+	if queued, err := s.queueMerchantEdit(ctx, input, "add"); queued || err != nil {
+		return err
+	}
+	_, err := s.AddCartItem(ctx, input)
 	return err
 }
 
 // SetCartItemQuantityAsMerchant fixa a quantidade de um item pelo painel.
 func (s *Service) SetCartItemQuantityAsMerchant(ctx context.Context, token, itemID string, quantity int) error {
-	_, err := s.UpdateCartItemQuantity(ctx, MutateCartItemInput{
+	input := MutateCartItemInput{
 		Token:      token,
 		ItemID:     itemID,
 		Quantity:   quantity,
 		ByMerchant: true,
-	})
+	}
+	if queued, err := s.queueMerchantEdit(ctx, input, "set"); queued || err != nil {
+		return err
+	}
+	_, err := s.UpdateCartItemQuantity(ctx, input)
 	return err
 }
 
 // RemoveCartItemAsMerchant remove um item pelo painel.
 func (s *Service) RemoveCartItemAsMerchant(ctx context.Context, token, itemID string) error {
-	_, err := s.RemoveCartItem(ctx, MutateCartItemInput{
+	input := MutateCartItemInput{
 		Token:      token,
 		ItemID:     itemID,
 		ByMerchant: true,
-	})
+	}
+	if queued, err := s.queueMerchantEdit(ctx, input, "remove"); queued || err != nil {
+		return err
+	}
+	_, err := s.RemoveCartItem(ctx, input)
 	return err
 }
 
@@ -1704,6 +1735,11 @@ func (s *Service) loadEditableCart(ctx context.Context, token string, storeToggl
 	}
 	if err := assertCartMutable(cart, storeToggleApplies, time.Now()); err != nil {
 		return nil, err
+	}
+	if s.pool != nil {
+		if err := cartedit.AssertReady(ctx, s.pool, cart.ID); err != nil {
+			return nil, err
+		}
 	}
 	return cart, nil
 }

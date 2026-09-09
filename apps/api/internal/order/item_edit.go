@@ -21,6 +21,7 @@ import (
 	"github.com/go-ozzo/ozzo-validation/v4/is"
 	"github.com/gofiber/fiber/v2"
 
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/lib/httpx"
 )
 
@@ -201,7 +202,9 @@ func (s *Service) RemoveItem(ctx context.Context, input RemoveOrderItemInput) er
 
 // AddItem godoc
 // @Summary      Add a catalog product to an unpaid order
+// @Description Tiny merchant edits with Idempotency-Key are persisted and synchronized asynchronously. Inspect erpItemSync in the response.
 // @Description  Merchant-side edit of an order still awaiting payment. Reserves stock, records the mutation as source=merchant, cancels any pending PIX and clears the shipping selection.
+// @Param        Idempotency-Key header string false "Unique UUID for this edit, reused on HTTP retry"
 // @Tags         orders
 // @Accept       json
 // @Produce      json
@@ -222,7 +225,7 @@ func (h *Handler) AddItem(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.service.AddItem(c.UserContext(), input); err != nil {
+	if err := h.service.AddItem(cartedit.WithRequestID(c.UserContext(), c.Get("Idempotency-Key")), input); err != nil {
 		return err
 	}
 	return h.respondWithDetail(c, input.OrderID, input.StoreID)
@@ -230,6 +233,7 @@ func (h *Handler) AddItem(c *fiber.Ctx) error {
 
 // SetItemQuantity godoc
 // @Summary      Set the quantity of an item on an unpaid order
+// @Param        Idempotency-Key header string false "Unique UUID for this edit, reused on HTTP retry"
 // @Tags         orders
 // @Accept       json
 // @Produce      json
@@ -251,7 +255,7 @@ func (h *Handler) SetItemQuantity(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.service.SetItemQuantity(c.UserContext(), input); err != nil {
+	if err := h.service.SetItemQuantity(cartedit.WithRequestID(c.UserContext(), c.Get("Idempotency-Key")), input); err != nil {
 		return err
 	}
 	return h.respondWithDetail(c, input.OrderID, input.StoreID)
@@ -259,6 +263,7 @@ func (h *Handler) SetItemQuantity(c *fiber.Ctx) error {
 
 // RemoveItem godoc
 // @Summary      Remove an item from an unpaid order
+// @Param        Idempotency-Key header string false "Unique UUID for this edit, reused on HTTP retry"
 // @Tags         orders
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -274,7 +279,7 @@ func (h *Handler) RemoveItem(c *fiber.Ctx) error {
 		StoreID: httpx.GetStoreID(c),
 		ItemID:  c.Params("itemId"),
 	}
-	if err := h.service.RemoveItem(c.UserContext(), input); err != nil {
+	if err := h.service.RemoveItem(cartedit.WithRequestID(c.UserContext(), c.Get("Idempotency-Key")), input); err != nil {
 		return err
 	}
 	return h.respondWithDetail(c, input.OrderID, input.StoreID)
