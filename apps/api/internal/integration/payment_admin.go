@@ -39,6 +39,17 @@ func (a *paymentAdmin) ConnectPagarme(ctx context.Context, in payment.ConnectPag
 	return toIntegrationResponse(out), nil
 }
 
+func (a *paymentAdmin) InstallPagarmeHub(ctx context.Context, in payment.InstallPagarmeHubInput) (any, error) {
+	out, err := a.svc.InstallPagarmeHub(ctx, InstallPagarmeHubInput{
+		StoreID:           in.StoreID,
+		AuthorizationCode: in.AuthorizationCode,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return toIntegrationResponse(out), nil
+}
+
 func (a *paymentAdmin) GetPagarmeWebhookStatus(ctx context.Context, integrationID, storeID string) (*payment.PagarmeWebhookStatusResponse, error) {
 	out, err := a.svc.GetPagarmeWebhookStatus(ctx, integrationID, storeID)
 	if err != nil {

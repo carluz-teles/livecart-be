@@ -71,6 +71,27 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 	webhooks.Post("/melhor_envio/:storeId", storeCtx, h.HandleMelhorEnvio)
 	webhooks.Post("/twilio/:storeId", storeCtx, h.HandleTwilio)
 
+	// Pagar.me Hub (Partner App): one app-level events callback for every
+	// install. No :storeId — the store is resolved from account.id in the
+	// payload. The extra path segment means the /pagarme/:storeId param route
+	// can't shadow it. Gets the same non-POST reachability probe below.
+	webhooks.Post("/pagarme/hub/events", h.HandlePagarmeHubEvent)
+	webhooks.Get("/pagarme/hub/events", h.HandleWebhookProbe)
+	webhooks.Head("/pagarme/hub/events", h.HandleWebhookProbe)
+	webhooks.Options("/pagarme/hub/events", h.HandleWebhookProbe)
+	webhooks.Put("/pagarme/hub/events", h.HandleWebhookProbe)
+	webhooks.Patch("/pagarme/hub/events", h.HandleWebhookProbe)
+	webhooks.Delete("/pagarme/hub/events", h.HandleWebhookProbe)
+
+	// TEMPORARY capture endpoints — live-exercise scaffolding. The Hub's
+	// install/uninstall and additional-data validation callbacks: we don't have
+	// their payloads yet, so these log the raw body (and headers) and ack 200,
+	// letting us read the shape from the BE logs and then replace them with real
+	// handlers (e.g. command:"Uninstall" → disconnect the store). All() also
+	// answers the panel's non-POST reachability probe.
+	webhooks.All("/pagarme/hub/install", h.capturePagarmeHubCallback("install/uninstall"))
+	webhooks.All("/pagarme/hub/validate", h.capturePagarmeHubCallback("validate"))
+
 	// O Bling é a ÚNICA rota sem :storeId, e não é esquecimento: o Bling não
 	// tem API para registrar webhook — a URL é cadastrada na UI do APLICATIVO,
 	// que é um só para todas as lojas. Quem identifica a origem é o `companyId`
@@ -576,6 +597,136 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// HandlePagarmeHubEvent handles the app-level events callback for Pagar.me Hub
+// (Partner App) installs. Unlike HandlePagarme, the Hub delivers every
+// merchant's events to a single URL, so the store is resolved from account.id
+// in the payload instead of the request path.
+//
+// Auth: the per-store path validates HTTP Basic Auth against merchant-entered
+// credentials, which a Hub install never has (the merchant authorized via
+// OAuth, not by pasting keys). We ack and process without that check, which is
+// safe against spoofing because the dispatched reconciliation re-fetches the
+// real status from the gateway by payment id — a forged "paid" event only
+// triggers a verified re-check, never a blind state change.
+// TODO(pagarme-hub): add app-secret / signature verification once confirmed.
+func (h *WebhookHandler) HandlePagarmeHubEvent(c *fiber.Ctx) error {
+	body := c.Body()
+
+	// Format: { "id": "hook_...", "account": { "id": "acc_..." },
+	//           "type": "charge.paid", "data": { "id": "ch_...", "order": {...} } }
+	var webhook struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Account struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"account"`
+		Data struct {
+			ID     string `json:"id"`
+			Code   string `json:"code"`
+			Status string `json:"status"`
+			Order  struct {
+				ID   string `json:"id"`
+				Code string `json:"code"`
+			} `json:"order"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &webhook); err != nil {
+		logger.From(c.Context(), h.logger).Error("failed to parse Pagar.me Hub webhook payload", zap.Error(err))
+		return httpx.BadRequest(c, "invalid webhook payload")
+	}
+
+	// Resolve the store from account.id. Unknown account → another partner's
+	// merchant; ack 200 so the Hub stops retrying, but do nothing.
+	storeID, err := h.service.ResolvePagarmeStoreByAccount(c.Context(), webhook.Account.ID)
+	if err != nil {
+		logger.From(c.Context(), h.logger).Error("failed to resolve Pagar.me Hub account",
+			zap.String("account_id", webhook.Account.ID), zap.Error(err))
+		return httpx.OK(c, fiber.Map{"status": "received"})
+	}
+	if storeID == "" {
+		logger.From(c.Context(), h.logger).Info("pagarme hub event for unknown account, ignoring",
+			zap.String("account_id", webhook.Account.ID), zap.String("type", webhook.Type))
+		return httpx.OK(c, fiber.Map{"status": "ignored_unknown_account"})
+	}
+
+	ctxStore := logger.WithStore(c.Context(), storeID, "")
+	logger.From(ctxStore, h.logger).Info("pagarme hub event received",
+		zap.String("type", webhook.Type),
+		zap.String("account_id", webhook.Account.ID),
+		zap.String("data_id", webhook.Data.ID),
+	)
+
+	// Audit trail.
+	eventID := webhook.ID
+	if eventID == "" {
+		eventID = webhook.Data.ID
+	}
+	if eventID == "" {
+		eventID = c.Get("X-Request-Id")
+	}
+	if err := h.service.StoreWebhookEvent(c.Context(), StoreWebhookInput{
+		StoreID:   storeID,
+		Provider:  "pagarme",
+		EventType: webhook.Type,
+		EventID:   eventID,
+		Payload:   body,
+		// Hub events aren't Basic-Auth'd per store; authenticity is TODO above.
+		SignatureValid: false,
+	}); err != nil {
+		logger.From(ctxStore, h.logger).Error("failed to store hub webhook event", zap.Error(err))
+	}
+
+	// Stamp the ping so the admin UI reflects a live Hub delivery. Detached
+	// ctx: the goroutine outlives the request (Fiber recycles c.Context()).
+	go h.service.RecordWebhookPing(logger.WithStore(context.Background(), storeID, ""), storeID, "pagarme")
+
+	// Dispatch reconciliation for terminal payment events. Charge events carry
+	// the charge id in data.id; order events nest it under data.order.id.
+	// GetPaymentStatus routes on the id prefix (or_/ch_), so a single dispatcher
+	// reconciles both — we only need to fire on events that reach a terminal state.
+	switch webhook.Type {
+	case "order.paid", "order.payment_failed", "order.canceled",
+		"charge.paid", "charge.payment_failed", "charge.canceled",
+		"charge.refunded", "charge.chargedback":
+		paymentID := webhook.Data.ID
+		if paymentID == "" {
+			paymentID = webhook.Data.Order.ID
+		}
+		if paymentID != "" {
+			ctx := logger.WithStore(c.UserContext(), storeID, "")
+			if err := h.payment.DispatchPaymentProcess(ctx, paymentdomain.ProcessPaymentInput{
+				StoreID:   storeID,
+				Provider:  "pagarme",
+				PaymentID: paymentID,
+			}); err != nil {
+				logger.From(ctx, h.logger).Error("failed to dispatch Pagar.me Hub payment.process",
+					zap.String("payment_id", paymentID), zap.String("event_type", webhook.Type), zap.Error(err))
+			}
+		}
+	}
+
+	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// capturePagarmeHubCallback is TEMPORARY live-exercise scaffolding. It returns
+// a handler that logs the raw request (method, headers, body) for a Hub
+// callback whose payload we haven't captured yet, then acks 200. Once we've
+// seen the real shape by exercising install/uninstall in sandbox, these get
+// replaced by proper handlers. Kept deliberately inert — no store lookup, no
+// side effect — so it can't misfire while we're only observing.
+func (h *WebhookHandler) capturePagarmeHubCallback(label string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		logger.From(c.Context(), h.logger).Info("pagarme hub "+label+" callback captured (temporary)",
+			zap.String("method", c.Method()),
+			zap.String("content_type", c.Get("Content-Type")),
+			zap.String("authorization", c.Get("Authorization")),
+			zap.ByteString("body", c.Body()),
+		)
+		return httpx.OK(c, fiber.Map{"status": "captured"})
+	}
 }
 
 // HandleTiny handles Tiny ERP webhook notifications.

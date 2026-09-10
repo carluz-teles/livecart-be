@@ -19,13 +19,20 @@ import (
 )
 
 const (
-	pagarmeAPIBaseURL = "https://api.pagar.me/core/v5"
+	// pagarmeV5BaseURL is the direct Pagar.me API, used by a manual sk_ connect.
+	pagarmeV5BaseURL = "https://api.pagar.me/core/v5"
+	// pagarmeHubBaseURL is the Hub API used by Partner App installs, which
+	// transact on the merchant's behalf with the install accessToken.
+	pagarmeHubBaseURL = "https://hubapi.pagar.me/core/v1"
 )
 
 // Pagarme implements the PaymentProvider interface for Pagar.me.
 type Pagarme struct {
 	*providers.BaseProvider
 	credentials *Credentials
+	// apiBaseURL is the host for this integration: the Hub API for a Partner
+	// App install (accessToken), the direct v5 API for a manual sk_ connect.
+	apiBaseURL string
 }
 
 // PagarmeConfig contains configuration for the Pagar.me provider.
@@ -43,8 +50,18 @@ func NewPagarme(cfg PagarmeConfig) (*Pagarme, error) {
 	if cfg.Credentials == nil {
 		return nil, fmt.Errorf("credentials are required")
 	}
-	if cfg.Credentials.APIKey == "" {
-		return nil, fmt.Errorf("api_key (secret_key) is required")
+	// A manual connect carries a static secret key (APIKey); a Hub (Partner
+	// App) install carries the merchant's Hub accessToken instead. Either one
+	// authenticates API calls — see authHeaders.
+	if cfg.Credentials.APIKey == "" && cfg.Credentials.AccessToken == "" {
+		return nil, fmt.Errorf("api_key (secret_key) or Hub access token is required")
+	}
+
+	// A Hub install transacts through the Hub API (hubapi.pagar.me/core/v1)
+	// with the accessToken; a manual connect uses the direct v5 API.
+	apiBaseURL := pagarmeV5BaseURL
+	if cfg.Credentials.AccessToken != "" {
+		apiBaseURL = pagarmeHubBaseURL
 	}
 
 	return &Pagarme{
@@ -57,6 +74,7 @@ func NewPagarme(cfg PagarmeConfig) (*Pagarme, error) {
 			RateLimiter:   cfg.RateLimiter,
 		}),
 		credentials: cfg.Credentials,
+		apiBaseURL:  apiBaseURL,
 	}, nil
 }
 
@@ -78,7 +96,7 @@ func (p *Pagarme) Name() providers.ProviderName {
 // split-payment setup), so brand-new Pagar.me accounts couldn't connect
 // even with a perfectly valid secret key.
 func (p *Pagarme) ValidateCredentials(ctx context.Context) error {
-	url := pagarmeAPIBaseURL + "/recipients?size=1"
+	url := p.apiBaseURL + "/recipients?size=1"
 
 	resp, _, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	if err != nil {
@@ -101,7 +119,7 @@ func (p *Pagarme) ValidateCredentials(ctx context.Context) error {
 // environment (sandbox/production) from the key prefix.
 func (p *Pagarme) TestConnection(ctx context.Context) (*providers.TestConnectionResult, error) {
 	start := time.Now()
-	url := pagarmeAPIBaseURL + "/recipients?size=1"
+	url := p.apiBaseURL + "/recipients?size=1"
 
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	latency := time.Since(start)
@@ -207,7 +225,7 @@ func (p *Pagarme) ListRecentHookDeliveries(ctx context.Context, size int) ([]Hoo
 	if size <= 0 || size > 50 {
 		size = 20
 	}
-	url := fmt.Sprintf("%s/hooks?size=%d", pagarmeAPIBaseURL, size)
+	url := fmt.Sprintf("%s/hooks?size=%d", p.apiBaseURL, size)
 
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	if err != nil {
@@ -274,7 +292,7 @@ type WebhookTestOrder struct {
 // demand, since v5 exposes no test/simulate webhook endpoint. The caller
 // cancels the charge afterwards; the PIX also expires on its own.
 func (p *Pagarme) CreateWebhookTestOrder(ctx context.Context, code string) (*WebhookTestOrder, error) {
-	url := pagarmeAPIBaseURL + "/orders"
+	url := p.apiBaseURL + "/orders"
 	payload := map[string]any{
 		"code": code,
 		"items": []map[string]any{{
@@ -337,7 +355,7 @@ func (p *Pagarme) CancelPixPayment(ctx context.Context, chargeID string) error {
 	if chargeID == "" {
 		return nil
 	}
-	resp, body, err := p.DoRequest(ctx, http.MethodGet, fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID), nil, p.authHeaders())
+	resp, body, err := p.DoRequest(ctx, http.MethodGet, fmt.Sprintf("%s/charges/%s", p.apiBaseURL, chargeID), nil, p.authHeaders())
 	if err != nil {
 		return err
 	}
@@ -366,7 +384,7 @@ func (p *Pagarme) CancelPixPayment(ctx context.Context, chargeID string) error {
 // only takes credit_card + pix today (boleto's 1-3 day clearance kills the
 // "live now" UX), so the accepted_payment_methods list is intentionally narrow.
 func (p *Pagarme) CreateCheckout(ctx context.Context, order CheckoutOrder) (*CheckoutResult, error) {
-	url := pagarmeAPIBaseURL + "/orders"
+	url := p.apiBaseURL + "/orders"
 
 	items := make([]map[string]any, len(order.Items))
 	for i, item := range order.Items {
@@ -478,7 +496,7 @@ func (p *Pagarme) GetPaymentStatus(ctx context.Context, id string) (*PaymentStat
 }
 
 func (p *Pagarme) getChargeStatus(ctx context.Context, chargeID string) (*PaymentStatus, error) {
-	url := fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID)
+	url := fmt.Sprintf("%s/charges/%s", p.apiBaseURL, chargeID)
 
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	if err != nil {
@@ -549,7 +567,7 @@ func (p *Pagarme) getChargeStatus(ctx context.Context, chargeID string) (*Paymen
 }
 
 func (p *Pagarme) getOrder(ctx context.Context, orderID string) (*pagarmeOrderResponse, error) {
-	url := fmt.Sprintf("%s/orders/%s", pagarmeAPIBaseURL, orderID)
+	url := fmt.Sprintf("%s/orders/%s", p.apiBaseURL, orderID)
 
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	if err != nil {
@@ -645,7 +663,7 @@ func (p *Pagarme) RefundPayment(ctx context.Context, chargeID string, amount *in
 		}
 		chargeID = resolved
 	}
-	url := fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID)
+	url := fmt.Sprintf("%s/charges/%s", p.apiBaseURL, chargeID)
 
 	var payload map[string]any
 	if amount != nil {
@@ -686,7 +704,7 @@ func (p *Pagarme) RefundPayment(ctx context.Context, chargeID string, amount *in
 // charge — the paid one when present (retries can leave failed charges on the
 // same order), else the first.
 func (p *Pagarme) resolveOrderCharge(ctx context.Context, orderID string) (string, error) {
-	url := fmt.Sprintf("%s/orders/%s", pagarmeAPIBaseURL, orderID)
+	url := fmt.Sprintf("%s/orders/%s", p.apiBaseURL, orderID)
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	if err != nil {
 		return "", fmt.Errorf("fetching order for refund: %w", err)
@@ -709,9 +727,18 @@ func (p *Pagarme) resolveOrderCharge(ctx context.Context, orderID string) (strin
 	return pgOrder.Charges[0].ID, nil
 }
 
-// authHeaders returns the authorization headers for API requests.
-// Pagar.me uses Basic Auth with API key as username and empty password.
+// authHeaders returns the authorization headers for API requests. Both flows
+// use HTTP Basic Auth, but encode different things:
+//   - Manual connect (v5): base64("<secretKey>:") — key as username, no password.
+//   - Hub install: base64("<accessToken>") — the Hub encodes the install token
+//     itself, per the partner docs (Authorization: Basic base64(accessToken)
+//     against hubapi.pagar.me/core/v1).
 func (p *Pagarme) authHeaders() map[string]string {
+	if p.credentials.AccessToken != "" {
+		return map[string]string{
+			"Authorization": "Basic " + base64Encode(p.credentials.AccessToken),
+		}
+	}
 	return map[string]string{
 		"Authorization": "Basic " + basicAuth(p.credentials.APIKey, ""),
 	}
@@ -936,7 +963,7 @@ func pagarmeItemMap(code, desc string, amount int64, quantity int) map[string]an
 // call (not derived from cart+amount) so a retry after a rejected attempt
 // gets evaluated as a new charge instead of replaying the cached failure.
 func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
-	url := pagarmeAPIBaseURL + "/orders"
+	url := p.apiBaseURL + "/orders"
 
 	items, err := pagarmeOrderItems(input.Items, input.TotalAmount)
 	if err != nil {
@@ -1192,7 +1219,7 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 // card_id card flow (see ProcessCardPayment) requires a persisted customer to
 // attach the card to; the inline customer used by the PIX flow is not enough.
 func (p *Pagarme) createCustomer(ctx context.Context, customer map[string]any) (string, error) {
-	url := pagarmeAPIBaseURL + "/customers"
+	url := p.apiBaseURL + "/customers"
 	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, customer, p.authHeaders())
 	if err != nil {
 		return "", fmt.Errorf("creating customer: %w", err)
@@ -1219,7 +1246,7 @@ func (p *Pagarme) createCustomer(ctx context.Context, customer map[string]any) (
 // required" when the stored card has no billing_address, and empirically the
 // token's billing did not carry over.
 func (p *Pagarme) createCardFromToken(ctx context.Context, customerID, token string, addr *CheckoutAddress) (string, error) {
-	url := fmt.Sprintf("%s/customers/%s/cards", pagarmeAPIBaseURL, customerID)
+	url := fmt.Sprintf("%s/customers/%s/cards", p.apiBaseURL, customerID)
 	cardBody := map[string]any{"token": token}
 	if addr != nil {
 		billing := map[string]any{
@@ -1263,7 +1290,7 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		return nil, fmt.Errorf("telefone do comprador é obrigatório para pagamento PIX")
 	}
 
-	url := pagarmeAPIBaseURL + "/orders"
+	url := p.apiBaseURL + "/orders"
 
 	expiresIn := 30 * time.Minute
 	if input.ExpiresIn != nil {

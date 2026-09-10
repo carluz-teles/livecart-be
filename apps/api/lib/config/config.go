@@ -47,6 +47,21 @@ const (
 	// liability shifts to the merchant for the listed stores.
 	PagarmeAntifraudDisabledStores Key = "PAGARME_ANTIFRAUD_DISABLED_STORES"
 
+	// Pagar.me Hub (Partner App — OAuth-style install flow via the Stone Hub).
+	// PagarmeAppPublicKey is the app's publicAppKey (a UUID, e.g.
+	// e172302a-...): it identifies our partner app and is sent as the
+	// "PublicAppKey" header when exchanging a merchant's authorization_code for
+	// an accessToken. It is a public value — also exposed to the frontend to
+	// build the install button (NEXT_PUBLIC_PAGARME_APP_PUBLIC_KEY).
+	PagarmeAppPublicKey Key = "PAGARME_APP_PUBLIC_KEY"
+	// PagarmeAppSecret is the app's client_secret from the Hub config. Not used
+	// in the code exchange (only PublicAppKey + code are), kept for verifying
+	// the Hub events callback once that is wired.
+	PagarmeAppSecret Key = "PAGARME_APP_SECRET"
+	// PagarmeHubAPIURL overrides the Hub API base for the access-token exchange.
+	// Defaults to https://hubapi.pagar.me.
+	PagarmeHubAPIURL Key = "PAGARME_HUB_API_URL"
+
 	// Instagram/Meta Integration
 	InstagramVerifyToken Key = "INSTAGRAM_VERIFY_TOKEN" // Token for Meta webhook verification
 	InstagramAppID       Key = "INSTAGRAM_APP_ID"       // Instagram OAuth App ID (from Meta for Developers)

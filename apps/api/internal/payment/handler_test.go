@@ -22,6 +22,10 @@ type fakePagarmeAdmin struct {
 	connectResp      any
 	connectErr       error
 
+	lastInstallInput InstallPagarmeHubInput
+	installResp      any
+	installErr       error
+
 	statusResp *PagarmeWebhookStatusResponse
 	statusErr  error
 }
@@ -29,6 +33,11 @@ type fakePagarmeAdmin struct {
 func (f *fakePagarmeAdmin) ConnectPagarme(_ context.Context, in ConnectPagarmeInput) (any, error) {
 	f.lastConnectInput = in
 	return f.connectResp, f.connectErr
+}
+
+func (f *fakePagarmeAdmin) InstallPagarmeHub(_ context.Context, in InstallPagarmeHubInput) (any, error) {
+	f.lastInstallInput = in
+	return f.installResp, f.installErr
 }
 
 func (f *fakePagarmeAdmin) GetPagarmeWebhookStatus(_ context.Context, _, _ string) (*PagarmeWebhookStatusResponse, error) {
@@ -151,6 +160,96 @@ func TestHandler_ConnectPagarme_ToInput(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("ConnectPagarmeInput = %+v, want %+v", got, want)
+	}
+}
+
+func TestHandler_InstallPagarmeHub(t *testing.T) {
+	const validBody = `{"authorizationCode":"879d023588baba7a82da58909a1b662e"}`
+
+	tests := []struct {
+		name       string
+		body       string
+		installErr error
+		wantStatus int
+	}{
+		{
+			name:       "malformed json is rejected as bad request",
+			body:       `{`,
+			wantStatus: fiber.StatusBadRequest,
+		},
+		{
+			name:       "missing authorization code fails validation",
+			body:       `{}`,
+			wantStatus: fiber.StatusUnprocessableEntity,
+		},
+		{
+			name:       "valid body reaches the admin and returns ok",
+			body:       validBody,
+			wantStatus: fiber.StatusOK,
+		},
+		{
+			name:       "service error is mapped to its status",
+			body:       validBody,
+			installErr: httpx.ErrUnprocessable("hub exchange failed"),
+			wantStatus: fiber.StatusUnprocessableEntity,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			admin := &fakePagarmeAdmin{
+				installResp: map[string]string{"id": "int_123"},
+				installErr:  tt.installErr,
+			}
+			app := newTestApp(admin)
+
+			req := httptest.NewRequest(http.MethodPost,
+				"/stores/store_1/integrations/payment/pagarme/hub/install",
+				strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestHandler_InstallPagarmeHub_ToInput asserts the request maps to the service
+// input verbatim (including the scoped store id from Locals).
+func TestHandler_InstallPagarmeHub_ToInput(t *testing.T) {
+	admin := &fakePagarmeAdmin{installResp: map[string]string{"id": "int_123"}}
+	app := newTestApp(admin)
+
+	body := `{"authorizationCode":"code_abc123"}`
+	req := httptest.NewRequest(http.MethodPost,
+		"/stores/store_42/integrations/payment/pagarme/hub/install",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	got := admin.lastInstallInput
+	want := InstallPagarmeHubInput{
+		StoreID:           "store_42",
+		AuthorizationCode: "code_abc123",
+	}
+	if got != want {
+		t.Fatalf("InstallPagarmeHubInput = %+v, want %+v", got, want)
 	}
 }
 
