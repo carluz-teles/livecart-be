@@ -5,6 +5,7 @@ import "context"
 // ERPOrderCheckout is the commercial snapshot of a paid checkout. Freight is
 // what the buyer paid; Shipping.CostCents is the merchant's carrier expense.
 type ERPOrderCheckout struct {
+	Customer      ERPContactInput
 	FreightCents  int64
 	DiscountCents int64
 	Shipping      *ERPOrderShipping
