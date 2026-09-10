@@ -140,9 +140,12 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 		return nil, nil
 	}
 
-	total, _, err := contador.GetOrderTotal(ctx, st.ExternalOrderID)
+	total, invoiced, err := contador.GetOrderTotal(ctx, st.ExternalOrderID)
 	if err != nil {
 		return nil, fmt.Errorf("reading order total: %w", err)
+	}
+	if invoiced {
+		return &SplitDePagamento{TotalCents: total, Motivo: "pedido com nota fiscal; parcelas preservadas"}, nil
 	}
 
 	var pago, bruto int64
@@ -199,6 +202,17 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 	}
 
 	parcelas := extratoDeParcelas(pagamentos, desconto, split.SaldoCents)
+	if reader, ok := erpProvider.(interface {
+		OrderInstallmentsMatch(context.Context, string, []providers.ERPInstallment) (bool, error)
+	}); ok {
+		matches, err := reader.OrderInstallmentsMatch(ctx, st.ExternalOrderID, parcelas)
+		if err != nil {
+			return split, fmt.Errorf("checking existing installments: %w", err)
+		}
+		if matches {
+			return split, nil
+		}
+	}
 	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
 		return contador.SetOrderInstallments(ctx, st.ExternalOrderID, parcelas)
 	}); err != nil {

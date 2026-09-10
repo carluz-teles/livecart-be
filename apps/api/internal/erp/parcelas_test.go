@@ -26,11 +26,12 @@ type erpComParcelas struct {
 	falharEscrita error
 	totalForcado  int64
 	usarForcado   bool
+	invoiced      bool
 }
 
 func (e *erpComParcelas) GetOrderTotal(_ context.Context, orderID string) (int64, bool, error) {
 	if e.usarForcado {
-		return e.totalForcado, false, nil
+		return e.totalForcado, e.invoiced, nil
 	}
 	p := e.pedido(orderID)
 	if p == nil {
@@ -44,6 +45,21 @@ func (e *erpComParcelas) GetOrderTotal(_ context.Context, orderID string) (int64
 	}
 	e.mu.Unlock()
 	return total, false, nil
+}
+
+func TestInvoicedOrderNeverRewritesDiscountedInstallments(t *testing.T) {
+	svc, repo, provider := montarParcelas(map[string]int{"ext-p1": 20})
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	if err := svc.EnsureERPOrderForCart(t.Context(), "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	pagar(t, svc, repo, "cart-1", 4000)
+	provider.usarForcado, provider.invoiced = true, true
+	provider.totalForcado = 5000
+	split, err := svc.RecomporParcelasDoPedidoPago(t.Context(), "cart-1", "loja-1")
+	if err != nil || split == nil || split.Reescrito || provider.escritas != 0 {
+		t.Fatalf("invoiced order changed: split=%+v writes=%d error=%v", split, provider.escritas, err)
+	}
 }
 
 func (e *erpComParcelas) SetOrderInstallments(_ context.Context, orderID string, parcelas []providers.ERPInstallment) error {

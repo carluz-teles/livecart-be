@@ -19,6 +19,7 @@ func (s *Service) LoadERPOrderCheckout(ctx context.Context, cartID, storeID stri
 	if cart.StoreID != storeID {
 		return out, fmt.Errorf("checkout cart does not belong to store")
 	}
+	out.Customer = providers.ERPContactInput{Name: cart.CustomerName, CpfCnpj: cart.CustomerDocument, Email: cart.CustomerEmail, Phone: cart.CustomerPhone}
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return out, err

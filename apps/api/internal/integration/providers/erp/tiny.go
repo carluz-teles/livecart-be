@@ -2204,6 +2204,17 @@ func (t *Tiny) SetOrderInstallments(ctx context.Context, orderID string, parcela
 	if len(parcelas) == 0 {
 		return nil
 	}
+	current, err := t.readCheckoutOrder(ctx, orderID)
+	if err != nil {
+		return err
+	}
+	if current.InvoiceID != 0 {
+		return fmt.Errorf("tiny: pedido com nota fiscal; parcelas preservadas")
+	}
+	if tinyInstallmentsMatch(current.Payment.Installments, parcelas) {
+		return nil
+	}
+
 	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
 
 	emissao := time.Now().In(tinyLocation)
