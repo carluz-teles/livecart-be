@@ -2126,6 +2126,186 @@ func (s *Service) ConnectPagarme(ctx context.Context, input ConnectPagarmeInput)
 	return s.toCreateOutput(row), nil
 }
 
+// =============================================================================
+// PAGAR.ME HUB (Partner App — OAuth-style install flow)
+// =============================================================================
+
+// InstallPagarmeHubInput carries the short-lived authorization_code the
+// frontend received on the Hub redirect (?authorization_code=..., expires in
+// 180s). The store is taken from the authenticated session — the redirect
+// lands on the merchant's own settings page and the code exchange is driven by
+// an authenticated FE→BE call, so unlike Mercado Pago there is no OAuth state
+// table and no unauthenticated backend callback to correlate.
+type InstallPagarmeHubInput struct {
+	StoreID           string
+	AuthorizationCode string
+}
+
+// pagarmeHubInstallResponse mirrors the 201 body of
+// POST {hub}/auth/apps/access-tokens. The Hub hands us an accessToken scoped to
+// the merchant (never the merchant's own sk_/pk_): we act on their behalf with
+// it, plus accountPublicKey for client-side tokenization.
+type pagarmeHubInstallResponse struct {
+	Command          string         `json:"command"`
+	AccessToken      string         `json:"accessToken"`
+	AccountID        string         `json:"accountId"`
+	MerchantID       string         `json:"merchantId"`
+	InstallID        string         `json:"installId"`
+	AccountPublicKey string         `json:"accountPublicKey"`
+	Type             string         `json:"type"`
+	AdditionalData   map[string]any `json:"additionalData"`
+	Events           []string       `json:"events"`
+	Actions          []string       `json:"actions"`
+}
+
+// InstallPagarmeHub exchanges the merchant's authorization_code for a
+// Hub-scoped accessToken and persists (or updates) the Pagar.me payment
+// integration as active. A successful 201 from the Hub is itself the
+// validation — there is no separate probe (the provider's sk_-based
+// TestConnection does not apply to a Hub accessToken; that auth path is a
+// follow-up).
+func (s *Service) InstallPagarmeHub(ctx context.Context, input InstallPagarmeHubInput) (*ConnectPagarmeOutput, error) {
+	code := strings.TrimSpace(input.AuthorizationCode)
+	if code == "" {
+		return nil, httpx.ErrBadRequest("authorization_code é obrigatório")
+	}
+
+	publicAppKey := strings.TrimSpace(config.PagarmeAppPublicKey.String())
+	if publicAppKey == "" {
+		return nil, httpx.ErrUnprocessable("Pagar.me Hub app não configurado")
+	}
+	hubBase := strings.TrimRight(config.PagarmeHubAPIURL.StringOr("https://hubapi.pagar.me"), "/")
+
+	payloadBytes, _ := json.Marshal(map[string]string{"code": code})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hubBase+"/auth/apps/access-tokens", bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("creating hub token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("PublicAppKey", publicAppKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("exchanging authorization_code: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		logger.From(ctx, s.logger).Error("Pagar.me Hub token exchange failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", string(body)),
+		)
+		return nil, httpx.ErrUnprocessable(fmt.Sprintf("falha ao trocar o código do Pagar.me Hub (status %d)", resp.StatusCode))
+	}
+
+	var hub pagarmeHubInstallResponse
+	if err := json.Unmarshal(body, &hub); err != nil {
+		return nil, fmt.Errorf("parsing hub token response: %w", err)
+	}
+	if strings.TrimSpace(hub.AccessToken) == "" {
+		return nil, httpx.ErrUnprocessable("Pagar.me Hub não retornou accessToken")
+	}
+
+	environment := "live"
+	if strings.EqualFold(hub.Type, "Sandbox") {
+		environment = "test"
+	}
+
+	creds := &providers.Credentials{
+		AccessToken: hub.AccessToken,
+		Extra: map[string]any{
+			"public_key":  hub.AccountPublicKey,
+			"account_id":  hub.AccountID,
+			"merchant_id": hub.MerchantID,
+			"install_id":  hub.InstallID,
+			"environment": environment,
+			// auth_mode distinguishes a Hub install (Bearer accessToken via
+			// hubapi) from a manual sk_ connect (Basic auth). The payment
+			// provider branches on this.
+			"auth_mode": "hub",
+		},
+	}
+	encrypted, err := s.encryptor.EncryptJSON(creds)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting pagarme hub credentials: %w", err)
+	}
+
+	metadata := map[string]any{
+		"public_key":   hub.AccountPublicKey,
+		"account_id":   hub.AccountID,
+		"merchant_id":  hub.MerchantID,
+		"install_id":   hub.InstallID,
+		"environment":  environment,
+		"auth_mode":    "hub",
+		"connected_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(hub.Events) > 0 {
+		metadata["hub_events"] = hub.Events
+	}
+	if len(hub.Actions) > 0 {
+		metadata["hub_actions"] = hub.Actions
+	}
+
+	existing, err := s.repo.GetByProvider(ctx, input.StoreID, string(providers.ProviderTypePayment), string(providers.ProviderPagarme))
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, err
+		}
+		existing = nil
+	}
+
+	if existing != nil {
+		if err := s.repo.UpdateCredentials(ctx, existing.ID, encrypted, nil); err != nil {
+			return nil, err
+		}
+		if err := s.repo.UpdateMetadata(ctx, existing.ID, metadata); err != nil {
+			return nil, err
+		}
+		if err := s.repo.UpdateStatus(ctx, existing.ID, "active"); err != nil {
+			return nil, err
+		}
+		row, err := s.repo.GetByID(ctx, existing.ID, input.StoreID)
+		if err != nil {
+			return nil, err
+		}
+		return s.toCreateOutput(row), nil
+	}
+
+	row, err := s.repo.Create(ctx, CreateIntegrationParams{
+		StoreID:     input.StoreID,
+		Type:        string(providers.ProviderTypePayment),
+		Provider:    string(providers.ProviderPagarme),
+		Status:      "active",
+		Credentials: encrypted,
+		Metadata:    metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.toCreateOutput(row), nil
+}
+
+// ResolvePagarmeStoreByAccount maps a Hub event's account.id to the store that
+// installed the app. Returns "" (not an error) when no active Pagar.me install
+// matches — the Hub sends every merchant's events to one URL, so an unknown
+// account belongs to another partner's merchant and must be ignored.
+func (s *Service) ResolvePagarmeStoreByAccount(ctx context.Context, accountID string) (string, error) {
+	if strings.TrimSpace(accountID) == "" {
+		return "", nil
+	}
+	row, err := s.repo.GetByPagarmeAccountID(ctx, accountID)
+	if err != nil {
+		return "", err
+	}
+	if row == nil {
+		return "", nil
+	}
+	return row.StoreID, nil
+}
+
 // ValidatePagarmeWebhookAuth reads the integration's stored webhook
 // username/password (set at connect time, optional) and validates an
 // inbound `Authorization: Basic ...` header against them. Returns

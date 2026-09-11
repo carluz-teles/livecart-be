@@ -38,6 +38,9 @@ type PagarmeAdminService interface {
 	// the rendered integration response (kept as `any` to avoid importing the
 	// integration response type).
 	ConnectPagarme(ctx context.Context, in ConnectPagarmeInput) (any, error)
+	// InstallPagarmeHub exchanges the merchant's Hub authorization_code for an
+	// accessToken and persists the integration, returning the rendered response.
+	InstallPagarmeHub(ctx context.Context, in InstallPagarmeHubInput) (any, error)
 	// GetPagarmeWebhookStatus reports whether Pagar.me has been delivering to
 	// our webhook URL, inferred from recent delivery history.
 	GetPagarmeWebhookStatus(ctx context.Context, integrationID, storeID string) (*PagarmeWebhookStatusResponse, error)
@@ -69,6 +72,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// API keys (sk_*/pk_*), so the merchant pastes them into a form and we
 	// validate live against the gateway before persisting.
 	g.Post("/payment/pagarme/connect", h.ConnectPagarme)
+	// Payment — Pagar.me Hub (Partner App) install. The frontend forwards the
+	// short-lived authorization_code it received on the Hub redirect; we
+	// exchange it for a merchant accessToken. Registered before the /:id
+	// diagnostics so the static segment is matched first.
+	g.Post("/payment/pagarme/hub/install", h.InstallPagarmeHub)
 	g.Get("/:id/pagarme/webhook-status", h.GetPagarmeWebhookStatus)
 	g.Post("/:id/pagarme/webhook-test", h.TestPagarmeWebhook)
 	g.Post("/:id/pagarme/webhook-live-test", h.RunPagarmeWebhookLiveTest)
@@ -133,6 +141,63 @@ func (h *Handler) ConnectPagarme(c *fiber.Ctx) error {
 		PublicKey:       req.PublicKey,
 		WebhookUsername: req.WebhookUsername,
 		WebhookPassword: req.WebhookPassword,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, resp)
+}
+
+// InstallPagarmeHubInput is the service input to complete a Pagar.me Hub
+// (Partner App) install for a store, exchanging the merchant's short-lived
+// authorization_code for a Hub-scoped accessToken.
+type InstallPagarmeHubInput struct {
+	StoreID           string
+	AuthorizationCode string
+}
+
+// InstallPagarmeHubRequest is the body for POST /payment/pagarme/hub/install.
+// The frontend forwards the authorization_code it received on the Hub redirect
+// (?authorization_code=..., valid for 180s).
+type InstallPagarmeHubRequest struct {
+	AuthorizationCode string `json:"authorizationCode"`
+}
+
+// Validate ensures the code is present before we spend a Hub round-trip.
+func (r InstallPagarmeHubRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.AuthorizationCode, validation.Required),
+	)
+}
+
+// InstallPagarmeHub completes the Hub install by exchanging the authorization
+// code for the merchant accessToken and activating the integration. The store
+// comes from the authenticated session (the Hub redirect lands on the
+// merchant's own settings page), so no OAuth state correlation is needed.
+//
+// @Summary Install Pagar.me via Hub
+// @Description Exchanges the Hub authorization_code for an accessToken and activates the Pagar.me payment integration
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param body body InstallPagarmeHubRequest true "Hub install payload"
+// @Success 200 {object} httpx.Envelope{data=IntegrationResponse}
+// @Failure 400 {object} httpx.Envelope
+// @Failure 422 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/payment/pagarme/hub/install [post]
+// @Security BearerAuth
+func (h *Handler) InstallPagarmeHub(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	var req InstallPagarmeHubRequest
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
+	}
+
+	resp, err := h.admin.InstallPagarmeHub(c.Context(), InstallPagarmeHubInput{
+		StoreID:           storeID,
+		AuthorizationCode: req.AuthorizationCode,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

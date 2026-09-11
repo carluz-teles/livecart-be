@@ -458,6 +458,61 @@ func (r *Repository) GetByInstagramUserID(ctx context.Context, instagramUserID s
 	return result, nil
 }
 
+// GetByPagarmeAccountID returns the active Pagar.me payment integration whose
+// Hub install stored this account id (acc_…) in its metadata. The Hub delivers
+// every merchant's events to a single app-level webhook URL, so account.id in
+// the payload is how we route an event back to the store that installed the app.
+func (r *Repository) GetByPagarmeAccountID(ctx context.Context, accountID string) (*IntegrationRow, error) {
+	query := `
+		SELECT id, store_id, type, provider, status, credentials, token_expires_at, metadata, last_synced_at, created_at
+		FROM integrations
+		WHERE provider = 'pagarme'
+		  AND status = 'active'
+		  AND metadata->>'account_id' = $1
+		LIMIT 1
+	`
+
+	row := r.pool.QueryRow(ctx, query, accountID)
+
+	var id, storeID pgtype.UUID
+	var intType, provider, status string
+	var credentials []byte
+	var tokenExpiresAt pgtype.Timestamptz
+	var metadata []byte
+	var lastSyncedAt pgtype.Timestamptz
+	var createdAt time.Time
+
+	err := row.Scan(&id, &storeID, &intType, &provider, &status, &credentials, &tokenExpiresAt, &metadata, &lastSyncedAt, &createdAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil // Not found, return nil without error
+		}
+		return nil, fmt.Errorf("getting integration by pagarme account id: %w", err)
+	}
+
+	result := &IntegrationRow{
+		ID:          uuidToString(id),
+		StoreID:     uuidToString(storeID),
+		Type:        intType,
+		Provider:    provider,
+		Status:      status,
+		Credentials: credentials,
+		CreatedAt:   createdAt,
+	}
+
+	if tokenExpiresAt.Valid {
+		result.TokenExpiresAt = &tokenExpiresAt.Time
+	}
+	if lastSyncedAt.Valid {
+		result.LastSyncedAt = &lastSyncedAt.Time
+	}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &result.Metadata)
+	}
+
+	return result, nil
+}
+
 // UpdateCredentials updates an integration's credentials.
 func (r *Repository) UpdateCredentials(ctx context.Context, id string, credentials []byte, tokenExpiresAt *time.Time) error {
 	integrationID, err := parseUUID(id)
