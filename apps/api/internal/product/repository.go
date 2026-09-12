@@ -221,11 +221,11 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 	// Vale para TODA tela que busca produto interno — catálogo, seletor de
 	// sessão, upsell, painel de live e a adição de item no pedido passam por
 	// esta única condição.
-	if params.Search != "" {
+	if search := strings.TrimSpace(params.Search); search != "" {
 		conditions = append(conditions, fmt.Sprintf(
 			"(LOWER(name) LIKE $%d OR keyword LIKE $%d OR LOWER(sku) LIKE $%d OR LOWER(barcode) LIKE $%d)",
 			argIdx, argIdx, argIdx, argIdx))
-		args = append(args, "%"+strings.ToLower(params.Search)+"%")
+		args = append(args, "%"+strings.ToLower(search)+"%")
 		argIdx++
 	}
 
@@ -380,9 +380,17 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 	}, nil
 }
 
-func (r *Repository) Update(ctx context.Context, product *domain.Product) error {
+// Omitted fields are preserved by SQL as well as the domain merge, so a
+// concurrent ERP sync cannot be erased by an older form snapshot.
+type updatePreservation struct {
+	image, stock, shipping, sku, barcode bool
+}
+
+func (r *Repository) Update(
+	ctx context.Context, product *domain.Product, keep updatePreservation,
+) (*domain.Product, error) {
 	sp := product.Shipping()
-	_, err := r.q.UpdateProduct(ctx, sqlc.UpdateProductParams{
+	row, err := r.q.UpdateProduct(ctx, sqlc.UpdateProductParams{
 		ID:                  product.ID().ToPgUUID(),
 		StoreID:             product.StoreID().ToPgUUID(),
 		Name:                product.Name(),
@@ -398,15 +406,20 @@ func (r *Repository) Update(ctx context.Context, product *domain.Product) error 
 		Barcode:             pgtype.Text{String: sp.Barcode, Valid: sp.Barcode != ""},
 		PackageFormat:       packageFormatToColumn(sp.PackageFormat),
 		InsuranceValueCents: int64PtrToInt8(sp.InsuranceValueCents),
+		PreserveImage:       keep.image,
+		PreserveStock:       keep.stock,
+		PreserveShipping:    keep.shipping,
+		PreserveSku:         keep.sku,
+		PreserveBarcode:     keep.barcode,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return httpx.ErrNotFound("product not found")
+			return nil, httpx.ErrNotFound("product not found")
 		}
-		return fmt.Errorf("updating product: %w", err)
+		return nil, fmt.Errorf("updating product: %w", err)
 	}
 
-	return nil
+	return toDomainProduct(row)
 }
 
 func (r *Repository) GetMaxKeyword(ctx context.Context, storeID vo.StoreID) (string, error) {

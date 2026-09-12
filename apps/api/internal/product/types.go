@@ -1,6 +1,7 @@
 package product
 
 import (
+	"strings"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -173,14 +174,44 @@ type UploadProductImageResponse struct {
 	URL string `json:"url"`
 }
 
-// UpdateProductRequest represents the request body for updating a product.
+// UpdateShippingProfileDTO replaces dimensions when supplied. Identifiers are
+// optional: an omitted/null identifier is preserved; an explicit "" removes it.
+type UpdateShippingProfileDTO struct {
+	WeightGrams         *int    `json:"weightGrams"`
+	HeightCm            *int    `json:"heightCm"`
+	WidthCm             *int    `json:"widthCm"`
+	LengthCm            *int    `json:"lengthCm"`
+	SKU                 *string `json:"sku"`
+	Barcode             *string `json:"barcode"`
+	PackageFormat       string  `json:"packageFormat"`
+	InsuranceValueCents *int64  `json:"insuranceValueCents"`
+}
+
+func (d UpdateShippingProfileDTO) profile() ShippingProfileDTO {
+	profile := ShippingProfileDTO{
+		WeightGrams: d.WeightGrams, HeightCm: d.HeightCm, WidthCm: d.WidthCm,
+		LengthCm: d.LengthCm, PackageFormat: d.PackageFormat, InsuranceValueCents: d.InsuranceValueCents,
+	}
+	if d.SKU != nil {
+		profile.SKU = *d.SKU
+	}
+	if d.Barcode != nil {
+		profile.Barcode = *d.Barcode
+	}
+	return profile
+}
+
+func (d UpdateShippingProfileDTO) Validate() error { return d.profile().Validate() }
+
+// UpdateProductRequest preserves omitted image/shipping data. For identifiers,
+// omission preserves the stored value and an explicit empty string clears it.
 type UpdateProductRequest struct {
-	Name     string             `json:"name"`
-	Price    int64              `json:"price"` // price in cents
-	ImageURL string             `json:"imageUrl"`
-	Stock    int                `json:"stock"`
-	Active   bool               `json:"active"`
-	Shipping ShippingProfileDTO `json:"shipping"`
+	Name     string                    `json:"name"`
+	Price    int64                     `json:"price"` // price in cents
+	ImageURL *string                   `json:"imageUrl"`
+	Stock    int                       `json:"stock"`
+	Active   bool                      `json:"active"`
+	Shipping *UpdateShippingProfileDTO `json:"shipping"`
 }
 
 // Validate is the syntactic gate (ozzo) for product update.
@@ -209,12 +240,7 @@ func (r UpdateProductRequest) ToInput(storeID, productID string) (UpdateProductI
 		return UpdateProductInput{}, httpx.ErrUnprocessable("invalid price")
 	}
 
-	shipping, err := shippingDTOToDomain(r.Shipping)
-	if err != nil {
-		return UpdateProductInput{}, httpx.ErrUnprocessable(err.Error())
-	}
-
-	return UpdateProductInput{
+	input := UpdateProductInput{
 		StoreID:  sid,
 		ID:       id,
 		Name:     r.Name,
@@ -222,8 +248,17 @@ func (r UpdateProductRequest) ToInput(storeID, productID string) (UpdateProductI
 		ImageURL: r.ImageURL,
 		Stock:    r.Stock,
 		Active:   r.Active,
-		Shipping: shipping,
-	}, nil
+	}
+	if r.Shipping != nil {
+		shipping, err := shippingDTOToDomain(r.Shipping.profile())
+		if err != nil {
+			return UpdateProductInput{}, httpx.ErrUnprocessable(err.Error())
+		}
+		input.Shipping = &shipping
+		input.SKU = r.Shipping.SKU
+		input.Barcode = r.Shipping.Barcode
+	}
+	return input, nil
 }
 
 // ProductResponse represents a product in API responses.
@@ -373,10 +408,12 @@ type UpdateProductInput struct {
 	ID       vo.ProductID
 	Name     string
 	Price    vo.Money
-	ImageURL string
+	ImageURL *string
 	Stock    int
 	Active   bool
-	Shipping domain.ShippingProfile
+	Shipping *domain.ShippingProfile
+	SKU      *string
+	Barcode  *string
 }
 
 // ProductStats represents aggregated product statistics.
@@ -443,8 +480,8 @@ func shippingDTOToDomain(dto ShippingProfileDTO) (domain.ShippingProfile, error)
 		HeightCm:            dto.HeightCm,
 		WidthCm:             dto.WidthCm,
 		LengthCm:            dto.LengthCm,
-		SKU:                 dto.SKU,
-		Barcode:             dto.Barcode,
+		SKU:                 strings.TrimSpace(dto.SKU),
+		Barcode:             strings.TrimSpace(dto.Barcode),
 		PackageFormat:       format,
 		InsuranceValueCents: dto.InsuranceValueCents,
 	}, nil

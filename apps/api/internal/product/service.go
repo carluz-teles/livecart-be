@@ -3,6 +3,7 @@ package product
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -179,17 +180,36 @@ func (s *Service) Update(ctx context.Context, input UpdateProductInput) (*Produc
 		return nil, err
 	}
 
-	// Use domain method to update
-	if err := product.UpdateDetails(input.Name, input.Price, input.ImageURL, input.Stock, input.Active, input.Shipping); err != nil {
+	shipping := product.Shipping()
+	if input.Shipping != nil {
+		shipping = mesclarIdentificadores(shipping, *input.Shipping, "", "")
+	}
+	if input.SKU != nil {
+		shipping.SKU = strings.TrimSpace(*input.SKU)
+	}
+	if input.Barcode != nil {
+		shipping.Barcode = strings.TrimSpace(*input.Barcode)
+	}
+	imageURL := product.ImageURL()
+	if input.ImageURL != nil {
+		imageURL = *input.ImageURL
+	}
+	if err := product.UpdateDetails(
+		input.Name, input.Price, imageURL, input.Stock, input.Active, shipping,
+	); err != nil {
 		return nil, httpx.ErrUnprocessable(err.Error())
 	}
 
 	// Save changes
-	if err := s.repo.Update(ctx, product); err != nil {
+	saved, err := s.repo.Update(ctx, product, updatePreservation{
+		image: input.ImageURL == nil, shipping: input.Shipping == nil,
+		sku: input.SKU == nil, barcode: input.Barcode == nil,
+	})
+	if err != nil {
 		return nil, err
 	}
 
-	return &ProductView{Product: product}, nil
+	return &ProductView{Product: saved}, nil
 }
 
 func (s *Service) Delete(ctx context.Context, id vo.ProductID, storeID vo.StoreID) error {
@@ -267,6 +287,8 @@ func resolveSyncedStock(localStock, erpStock int, skipStock bool) int {
 // SyncFromERP updates an existing product from ERP data.
 // Returns (true, nil) if updated, (false, nil) if product not found in LiveCart.
 func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool, error) {
+	input.SKU = strings.TrimSpace(input.SKU)
+	input.Barcode = strings.TrimSpace(input.Barcode)
 	existing, err := s.repo.GetByExternalID(ctx, input.StoreID, input.ExternalSource, input.ExternalID)
 	if err != nil {
 		return false, fmt.Errorf("looking up product by external ID: %w", err)
@@ -314,7 +336,8 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 	// Os identificadores vêm do PRODUTO no ERP e são aplicados à parte, e só
 	// quando existem: vazio quer dizer "o ERP não informou", e nesse caso o
 	// local manda (o lojista pode ter preenchido à mão).
-	shipping := existing.Shipping()
+	previousShipping := existing.Shipping()
+	shipping := previousShipping
 	if input.Shipping != nil {
 		shipping = mesclarIdentificadores(shipping, *input.Shipping, input.SKU, input.Barcode)
 	} else {
@@ -324,9 +347,26 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 	if err := existing.UpdateDetails(input.Name, input.Price, input.ImageURL, stock, input.Active, shipping); err != nil {
 		return false, fmt.Errorf("updating product details: %w", err)
 	}
-	if err := s.repo.Update(ctx, existing); err != nil {
+	saved, err := s.repo.Update(ctx, existing, updatePreservation{
+		stock:    input.SkipStock || input.Stock < 0,
+		shipping: input.Shipping == nil, sku: input.SKU == "", barcode: input.Barcode == "",
+	})
+	if err != nil {
 		return false, err
 	}
+	synced := saved.Shipping()
+	logger.From(ctx, s.logger).Info("product identifiers synced",
+		zap.String("store_id", input.StoreID.String()),
+		zap.String("external_source", input.ExternalSource.String()),
+		zap.String("external_id", input.ExternalID),
+		zap.String("product_id", saved.ID().String()),
+		zap.Bool("sku_filled", previousShipping.SKU == "" && synced.SKU != ""),
+		zap.Bool("barcode_filled", previousShipping.Barcode == "" && synced.Barcode != ""),
+		zap.Bool("sku_missing", synced.SKU == ""),
+		zap.Bool("barcode_missing", synced.Barcode == ""),
+		zap.Bool("erp_sku_missing", input.SKU == ""),
+		zap.Bool("erp_barcode_missing", input.Barcode == ""),
+	)
 	return true, nil
 }
 
