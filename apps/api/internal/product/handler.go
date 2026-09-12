@@ -350,8 +350,9 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if h.s3Client != nil {
-		input.ImageURL = h.s3Client.NormalizeToKey(input.ImageURL)
+	if h.s3Client != nil && input.ImageURL != nil {
+		imageURL := h.s3Client.NormalizeToKey(*input.ImageURL)
+		input.ImageURL = &imageURL
 	}
 	view, err := h.service.Update(c.UserContext(), input)
 	if err != nil {

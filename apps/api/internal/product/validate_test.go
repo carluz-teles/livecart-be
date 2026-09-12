@@ -136,10 +136,15 @@ func TestAddProductImageRequestValidate(t *testing.T) {
 }
 
 func validUpdateProductRequest() UpdateProductRequest {
+	shipping := validShippingDTO()
 	return UpdateProductRequest{
-		Name:     "Camiseta Atualizada",
-		Stock:    5,
-		Shipping: validShippingDTO(),
+		Name:  "Camiseta Atualizada",
+		Stock: 5,
+		Shipping: &UpdateShippingProfileDTO{
+			WeightGrams: shipping.WeightGrams, HeightCm: shipping.HeightCm,
+			WidthCm: shipping.WidthCm, LengthCm: shipping.LengthCm,
+			PackageFormat: shipping.PackageFormat,
+		},
 	}
 }
 

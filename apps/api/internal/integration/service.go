@@ -4036,17 +4036,15 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	s.inheritShippingFromParent(ctx, erpProvider, detailed)
 	s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 
-	// Guard do overwrite de estoque. Enquanto houver reserva ativa numa live
-	// OU finalização ERP em voo para o produto, o webhook de estoque do Tiny
-	// não pode SUBIR o contador local (a reversão de reservas na finalização
-	// infla o saldo do Tiny por segundos → oferta falsa → promoção fantasma da
-	// waitlist). Mas REDUÇÕES do lojista no Tiny durante a live são legítimas e
-	// devem refletir — então na janela do guard usamos "downgrade-only": aplica
-	// só quando o valor do ERP é menor que o local (direção segura, nunca
-	// causa promoção fantasma). Fora da janela, sync normal. Fail-safe: em erro
-	// de DB, preserva o local inteiro.
+	// Identifier/name/price sync is independent of admitting the ERP stock
+	// snapshot. A deferred stock calculation must not leave legacy identifiers
+	// empty after the product detail was successfully read.
+	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, true); err != nil {
+		return stockMirrorNoTarget, fmt.Errorf("syncing product: %w", err)
+	}
+
 	// O ESTOQUE nao passa pelo sync generico: e aplicado a parte, com trava
-	// otimista. O `true` no SyncProduct abaixo diz "cuide de nome, preco e
+	// otimista. O `true` no SyncProduct acima diz "cuide de nome, preco e
 	// dimensoes; do saldo cuido eu".
 	//
 	// O guard de reserva ativa deixou de existir aqui. Ele nascera para decidir
@@ -4108,13 +4106,6 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		}
 	}
 
-	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, true); err != nil {
-		return stockMirrorNoTarget, fmt.Errorf("syncing product: %w", err)
-	}
-
-	// O backstop de waitlist só deve rodar quando o estoque pôde AUMENTAR (sync
-	// normal). Na janela do guard nunca subimos o local, então não promove;
-	// uma redução não libera unidade para ninguém.
 	logger.From(ctx, s.logger).Info("product synced from webhook",
 		zap.String("integration_id", integration.ID),
 		zap.String("external_product_id", externalProductID),
@@ -6269,24 +6260,45 @@ const erpResyncRateLimitRetries = 4
 // A espera cresce a cada tentativa porque o `retry_after` do Tiny volta zerado —
 // respeitá-lo ao pé da letra seria bater na mesma porta no mesmo instante.
 func (s *Service) resyncOneProduct(ctx context.Context, integration *IntegrationRow, externalID string) error {
+	return retryERPProductSync(ctx, func(ctx context.Context) (stockMirrorOutcome, error) {
+		return s.processProductSync(ctx, integration, externalID)
+	})
+}
+
+// Completion includes applying the stock snapshot. Stale admission is retried
+// with a fresh read; it cannot be silently counted as a successful bulk SYNC.
+func retryERPProductSync(ctx context.Context, syncProduct func(context.Context) (stockMirrorOutcome, error)) error {
 	var ultimo error
 	for tentativa := 0; tentativa <= erpResyncRateLimitRetries; tentativa++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if tentativa > 0 {
 			espera := time.Duration(tentativa*tentativa) * time.Second
+			var limited *ratelimit.ErrRateLimited
+			if errors.As(ultimo, &limited) {
+				espera = max(espera, limited.RetryAfter)
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(espera):
 			}
 		}
-		_, err := s.processProductSync(ctx, integration, externalID)
-		if err == nil {
+		outcome, err := syncProduct(ctx)
+		if err == nil && outcome == stockMirrorApplied {
 			return nil
+		}
+		if err == nil {
+			if outcome != stockMirrorStale {
+				return errors.New("product no longer available for ERP sync")
+			}
+			err = errResyncStockDeferred
 		}
 		ultimo = err
 
 		var estrangulado *ratelimit.ErrRateLimited
-		if !errors.As(err, &estrangulado) {
+		if !errors.As(err, &estrangulado) && !errors.Is(err, errResyncStockDeferred) {
 			// Erro que não é pausa do provedor (produto apagado no ERP, resposta
 			// ilegível): insistir não muda o desfecho.
 			return err
@@ -6294,6 +6306,8 @@ func (s *Service) resyncOneProduct(ctx context.Context, integration *Integration
 	}
 	return ultimo
 }
+
+var errResyncStockDeferred = errors.New("ERP stock snapshot still deferred after product metadata sync")
 
 // RunERPResync percorre os produtos vinculados relendo cada um do ERP.
 //
@@ -6326,6 +6340,7 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 
 	total := len(posicoes)
 	s.markResyncProgress(ctx, integration, 0, total)
+	beforeCoverage, beforeErr := s.repo.catalogIdentifierCoverage(ctx, storeID, integration.Provider)
 
 	var ok, falhou int
 	for i, pos := range posicoes {
@@ -6342,9 +6357,9 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 				zap.String("external_product_id", pos.ExternalID),
 				zap.String("name", pos.Name),
 				zap.Error(err))
-			continue
+		} else {
+			ok++
 		}
-		ok++
 
 		if (i+1)%erpResyncProgressEvery == 0 {
 			s.markResyncProgress(ctx, integration, i+1, total)
@@ -6356,6 +6371,18 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 		zap.Int("synced", ok),
 		zap.Int("failed", falhou),
 	)
+	afterCoverage, afterErr := s.repo.catalogIdentifierCoverage(ctx, storeID, integration.Provider)
+	if beforeErr == nil && afterErr == nil {
+		lg.Info("ERP resync identifier coverage",
+			zap.String("store_id", storeID), zap.String("integration_id", integrationID),
+			zap.Int("products_before", beforeCoverage.total), zap.Int("products_after", afterCoverage.total),
+			zap.Int("missing_sku_before", beforeCoverage.missingSKU), zap.Int("missing_sku_after", afterCoverage.missingSKU),
+			zap.Int("missing_barcode_before", beforeCoverage.missingBarcode), zap.Int("missing_barcode_after", afterCoverage.missingBarcode),
+			zap.Int("synced", ok), zap.Int("failed", falhou),
+		)
+	} else {
+		lg.Warn("ERP resync identifier coverage unavailable", zap.String("store_id", storeID), zap.Error(errors.Join(beforeErr, afterErr)))
+	}
 
 	// O aviso é o fim do trabalho, não parte dele: falhar aqui não desfaz nada
 	// que já foi gravado, e devolver erro faria a asynq repetir a varredura

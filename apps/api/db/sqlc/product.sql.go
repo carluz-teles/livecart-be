@@ -623,17 +623,17 @@ const updateProduct = `-- name: UpdateProduct :one
 UPDATE products
 SET name = $3,
     price = $4,
-    image_url = $5,
-    stock = $6,
+    image_url = CASE WHEN $16::bool THEN image_url ELSE $5 END,
+    stock = CASE WHEN $17::bool THEN stock ELSE $6 END,
     active = $7,
-    weight_grams = $8,
-    height_cm = $9,
-    width_cm = $10,
-    length_cm = $11,
-    sku = $12,
-    package_format = $13,
-    insurance_value_cents = $14,
-    barcode = $15,
+    weight_grams = CASE WHEN $18::bool THEN weight_grams ELSE $8 END,
+    height_cm = CASE WHEN $18::bool THEN height_cm ELSE $9 END,
+    width_cm = CASE WHEN $18::bool THEN width_cm ELSE $10 END,
+    length_cm = CASE WHEN $18::bool THEN length_cm ELSE $11 END,
+    sku = CASE WHEN $19::bool THEN sku ELSE $12 END,
+    package_format = CASE WHEN $18::bool THEN package_format ELSE $13 END,
+    insurance_value_cents = CASE WHEN $18::bool THEN insurance_value_cents ELSE $14 END,
+    barcode = CASE WHEN $20::bool THEN barcode ELSE $15 END,
     updated_at = now()
 WHERE id = $1 AND store_id = $2
 RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq, barcode
@@ -655,6 +655,11 @@ type UpdateProductParams struct {
 	PackageFormat       string      `json:"package_format"`
 	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
 	Barcode             pgtype.Text `json:"barcode"`
+	PreserveImage       bool        `json:"preserve_image"`
+	PreserveStock       bool        `json:"preserve_stock"`
+	PreserveShipping    bool        `json:"preserve_shipping"`
+	PreserveSku         bool        `json:"preserve_sku"`
+	PreserveBarcode     bool        `json:"preserve_barcode"`
 }
 
 func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (Product, error) {
@@ -674,6 +679,11 @@ func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (P
 		arg.PackageFormat,
 		arg.InsuranceValueCents,
 		arg.Barcode,
+		arg.PreserveImage,
+		arg.PreserveStock,
+		arg.PreserveShipping,
+		arg.PreserveSku,
+		arg.PreserveBarcode,
 	)
 	var i Product
 	err := row.Scan(
