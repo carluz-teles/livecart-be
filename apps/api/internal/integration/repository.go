@@ -2905,6 +2905,20 @@ func (r *Repository) UpdateCartItemWaitlistedQuantity(ctx context.Context, cartI
 	})
 }
 
+type catalogIdentifierCoverage struct {
+	total, missingSKU, missingBarcode int
+}
+
+func (r *Repository) catalogIdentifierCoverage(ctx context.Context, storeID, source string) (catalogIdentifierCoverage, error) {
+	var coverage catalogIdentifierCoverage
+	err := r.pool.QueryRow(ctx, `
+  SELECT count(*), count(*) FILTER (WHERE NULLIF(btrim(sku), '') IS NULL),
+         count(*) FILTER (WHERE NULLIF(btrim(barcode), '') IS NULL)
+  FROM products WHERE store_id=$1 AND external_source=$2 AND external_id IS NOT NULL AND external_id<>''
+ `, storeID, source).Scan(&coverage.total, &coverage.missingSKU, &coverage.missingBarcode)
+	return coverage, err
+}
+
 // ListStockPositionsForReconciliation devolve, por produto ligado ao ERP, o
 // contador local e quanto está segurado por reserva ativa. É a entrada da
 // reconciliação: `local - held` é o saldo que o ERP deveria estar reportando.
