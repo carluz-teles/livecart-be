@@ -2306,6 +2306,113 @@ func (s *Service) ResolvePagarmeStoreByAccount(ctx context.Context, accountID st
 	return row.StoreID, nil
 }
 
+// PagarmeHubLifecycleInput is the parsed body of a Hub install/update/uninstall
+// callback (see webhook_handler.HandlePagarmeHubInstall).
+type PagarmeHubLifecycleInput struct {
+	Command          string
+	AccessToken      string
+	AccountID        string
+	MerchantID       string
+	InstallID        string
+	AccountPublicKey string
+	Type             string
+	Events           []string
+	Actions          []string
+}
+
+// HandlePagarmeHubLifecycle applies a Hub install/update/uninstall callback.
+// The callback is server-to-server and carries no LiveCart store id, so it is
+// keyed by account id (which the redirect-driven install stored in metadata):
+//   - Uninstall       → disconnect the store's integration.
+//   - Install/Update  → refresh the merchant accessToken + granted events/actions.
+//
+// Creation happens in the redirect flow (InstallPagarmeHub), which has the store
+// id; a callback for an account with no integration yet can't be linked to a
+// store, so it is logged and ignored. Returns a short status for the response.
+func (s *Service) HandlePagarmeHubLifecycle(ctx context.Context, in PagarmeHubLifecycleInput) (string, error) {
+	accountID := strings.TrimSpace(in.AccountID)
+	if accountID == "" {
+		return "ignored_no_account", nil
+	}
+	row, err := s.repo.GetByPagarmeAccountID(ctx, accountID)
+	if err != nil {
+		return "", err
+	}
+
+	if strings.EqualFold(in.Command, "Uninstall") {
+		if row == nil {
+			return "ignored_unknown_account", nil
+		}
+		if err := s.repo.UpdateStatus(ctx, row.ID, "disconnected"); err != nil {
+			return "", err
+		}
+		logger.From(ctx, s.logger).Info("pagarme hub uninstalled — integration disconnected",
+			zap.String("account_id", accountID), zap.String("integration_id", row.ID))
+		return "uninstalled", nil
+	}
+
+	// Install / Update: refresh creds + metadata on the existing integration.
+	if row == nil {
+		logger.From(ctx, s.logger).Info("pagarme hub install/update for unlinked account, ignoring",
+			zap.String("account_id", accountID), zap.String("command", in.Command))
+		return "ignored_unlinked_account", nil
+	}
+
+	environment := "live"
+	if t := strings.ToLower(in.Type); t == "sandbox" || t == "development" {
+		environment = "test"
+	}
+
+	if in.AccessToken != "" {
+		creds := &providers.Credentials{
+			AccessToken: in.AccessToken,
+			Extra: map[string]any{
+				"public_key":  in.AccountPublicKey,
+				"account_id":  in.AccountID,
+				"merchant_id": in.MerchantID,
+				"install_id":  in.InstallID,
+				"environment": environment,
+				"auth_mode":   "hub",
+			},
+		}
+		encrypted, err := s.encryptor.EncryptJSON(creds)
+		if err != nil {
+			return "", err
+		}
+		if err := s.repo.UpdateCredentials(ctx, row.ID, encrypted, nil); err != nil {
+			return "", err
+		}
+	}
+
+	metadata := row.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["account_id"] = in.AccountID
+	metadata["merchant_id"] = in.MerchantID
+	metadata["install_id"] = in.InstallID
+	metadata["environment"] = environment
+	metadata["auth_mode"] = "hub"
+	if in.AccountPublicKey != "" {
+		metadata["public_key"] = in.AccountPublicKey
+	}
+	if len(in.Events) > 0 {
+		metadata["hub_events"] = in.Events
+	}
+	if len(in.Actions) > 0 {
+		metadata["hub_actions"] = in.Actions
+	}
+	if err := s.repo.UpdateMetadata(ctx, row.ID, metadata); err != nil {
+		return "", err
+	}
+	if err := s.repo.UpdateStatus(ctx, row.ID, "active"); err != nil {
+		return "", err
+	}
+	logger.From(ctx, s.logger).Info("pagarme hub install/update applied",
+		zap.String("account_id", accountID), zap.String("integration_id", row.ID), zap.String("command", in.Command))
+	return "installed", nil
+}
+
 // ValidatePagarmeWebhookAuth reads the integration's stored webhook
 // username/password (set at connect time, optional) and validates an
 // inbound `Authorization: Basic ...` header against them. Returns

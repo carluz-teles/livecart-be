@@ -2,6 +2,9 @@ package integration
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -83,14 +86,20 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 	webhooks.Patch("/pagarme/hub/events", h.HandleWebhookProbe)
 	webhooks.Delete("/pagarme/hub/events", h.HandleWebhookProbe)
 
-	// TEMPORARY capture endpoints — live-exercise scaffolding. The Hub's
-	// install/uninstall and additional-data validation callbacks: we don't have
-	// their payloads yet, so these log the raw body (and headers) and ack 200,
-	// letting us read the shape from the BE logs and then replace them with real
-	// handlers (e.g. command:"Uninstall" → disconnect the store). All() also
-	// answers the panel's non-POST reachability probe.
-	webhooks.All("/pagarme/hub/install", h.capturePagarmeHubCallback("install/uninstall"))
-	webhooks.All("/pagarme/hub/validate", h.capturePagarmeHubCallback("validate"))
+	// Pagar.me Hub (Partner App) server-to-server callbacks. The Hub POSTs the
+	// install/update/uninstall lifecycle and the additional-data validation,
+	// both signed with X-Hub-Signature. The non-POST verbs answer the panel's
+	// reachability probe. Both still log the raw body for observability.
+	webhooks.Post("/pagarme/hub/install", h.HandlePagarmeHubInstall)
+	webhooks.Post("/pagarme/hub/validate", h.HandlePagarmeHubValidate)
+	for _, p := range []string{"/pagarme/hub/install", "/pagarme/hub/validate"} {
+		webhooks.Get(p, h.HandleWebhookProbe)
+		webhooks.Head(p, h.HandleWebhookProbe)
+		webhooks.Options(p, h.HandleWebhookProbe)
+		webhooks.Put(p, h.HandleWebhookProbe)
+		webhooks.Patch(p, h.HandleWebhookProbe)
+		webhooks.Delete(p, h.HandleWebhookProbe)
+	}
 
 	// O Bling é a ÚNICA rota sem :storeId, e não é esquecimento: o Bling não
 	// tem API para registrar webhook — a URL é cadastrada na UI do APLICATIVO,
@@ -614,6 +623,15 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 func (h *WebhookHandler) HandlePagarmeHubEvent(c *fiber.Ctx) error {
 	body := c.Body()
 
+	// Verify the X-Hub-Signature (HMAC-SHA256 of the body with the app secret).
+	// When the secret isn't configured we can't verify — log-and-proceed, since
+	// the dispatch below re-checks the real status at the gateway anyway.
+	sigValid, sigVerifiable := verifyHubSignature(body, c.Get("X-Hub-Signature"))
+	if sigVerifiable && !sigValid {
+		logger.From(c.Context(), h.logger).Warn("rejected Pagar.me Hub event with invalid X-Hub-Signature")
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid signature"})
+	}
+
 	// Format: { "id": "hook_...", "account": { "id": "acc_..." },
 	//           "type": "charge.paid", "data": { "id": "ch_...", "order": {...} } }
 	var webhook struct {
@@ -673,8 +691,9 @@ func (h *WebhookHandler) HandlePagarmeHubEvent(c *fiber.Ctx) error {
 		EventType: webhook.Type,
 		EventID:   eventID,
 		Payload:   body,
-		// Hub events aren't Basic-Auth'd per store; authenticity is TODO above.
-		SignatureValid: false,
+		// Reflects the X-Hub-Signature check above (false when the app secret
+		// isn't configured and we couldn't verify).
+		SignatureValid: sigValid,
 	}); err != nil {
 		logger.From(ctxStore, h.logger).Error("failed to store hub webhook event", zap.Error(err))
 	}
@@ -711,22 +730,92 @@ func (h *WebhookHandler) HandlePagarmeHubEvent(c *fiber.Ctx) error {
 	return httpx.OK(c, fiber.Map{"status": "received"})
 }
 
-// capturePagarmeHubCallback is TEMPORARY live-exercise scaffolding. It returns
-// a handler that logs the raw request (method, headers, body) for a Hub
-// callback whose payload we haven't captured yet, then acks 200. Once we've
-// seen the real shape by exercising install/uninstall in sandbox, these get
-// replaced by proper handlers. Kept deliberately inert — no store lookup, no
-// side effect — so it can't misfire while we're only observing.
-func (h *WebhookHandler) capturePagarmeHubCallback(label string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		logger.From(c.Context(), h.logger).Info("pagarme hub "+label+" callback captured (temporary)",
-			zap.String("method", c.Method()),
-			zap.String("content_type", c.Get("Content-Type")),
-			zap.String("authorization", c.Get("Authorization")),
-			zap.ByteString("body", c.Body()),
-		)
-		return httpx.OK(c, fiber.Map{"status": "captured"})
+// verifyHubSignature checks the X-Hub-Signature header the Pagar.me Hub sends on
+// every callback: HMAC-SHA256(rawBody, appSecretKey), hex-encoded. Returns
+// (valid, verifiable) — verifiable is false when the app secret isn't
+// configured, letting callers log-and-proceed instead of failing closed.
+func verifyHubSignature(body []byte, sig string) (valid, verifiable bool) {
+	secret := strings.TrimSpace(config.PagarmeAppSecret.String())
+	if secret == "" {
+		return false, false
 	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(strings.TrimSpace(sig))), true
+}
+
+// HandlePagarmeHubInstall handles the Pagar.me Hub install/update/uninstall
+// callback. The Hub POSTs the full lifecycle payload server-to-server; we
+// verify the X-Hub-Signature, log the raw body for observability, then apply
+// the lifecycle by account id (see Service.HandlePagarmeHubLifecycle).
+func (h *WebhookHandler) HandlePagarmeHubInstall(c *fiber.Ctx) error {
+	body := c.Body()
+	sigValid, sigVerifiable := verifyHubSignature(body, c.Get("X-Hub-Signature"))
+	if sigVerifiable && !sigValid {
+		logger.From(c.Context(), h.logger).Warn("rejected Pagar.me Hub install callback with invalid X-Hub-Signature")
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid signature"})
+	}
+
+	var p struct {
+		Command          string   `json:"command"`
+		AccessToken      string   `json:"accessToken"`
+		AccountID        string   `json:"accountId"`
+		MerchantID       string   `json:"merchantId"`
+		InstallID        string   `json:"installId"`
+		AccountPublicKey string   `json:"accountPublicKey"`
+		Type             string   `json:"type"`
+		Events           []string `json:"events"`
+		Actions          []string `json:"actions"`
+	}
+	_ = json.Unmarshal(body, &p)
+
+	// Keep observing the real payload shape while we validate on staging.
+	logger.From(c.Context(), h.logger).Info("pagarme hub install callback",
+		zap.String("command", p.Command),
+		zap.String("account_id", p.AccountID),
+		zap.String("install_id", p.InstallID),
+		zap.Bool("signature_valid", sigValid),
+		zap.ByteString("body", body),
+	)
+
+	status, err := h.service.HandlePagarmeHubLifecycle(c.Context(), PagarmeHubLifecycleInput{
+		Command:          p.Command,
+		AccessToken:      p.AccessToken,
+		AccountID:        p.AccountID,
+		MerchantID:       p.MerchantID,
+		InstallID:        p.InstallID,
+		AccountPublicKey: p.AccountPublicKey,
+		Type:             p.Type,
+		Events:           p.Events,
+		Actions:          p.Actions,
+	})
+	if err != nil {
+		// Ack 200 anyway: a non-2xx marks the install invalid on the Hub, and
+		// retrying won't fix a transient lookup miss.
+		logger.From(c.Context(), h.logger).Error("pagarme hub lifecycle failed",
+			zap.String("command", p.Command), zap.String("account_id", p.AccountID), zap.Error(err))
+		return httpx.OK(c, fiber.Map{"status": "received"})
+	}
+	return httpx.OK(c, fiber.Map{"status": status})
+}
+
+// HandlePagarmeHubValidate handles the additional-data validation callback. We
+// don't require any additional-data fields yet, so once the signature checks
+// out we accept (200). When a JsonSchema is added later, return 4xx with
+// {errors:[{message,property}]} to surface field errors to the merchant.
+func (h *WebhookHandler) HandlePagarmeHubValidate(c *fiber.Ctx) error {
+	body := c.Body()
+	sigValid, sigVerifiable := verifyHubSignature(body, c.Get("X-Hub-Signature"))
+	if sigVerifiable && !sigValid {
+		logger.From(c.Context(), h.logger).Warn("rejected Pagar.me Hub validate callback with invalid X-Hub-Signature")
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid signature"})
+	}
+	logger.From(c.Context(), h.logger).Info("pagarme hub validate callback",
+		zap.Bool("signature_valid", sigValid),
+		zap.ByteString("body", body),
+	)
+	return httpx.OK(c, fiber.Map{"status": "valid"})
 }
 
 // HandleTiny handles Tiny ERP webhook notifications.
