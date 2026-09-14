@@ -201,6 +201,8 @@ func (j *tinyCheckoutJournal) Save(ctx context.Context, op *providers.TinyChecko
 	if err != nil {
 		return err
 	}
+	// The production pool uses pgx's simple protocol, where []byte is bytea.
+	// Preserve the JSON type explicitly so PostgreSQL receives JSON text.
 	result, err := j.repo.pool.Exec(ctx, `
  INSERT INTO tiny_checkout_operations(id,cart_id,integration_id,source_order_id,target_order_id,progress,completed)
  SELECT $1,$2,$3,$4,NULLIF($5,''),$6,$7 FROM carts c JOIN live_events e ON e.id=c.event_id
@@ -209,7 +211,7 @@ func (j *tinyCheckoutJournal) Save(ctx context.Context, op *providers.TinyChecko
  ON CONFLICT(id) DO UPDATE SET target_order_id=EXCLUDED.target_order_id,
  progress=EXCLUDED.progress,completed=EXCLUDED.completed,updated_at=now()
  WHERE tiny_checkout_operations.cart_id=EXCLUDED.cart_id
- AND tiny_checkout_operations.integration_id=EXCLUDED.integration_id`, op.ID, j.cartID, j.integrationID, op.SourceID, op.TargetID, raw, op.Completed, j.storeID)
+ AND tiny_checkout_operations.integration_id=EXCLUDED.integration_id`, op.ID, j.cartID, j.integrationID, op.SourceID, op.TargetID, json.RawMessage(raw), op.Completed, j.storeID)
 	if err != nil {
 		return fmt.Errorf("saving Tiny checkout checkpoint: %w", err)
 	}
@@ -243,7 +245,7 @@ func (j *tinyCheckoutJournal) Bind(ctx context.Context, op *providers.TinyChecko
 	if err != nil {
 		return err
 	}
-	result, err = tx.Exec(ctx, `UPDATE tiny_checkout_operations SET progress=$1,completed=true,target_order_id=$2,updated_at=now() WHERE id=$3 AND cart_id=$4 AND integration_id=$5`, raw, op.TargetID, op.ID, j.cartID, j.integrationID)
+	result, err = tx.Exec(ctx, `UPDATE tiny_checkout_operations SET progress=$1,completed=true,target_order_id=$2,updated_at=now() WHERE id=$3 AND cart_id=$4 AND integration_id=$5`, json.RawMessage(raw), op.TargetID, op.ID, j.cartID, j.integrationID)
 	if err != nil {
 		return err
 	}
