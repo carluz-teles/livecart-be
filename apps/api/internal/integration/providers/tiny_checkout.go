@@ -2,8 +2,28 @@ package providers
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
+
+// TinyCheckoutReconciliationError is a verified business conflict, not an
+// infrastructure failure. Fields contain labels only, never customer data.
+type TinyCheckoutReconciliationError struct {
+	OrderID   string
+	Status    int
+	InvoiceID int64
+	Fields    []string
+}
+
+func (e *TinyCheckoutReconciliationError) Error() string {
+	status, _ := ERPOrderStatusFromSituacao(e.Status)
+	message := fmt.Sprintf("pedido Tiny %s (%s) exige conciliação", e.OrderID, status)
+	if len(e.Fields) > 0 {
+		message += ": confira " + strings.Join(e.Fields, ", ")
+	}
+	return message
+}
 
 // TinyPaidCheckoutFinalizer is optional: Tiny uses a durable operation when
 // the final commercial data requires replacing an existing reservation.
@@ -20,6 +40,7 @@ type TinyCheckoutOperation struct {
 	SourceAnchor       string
 	TargetID           string
 	TargetNumber       string
+	TargetStatus       ERPOrderStatus
 	Order              ERPOrder
 	StartedAt          time.Time
 	Prepared           bool

@@ -1028,30 +1028,13 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		// também é NULL: a linha era EXCLUÍDA. Resultado medido em produção
 		// em 19/08: a aba "Aguardando pagamento" mostrava 0 de 121 carrinhos
 		// — todo o pipeline pré-pagamento invisível, silenciosamente.
-		// PEDIDO ÓRFÃO SEGURANDO PEÇA.
-		//
-		// O carrinho está morto aqui (cancelado ou vencido) e o pedido no ERP
-		// voltou a viver. Acontece de verdade: o lojista cancela pelo LiveCart,
-		// nós cancelamos no Tiny, e depois ele reabre o pedido lá — foi o que
-		// aconteceu em staging em 27/08, pedido 6, cancelado → aberto.
-		//
-		// O rastreamento registra a volta, e é só o que ele pode fazer. O
-		// problema é o que fica: um pedido EM ABERTO no ERP reservando unidade,
-		// sem carrinho vivo atrás dele. Ninguém vai pagar, o LiveCart não vai
-		// mexer nele de novo (o estado do carrinho é terminal), e a peça some do
-		// disponível até alguém abrir o Tiny e reparar.
-		//
-		// A situação não é ruído: o `cancelado` do próprio cancelamento fica de
-		// fora, e as pós-nota também — pedido faturado com carrinho cancelado é
-		// outra conversa, e não é reserva presa.
-		orfaoSegurandoPeca := "(c.status IN ('cancelled','expired') AND c.external_order_id IS NOT NULL " +
-			"AND c.erp_order_status IN ('aberto','aprovado','dados_incompletos'))"
-
+		// Cancelled/expired carts belong in Cancelados even if a historical
+		// item, shipment or ERP error remains. An explicit payment review is
+		// still actionable (for example a payment received after expiration).
 		matcher := fmt.Sprintf(
-			"(c.payment_review_required OR EXISTS(SELECT 1 FROM cart_items pending WHERE pending.cart_id=c.id AND pending.erp_pending_since IS NOT NULL) OR COALESCE(op.erp_finalisation_status, '') = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)) OR %s)",
+			"(c.payment_review_required OR (c.status NOT IN ('cancelled', 'expired') AND (EXISTS(SELECT 1 FROM cart_items pending WHERE pending.cart_id=c.id AND pending.erp_pending_since IS NOT NULL) OR COALESCE(op.erp_finalisation_status, '') = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))))",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
-			orfaoSegurandoPeca,
 		)
 		if *filters.NeedsAttention {
 			conditions = append(conditions, matcher)

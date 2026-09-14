@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/integration/providers"
 	providererp "livecart/apps/api/internal/integration/providers/erp"
 )
@@ -71,7 +72,11 @@ func (s *Service) PrepareTinyPaidOrder(ctx context.Context, provider providers.E
 	}
 	sourceAnchor := "lc-cart-" + cartID
 	if op != nil && op.Completed && op.TargetID == sourceID {
-		sourceAnchor = "lc-cart-" + op.Order.ExternalID
+		if op.Replace {
+			sourceAnchor = "lc-cart-" + op.Order.ExternalID
+		} else if op.SourceAnchor != "" {
+			sourceAnchor = op.SourceAnchor
+		}
 	}
 	if op != nil && (!tinySameSnapshot(op.Order.Checkout, &checkout) || !tinySameSnapshot(op.Order.Items, items)) {
 		if !op.Completed {
@@ -222,13 +227,23 @@ func (j *tinyCheckoutJournal) Save(ctx context.Context, op *providers.TinyChecko
 }
 
 func (j *tinyCheckoutJournal) Bind(ctx context.Context, op *providers.TinyCheckoutOperation) error {
+	status := op.TargetStatus
+	if status == "" {
+		status = providers.ERPOrderStatusAprovado // Checkpoints saved before status preservation.
+	}
+	if _, known := providers.ParseERPOrderStatus(string(status)); !known || status == providers.ERPOrderStatusCancelado || status == providers.ERPOrderStatusDadosIncompletos {
+		return fmt.Errorf("tiny checkout cannot bind invalid final status %q", status)
+	}
+	storeID, err := parseUUID(j.storeID)
+	if err != nil {
+		return err
+	}
 	tx, err := j.repo.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	result, err := tx.Exec(ctx, `UPDATE carts c SET external_order_id=$1,erp_order_number=NULLIF($2,''),
- erp_order_status='aprovado',erp_order_status_at=now()
+	result, err := tx.Exec(ctx, `UPDATE carts c SET external_order_id=$1,erp_order_number=NULLIF($2,'')
  FROM live_events e WHERE c.id=$3 AND e.id=c.event_id AND e.store_id=$4
  AND c.erp_order_state='mutating' AND (c.external_order_id=$5 OR c.external_order_id=$1)`, op.TargetID, op.TargetNumber, j.cartID, j.storeID, op.SourceID)
 	if err != nil {
@@ -236,6 +251,12 @@ func (j *tinyCheckoutJournal) Bind(ctx context.Context, op *providers.TinyChecko
 	}
 	if result.RowsAffected() != 1 {
 		return fmt.Errorf("tiny checkout lost cart claim before binding")
+	}
+	if _, err := j.repo.queries.WithTx(tx).RecordERPOrderStatus(ctx, sqlc.RecordERPOrderStatusParams{
+		StoreID: storeID, ExternalOrderID: op.TargetID, OrderNumber: op.TargetNumber,
+		Status: string(status), Source: "reconciliation",
+	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("recording reconciled Tiny order status: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE order_payments p SET external_order_id=$1 FROM orders o WHERE o.id=p.order_id AND o.cart_id=$2 AND o.store_id=$3`, op.TargetID, j.cartID, j.storeID); err != nil {
 		return err

@@ -165,7 +165,7 @@ func (t *Tiny) sourceForCheckout(ctx context.Context, op *providers.TinyCheckout
 		return nil, fmt.Errorf("tiny: pedido de origem sem vínculo verificável com o carrinho")
 	}
 	if source.InvoiceID != 0 || (source.Status != 0 && source.Status != 3 && !(op.CreateStarted && source.Status == 2)) {
-		return nil, fmt.Errorf("tiny: pedido de origem faturado ou encerrado; conciliação manual necessária")
+		return source, &providers.TinyCheckoutReconciliationError{OrderID: op.SourceID, Status: source.Status, InvoiceID: source.InvoiceID}
 	}
 	return source, nil
 }
@@ -191,6 +191,10 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 	if !op.Prepared {
 		source, err := t.sourceForCheckout(ctx, op)
 		if err != nil {
+			var conflict *providers.TinyCheckoutReconciliationError
+			if errors.As(err, &conflict) && !op.CreateStarted && !op.SourceCancelled && !op.AccountsCleared && (op.TargetID == "" || op.TargetID == op.SourceID) {
+				return t.reconcileExistingCheckout(ctx, op, journal, source)
+			}
 			return nil, err
 		}
 		accounts, err := t.checkoutReceivables(ctx, op.SourceID)
@@ -406,6 +410,7 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 	if status != providers.SituacaoAprovada {
 		return nil, fmt.Errorf("tiny: aprovação do pedido final não confirmada")
 	}
+	op.TargetStatus = providers.ERPOrderStatusAprovado
 	if err := journal.Bind(ctx, op); err != nil {
 		return nil, err
 	}
