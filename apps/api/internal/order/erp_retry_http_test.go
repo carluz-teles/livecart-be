@@ -37,10 +37,12 @@ func TestERPFinalisationRetryHTTPDistinguishesConflictFromFailure(t *testing.T) 
 		err    error
 		status int
 		code   string
+		detail string
 	}{
-		{"commercial conflict", fmt.Errorf("finalizing: %w", &providers.TinyCheckoutReconciliationError{OrderID: "848620609", Status: 1, InvoiceID: 99, Fields: []string{"frete"}}), 422, "ERP_RETRY_INVALID_STATE"},
-		{"technical error", errors.New("database private diagnostics"), 500, ""},
-		{"reconciled", nil, 200, ""},
+		{"commercial conflict", fmt.Errorf("finalizing: %w", &providers.TinyCheckoutReconciliationError{OrderID: "1", Status: 1, InvoiceID: 99, Fields: []string{"frete"}}), 422, "ERP_RETRY_INVALID_STATE", "frete"},
+		{"merchant expense on open sale", fmt.Errorf("finalizing: %w", &providers.TinyCheckoutReconciliationError{OrderID: "2", Status: 0, Fields: []string{"despesas adicionais do pedido"}}), 422, "ERP_RETRY_INVALID_STATE", "despesas adicionais do pedido"},
+		{"technical error", errors.New("database private diagnostics"), 500, "", ""},
+		{"reconciled", nil, 200, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := &erpRetryStub{err: tc.err}
@@ -64,7 +66,7 @@ func TestERPFinalisationRetryHTTPDistinguishesConflictFromFailure(t *testing.T) 
 				if envelope.Code != tc.code || strings.Contains(envelope.Error, "private diagnostics") {
 					t.Fatalf("incorrect error envelope: %s", body)
 				}
-				if status == 422 && !strings.Contains(envelope.Error, "frete") {
+				if tc.detail != "" && !strings.Contains(envelope.Error, tc.detail) {
 					t.Fatalf("missing conflict reason: %s", body)
 				}
 			}

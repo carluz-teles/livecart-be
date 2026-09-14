@@ -21,6 +21,16 @@ type tinyCheckoutInstallment struct {
 	} `json:"formaRecebimento"`
 }
 
+type tinyCheckoutAddress struct {
+	Street       string `json:"endereco"`
+	Number       string `json:"numero"`
+	Complement   string `json:"complemento"`
+	Neighborhood string `json:"bairro"`
+	City         string `json:"municipio"`
+	State        string `json:"uf"`
+	Zip          string `json:"cep"`
+}
+
 type tinyCheckoutOrder struct {
 	Shipping struct {
 		Form *tinyCheckoutReference `json:"formaEnvio"`
@@ -48,22 +58,15 @@ type tinyCheckoutOrder struct {
 	Freight   float64 `json:"valorFrete"`
 	Discount  float64 `json:"valorDesconto"`
 	Customer  struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"nome"`
-		Document string `json:"cpfCnpj"`
-		Email    string `json:"email"`
-		Phone    string `json:"telefone"`
-		Mobile   string `json:"celular"`
+		ID       int64                `json:"id"`
+		Name     string               `json:"nome"`
+		Document string               `json:"cpfCnpj"`
+		Email    string               `json:"email"`
+		Phone    string               `json:"telefone"`
+		Mobile   string               `json:"celular"`
+		Address  *tinyCheckoutAddress `json:"endereco"`
 	} `json:"cliente"`
-	Address struct {
-		Street       string `json:"endereco"`
-		Number       string `json:"numero"`
-		Complement   string `json:"complemento"`
-		Neighborhood string `json:"bairro"`
-		City         string `json:"municipio"`
-		State        string `json:"uf"`
-		Zip          string `json:"cep"`
-	} `json:"enderecoEntrega"`
+	Address *tinyCheckoutAddress `json:"enderecoEntrega"`
 	Payment struct {
 		Installments []tinyCheckoutInstallment `json:"parcelas"`
 	} `json:"pagamento"`
@@ -142,7 +145,7 @@ func tinyCheckoutDifferences(order *tinyCheckoutOrder, checkout providers.ERPOrd
 		fields = append(fields, "email do cliente")
 	}
 	if a := checkout.Address; a != nil {
-		if !sameTinyCheckoutText(order.Address.Street, a.Street) || !sameTinyCheckoutText(order.Address.Number, a.Number) ||
+		if order.Address == nil || !sameTinyCheckoutText(order.Address.Street, a.Street) || !sameTinyCheckoutText(order.Address.Number, a.Number) ||
 			!sameTinyCheckoutText(order.Address.Complement, a.Complement) || !sameTinyCheckoutText(order.Address.Neighborhood, a.Neighborhood) ||
 			!sameTinyCheckoutText(order.Address.City, a.City) || !sameTinyCheckoutText(order.Address.State, a.State) ||
 			digitsOnlyTiny(order.Address.Zip) != digitsOnlyTiny(a.ZipCode) {

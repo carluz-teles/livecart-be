@@ -48,6 +48,7 @@ func (j *checkoutTestJournal) resume(t *testing.T) *providers.TinyCheckoutOperat
 }
 
 type checkoutTestTiny struct {
+	shippingForms                                                                          []tinyCheckoutReference
 	writes                                                                                 int
 	rejectCreate                                                                           bool
 	mu                                                                                     sync.Mutex
@@ -75,6 +76,10 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 	}
 	if r.URL.Path == "/formas-recebimento" {
 		write(map[string]any{"itens": []any{map[string]any{"id": 7, "nome": "Pix", "situacao": "1"}}})
+		return
+	}
+	if r.URL.Path == "/formas-envio" {
+		write(map[string]any{"itens": f.shippingForms})
 		return
 	}
 	if r.URL.Path == "/contas-receber" {

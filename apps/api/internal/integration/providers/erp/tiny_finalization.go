@@ -219,8 +219,15 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 		}
 		op.Replace = len(tinyCheckoutDifferences(source, checkout)) > 0 || !tinyCheckoutMethodsMatch(source, checkout.Payments) || !tinyCheckoutGridMatches(source, op.Order.Items) || (checkout.Shipping != nil && !tinyCheckoutShippingMatches(source, op.ExpectedShippingID))
 		if op.Replace {
-			if source.OtherExpenses != 0 || !tinyCheckoutPreservesMerchantItems(source, op.Order.Items) {
-				return nil, fmt.Errorf("tiny: ajustes do lojista fora do checkout; conciliação manual necessária")
+			var merchantFields []string
+			if source.OtherExpenses != 0 {
+				merchantFields = append(merchantFields, "despesas adicionais do pedido")
+			}
+			if !tinyCheckoutPreservesMerchantItems(source, op.Order.Items) {
+				merchantFields = append(merchantFields, "itens ajustados no ERP")
+			}
+			if len(merchantFields) > 0 {
+				return nil, &providers.TinyCheckoutReconciliationError{OrderID: op.SourceID, Status: source.Status, InvoiceID: source.InvoiceID, Fields: merchantFields}
 			}
 			headers := map[string]any{}
 			for key, ref := range map[string]*tinyCheckoutReference{"deposito": source.Deposit, "naturezaOperacao": source.Nature, "listaPreco": source.PriceList, "vendedor": source.Seller} {

@@ -2,6 +2,7 @@ package erp
 
 import (
 	"context"
+	"strings"
 
 	"go.uber.org/zap"
 	"livecart/apps/api/internal/integration/providers"
@@ -29,9 +30,6 @@ func (t *Tiny) reconcileExistingCheckout(ctx context.Context, op *providers.Tiny
 		}
 	}
 	conflict.Fields = existingTinyCheckoutDifferences(source, op, shippingID)
-	if len(conflict.Fields) > 0 {
-		return nil, conflict
-	}
 	accounts, err := t.checkoutReceivables(ctx, op.SourceID)
 	if err != nil {
 		return nil, err
@@ -39,7 +37,9 @@ func (t *Tiny) reconcileExistingCheckout(ctx context.Context, op *providers.Tiny
 	// Received titles are valid evidence: never reverse them. Missing or
 	// divergent titles cannot prove the financial synchronization succeeded.
 	if !tinyReceivablesMatch(accounts, checkout.Payments) {
-		conflict.Fields = []string{"contas a receber"}
+		conflict.Fields = append(conflict.Fields, "contas a receber")
+	}
+	if len(conflict.Fields) > 0 {
 		return nil, conflict
 	}
 	verified, err := t.readCheckoutOrder(ctx, op.SourceID)
@@ -63,7 +63,14 @@ func (t *Tiny) reconcileExistingCheckout(ctx context.Context, op *providers.Tiny
 
 func existingTinyCheckoutDifferences(source *tinyCheckoutOrder, op *providers.TinyCheckoutOperation, shippingID int64) []string {
 	checkout := *op.Order.Checkout
-	fields := tinyCheckoutDifferences(source, checkout)
+	// A separate delivery address is optional in Tiny. Use the customer's
+	// address only when it is absent, never to hide an explicit partial or
+	// different delivery address. Keep this fallback out of the write path.
+	commercial := *source
+	if commercial.Address == nil {
+		commercial.Address = source.Customer.Address
+	}
+	fields := tinyCheckoutDifferences(&commercial, checkout)
 	if !tinyCheckoutGridMatches(source, op.Order.Items) {
 		fields = append(fields, "itens")
 	}
@@ -74,8 +81,24 @@ func existingTinyCheckoutDifferences(source *tinyCheckoutOrder, op *providers.Ti
 	}) {
 		fields = append(fields, "parcelas e formas de pagamento")
 	}
-	if checkout.Shipping != nil && !tinyCheckoutShippingMatches(source, shippingID) {
+	if checkout.Shipping != nil && !tinyExistingCheckoutShippingMatches(source, checkout.Shipping.Carrier, shippingID) {
 		fields = append(fields, "forma de envio")
 	}
 	return fields
+}
+
+func tinyExistingCheckoutShippingMatches(order *tinyCheckoutOrder, carrier string, expectedID int64) bool {
+	if tinyCheckoutShippingMatches(order, expectedID) {
+		return true
+	}
+	if order.Shipping.Form == nil || order.Shipping.Form.ID <= 0 || strings.TrimSpace(carrier) == "" || isStorePickup(carrier) {
+		return false
+	}
+	// Tiny may contain a direct carrier and a Smart Envios registration for
+	// that same carrier. An already issued sale can keep either registration;
+	// creating a replacement still verifies the exact ID it requested.
+	name := order.Shipping.Form.Name
+	return sameTinyCheckoutText(name, carrier) ||
+		sameTinyCheckoutText(name, strings.TrimSpace(carrier)+" via Smart Envios") ||
+		sameTinyCheckoutText(name, strings.TrimSpace(carrier)+" via SmartEnvios")
 }
