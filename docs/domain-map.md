@@ -145,7 +145,7 @@ onde o código atual não respeita a fronteira.
 ### N. Integrations — Anti-Corruption Layer (**não é domínio de negócio**)
 - **Faz:** adapters técnicos de provider (instagram, pagarme, mercadopago, stripe,
   tiny, melhor-envio/smartenvios).
-- **Possui:** `integrations`, `integration_logs`, `oauth_states`, `webhook_events`,
+- **Possui:** `integrations`, `oauth_states`, `webhook_events`,
   `idempotency_keys`.
 - **Hoje:** `integration/providers`.
 - ⚠ **O problema-raiz:** o pacote `integration` mistura este ACL (infra) com os
