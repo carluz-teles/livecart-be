@@ -83,6 +83,12 @@ func (t *Tiny) readCheckoutOrder(ctx context.Context, orderID string) (*tinyChec
 	if err != nil {
 		return nil, fmt.Errorf("tiny: reading checkout: %w", err)
 	}
+	if resp.StatusCode == http.StatusNotFound {
+		// A paid checkout cannot discard its binding and recreate a sale just
+		// because the ERP no longer finds the source. Keep this a reconciliation
+		// conflict, distinct from the unpaid reservation's missing-order recovery.
+		return nil, &providers.TinyCheckoutReconciliationError{OrderID: orderID, Missing: true}
+	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("tiny: reading checkout returned status %d", resp.StatusCode)
 	}
