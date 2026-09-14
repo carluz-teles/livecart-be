@@ -343,12 +343,11 @@ func (h *Handler) Cancel(c *fiber.Ctx) error {
 }
 
 // RetryERPFinalisation godoc
-// @Summary      Retry ERP order creation for a paid cart
-// @Description  Re-runs the post-payment Tiny order creation for an order
-// @Description  whose finalisation previously failed. Stock stays held against
-// @Description  the cart between attempts, so retrying never overcommits or
-// @Description  releases inventory. No-op when the cart is already finalised;
-// @Description  errors when finalisation is still in 'pending' state.
+// @Summary      Retry ERP synchronization for a paid cart
+// @Description  Resumes paid-order finalisation. A correct finalized Tiny sale
+// @Description  is reconciled through reads only, preserving its ERP status.
+// @Description  Verified Tiny conflicts return 422 with ERP_RETRY_INVALID_STATE;
+// @Description  technical failures remain server errors. No gateway charge is made.
 // @Tags         orders
 // @Produce      json
 // @Param        storeId path string true "Store UUID"

@@ -2,6 +2,7 @@ package order
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/cartedit"
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -155,7 +157,12 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, orderID, storeID str
 	if order.PaymentReviewRequired {
 		return httpx.DomainError(409, httpx.CodePaymentReviewRequired, "concilie o pagamento recebido antes de finalizar o pedido no ERP")
 	}
-	return s.erpRetryService.RetryERPFinalisation(ctx, orderID, storeID)
+	err = s.erpRetryService.RetryERPFinalisation(ctx, orderID, storeID)
+	var conflict *providers.TinyCheckoutReconciliationError
+	if errors.As(err, &conflict) {
+		return httpx.DomainError(422, httpx.CodeErpRetryInvalidState, conflict.Error()+". Confira as divergências antes de concluir a sincronização.")
+	}
+	return err
 }
 
 func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOutput, error) {

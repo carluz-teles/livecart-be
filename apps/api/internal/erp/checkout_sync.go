@@ -95,8 +95,9 @@ func (s *Service) onCartPaidCheckout(ctx context.Context, cartID, storeID, expec
 	// connection before binding its replacement. Let the durable finalizer
 	// verify that specific recovery; a cancelled source without such a recorded
 	// operation is still rejected by the provider before any mutation.
-	tinyCancelledSource := expectedProvider == string(providers.ProviderTiny) && state.OrderStatus == string(providers.ERPOrderStatusCancelado)
-	if closed, reason := pedidoJaFaturado(state.OrderStatus); closed && !tinyCancelledSource {
+	// Tiny verifies finalized sales without ERP writes and can resume its own
+	// recorded replacement. Its provider still rejects an unrelated cancellation.
+	if closed, reason := pedidoJaFaturado(state.OrderStatus); closed && expectedProvider != string(providers.ProviderTiny) {
 		s.collab.MarkFinalisationFailed(ctx, cartID, "pagamento adicional exige reconciliação no ERP: "+reason)
 		return fmt.Errorf("additional payment requires reconciliation: %s: %w", reason, ErrPedidoFaturado)
 	}

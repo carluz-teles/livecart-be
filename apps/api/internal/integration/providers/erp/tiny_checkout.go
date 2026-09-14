@@ -132,7 +132,7 @@ func tinyCheckoutDifferences(order *tinyCheckoutOrder, checkout providers.ERPOrd
 	if int64(math.Round(order.Discount*100)) != checkout.DiscountCents {
 		fields = append(fields, "desconto")
 	}
-	if checkout.Customer.Name != "" && strings.TrimSpace(order.Customer.Name) != strings.TrimSpace(checkout.Customer.Name) {
+	if checkout.Customer.Name != "" && !sameTinyCheckoutText(order.Customer.Name, checkout.Customer.Name) {
 		fields = append(fields, "nome do cliente")
 	}
 	if checkout.Customer.CpfCnpj != "" && digitsOnlyTiny(order.Customer.Document) != digitsOnlyTiny(checkout.Customer.CpfCnpj) {
@@ -142,9 +142,9 @@ func tinyCheckoutDifferences(order *tinyCheckoutOrder, checkout providers.ERPOrd
 		fields = append(fields, "email do cliente")
 	}
 	if a := checkout.Address; a != nil {
-		if order.Address.Street != a.Street || order.Address.Number != a.Number ||
-			order.Address.Complement != a.Complement || order.Address.Neighborhood != a.Neighborhood ||
-			order.Address.City != a.City || order.Address.State != a.State ||
+		if !sameTinyCheckoutText(order.Address.Street, a.Street) || !sameTinyCheckoutText(order.Address.Number, a.Number) ||
+			!sameTinyCheckoutText(order.Address.Complement, a.Complement) || !sameTinyCheckoutText(order.Address.Neighborhood, a.Neighborhood) ||
+			!sameTinyCheckoutText(order.Address.City, a.City) || !sameTinyCheckoutText(order.Address.State, a.State) ||
 			digitsOnlyTiny(order.Address.Zip) != digitsOnlyTiny(a.ZipCode) {
 			fields = append(fields, "endereço de entrega")
 		}
@@ -157,6 +157,10 @@ func tinyCheckoutDifferences(order *tinyCheckoutOrder, checkout providers.ERPOrd
 		fields = append(fields, "total pago/desconto")
 	}
 	return fields
+}
+
+func sameTinyCheckoutText(a, b string) bool {
+	return strings.EqualFold(strings.Join(strings.Fields(a), " "), strings.Join(strings.Fields(b), " "))
 }
 
 func (t *Tiny) GetOrderCommercialDiscount(ctx context.Context, orderID string) (int64, error) {
@@ -195,6 +199,12 @@ func (t *Tiny) OrderInstallmentsMatch(ctx context.Context, orderID string, desir
 }
 
 func tinyInstallmentsMatch(current []tinyCheckoutInstallment, desired []providers.ERPInstallment) bool {
+	return tinyInstallmentsMatchWith(current, desired, func(existing tinyCheckoutInstallment, wanted providers.ERPInstallment) bool {
+		return existing.Note == wanted.Note
+	})
+}
+
+func tinyInstallmentsMatchWith(current []tinyCheckoutInstallment, desired []providers.ERPInstallment, matchesDetail func(tinyCheckoutInstallment, providers.ERPInstallment) bool) bool {
 	if len(current) != len(desired) {
 		return false
 	}
@@ -207,7 +217,7 @@ func tinyInstallmentsMatch(current []tinyCheckoutInstallment, desired []provider
 			dateMatches := strings.HasPrefix(wanted.Note, "A PAGAR -") ||
 				strings.HasPrefix(existing.Date, wanted.DueDate.Format("2006-01-02"))
 			if !used[i] && int64(math.Round(existing.Value*100)) == wanted.AmountCents &&
-				existing.Note == wanted.Note && dateMatches {
+				matchesDetail(existing, wanted) && dateMatches {
 				used[i], found = true, true
 				break
 			}
