@@ -36,6 +36,9 @@ type IntegrationLog struct {
 	EntityID        string
 	Direction       string // "outbound" or "inbound"
 	Status          string // "success" or "error"
+	Method          string
+	HTTPStatus      int
+	Duration        time.Duration
 	RequestPayload  []byte
 	ResponsePayload []byte
 	ErrorMessage    string
@@ -130,6 +133,8 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 			IntegrationID:  b.IntegrationID,
 			Direction:      "outbound",
 			Status:         "error",
+			Method:         method,
+			Duration:       duration,
 			RequestPayload: reqBody,
 			ErrorMessage:   err.Error(),
 		})
@@ -167,6 +172,9 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 		IntegrationID:   b.IntegrationID,
 		Direction:       "outbound",
 		Status:          status,
+		Method:          method,
+		HTTPStatus:      resp.StatusCode,
+		Duration:        duration,
 		RequestPayload:  reqBody,
 		ResponsePayload: respBody,
 		ErrorMessage:    errorMsg,

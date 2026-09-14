@@ -39,17 +39,6 @@ func (q *Queries) ConsumeOAuthState(ctx context.Context, state string) (OauthSta
 	return i, err
 }
 
-const countIntegrationLogs = `-- name: CountIntegrationLogs :one
-SELECT COUNT(*) FROM integration_logs WHERE integration_id = $1
-`
-
-func (q *Queries) CountIntegrationLogs(ctx context.Context, integrationID pgtype.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countIntegrationLogs, integrationID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createIdempotencyKey = `-- name: CreateIdempotencyKey :one
 INSERT INTO idempotency_keys (idempotency_key, store_id, integration_id, operation, request_hash, status)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -134,54 +123,6 @@ func (q *Queries) CreateIntegration(ctx context.Context, arg CreateIntegrationPa
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
-	)
-	return i, err
-}
-
-const createIntegrationLog = `-- name: CreateIntegrationLog :one
-
-INSERT INTO integration_logs (integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message, created_at
-`
-
-type CreateIntegrationLogParams struct {
-	IntegrationID   pgtype.UUID     `json:"integration_id"`
-	EntityType      pgtype.Text     `json:"entity_type"`
-	EntityID        pgtype.UUID     `json:"entity_id"`
-	Direction       pgtype.Text     `json:"direction"`
-	Status          pgtype.Text     `json:"status"`
-	RequestPayload  json.RawMessage `json:"request_payload"`
-	ResponsePayload json.RawMessage `json:"response_payload"`
-	ErrorMessage    pgtype.Text     `json:"error_message"`
-}
-
-// =============================================================================
-// INTEGRATION LOGS
-// =============================================================================
-func (q *Queries) CreateIntegrationLog(ctx context.Context, arg CreateIntegrationLogParams) (IntegrationLog, error) {
-	row := q.db.QueryRow(ctx, createIntegrationLog,
-		arg.IntegrationID,
-		arg.EntityType,
-		arg.EntityID,
-		arg.Direction,
-		arg.Status,
-		arg.RequestPayload,
-		arg.ResponsePayload,
-		arg.ErrorMessage,
-	)
-	var i IntegrationLog
-	err := row.Scan(
-		&i.ID,
-		&i.IntegrationID,
-		&i.EntityType,
-		&i.EntityID,
-		&i.Direction,
-		&i.Status,
-		&i.RequestPayload,
-		&i.ResponsePayload,
-		&i.ErrorMessage,
-		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -634,50 +575,6 @@ func (q *Queries) HealIntegrationFromError(ctx context.Context, id pgtype.UUID) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
-}
-
-const listIntegrationLogs = `-- name: ListIntegrationLogs :many
-SELECT id, integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message, created_at FROM integration_logs
-WHERE integration_id = $1
-ORDER BY created_at DESC
-LIMIT $2 OFFSET $3
-`
-
-type ListIntegrationLogsParams struct {
-	IntegrationID pgtype.UUID `json:"integration_id"`
-	Limit         int32       `json:"limit"`
-	Offset        int32       `json:"offset"`
-}
-
-func (q *Queries) ListIntegrationLogs(ctx context.Context, arg ListIntegrationLogsParams) ([]IntegrationLog, error) {
-	rows, err := q.db.Query(ctx, listIntegrationLogs, arg.IntegrationID, arg.Limit, arg.Offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []IntegrationLog{}
-	for rows.Next() {
-		var i IntegrationLog
-		if err := rows.Scan(
-			&i.ID,
-			&i.IntegrationID,
-			&i.EntityType,
-			&i.EntityID,
-			&i.Direction,
-			&i.Status,
-			&i.RequestPayload,
-			&i.ResponsePayload,
-			&i.ErrorMessage,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const listIntegrationsByStore = `-- name: ListIntegrationsByStore :many

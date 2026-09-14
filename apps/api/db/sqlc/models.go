@@ -430,19 +430,6 @@ type Integration struct {
 	ErpAccountID pgtype.Text `json:"erp_account_id"`
 }
 
-type IntegrationLog struct {
-	ID              pgtype.UUID        `json:"id"`
-	IntegrationID   pgtype.UUID        `json:"integration_id"`
-	EntityType      pgtype.Text        `json:"entity_type"`
-	EntityID        pgtype.UUID        `json:"entity_id"`
-	Direction       pgtype.Text        `json:"direction"`
-	Status          pgtype.Text        `json:"status"`
-	RequestPayload  json.RawMessage    `json:"request_payload"`
-	ResponsePayload json.RawMessage    `json:"response_payload"`
-	ErrorMessage    pgtype.Text        `json:"error_message"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-}
-
 type LiveComment struct {
 	ID                pgtype.UUID        `json:"id"`
 	SessionID         pgtype.UUID        `json:"session_id"`

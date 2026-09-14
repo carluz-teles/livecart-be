@@ -686,7 +686,7 @@ func (s *Service) Create(ctx context.Context, input CreateIntegrationInput) (*Cr
 // estado em que uma integração nasce, para o fluxo de autorização seguir igual.
 //
 // Reusa a linha (e não apaga/recria) porque o id da integração é referenciado
-// por integration_logs e webhook_events; recriar romperia a trilha de auditoria
+// por webhook_events; recriar romperia a trilha de auditoria
 // e invalidaria a URL de webhook que o lojista já cadastrou no ERP, que carrega
 // o id.
 //
@@ -6484,10 +6484,9 @@ func (s *Service) handleProviderError(ctx context.Context, integrationID string,
 		// segundos. Marcar estado permanente a partir de um sinal temporário é
 		// trocar uma pausa por uma parada.
 		//
-		// A visibilidade não se perde: a chamada já vira linha em
-		// integration_logs com status 'error' e a mensagem crua ("HTTP 429: ..."),
-		// que é de onde este diagnóstico saiu. O status da integração descreve se
-		// ela está utilizável, e durante um 429 ela está — daqui a pouco.
+		// A recusa e a espera continuam visíveis nos logs estruturados da API.
+		// O status da integração descreve se ela está utilizável, e durante um
+		// 429 ela está — daqui a pouco.
 		s.anotarEspelho(ctx, "limitado", "")
 		logger.From(ctx, s.logger).Error("provider rate limited",
 			zap.String("integration_id", integrationID),
@@ -6523,8 +6522,8 @@ func (s *Service) noteProviderSuccess(ctx context.Context, integrationID string)
 	}
 }
 
-// LogIntegrationOperation logs an integration operation to the database.
-// This is used by providers via the LogFunc callback.
+// LogIntegrationOperation records operation metadata in the application logger.
+// Payloads and raw provider errors may contain credentials or customer data.
 func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.IntegrationLog) error {
 	// Ponto único por onde passa TODA chamada HTTP de provider (providers/base.go),
 	// e por isso o lugar certo para a integração se curar sozinha: uma resposta
@@ -6532,17 +6531,23 @@ func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.Int
 	if log.Status == "success" {
 		s.noteProviderSuccess(ctx, log.IntegrationID)
 	}
-	return s.repo.CreateLog(
-		ctx,
-		log.IntegrationID,
-		log.EntityType,
-		log.EntityID,
-		log.Direction,
-		log.Status,
-		log.RequestPayload,
-		log.ResponsePayload,
-		log.ErrorMessage,
-	)
+	fields := []zap.Field{
+		zap.String("integration_id", log.IntegrationID),
+		zap.String("entity_type", log.EntityType),
+		zap.String("entity_id", log.EntityID),
+		zap.String("direction", log.Direction),
+		zap.String("status", log.Status),
+		zap.String("method", log.Method),
+		zap.Int("http_status", log.HTTPStatus),
+		zap.Duration("duration", log.Duration),
+	}
+	operationLogger := logger.From(ctx, s.logger)
+	if log.Status == "error" {
+		operationLogger.Warn("integration operation failed", fields...)
+		return nil
+	}
+	operationLogger.Debug("integration operation completed", fields...)
+	return nil
 }
 
 // endStaleLiveSessionsOnce encerra as sessões de LIVE cuja transmissão já saiu
