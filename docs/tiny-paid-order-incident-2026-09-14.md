@@ -53,6 +53,78 @@ O pedido de produção não foi reenviado por esta investigação.
 
 ## Incidente de produção
 
+### Novo reenvio às 15:30: pedido já faturado
+
+O deploy `e51657a` (PR #75) estava ativo. O erro de JSON não reapareceu.
+As tentativas de 14/09 às 15:30 do pedido 1495 chegaram à leitura da Tiny,
+mas o fluxo rejeitava toda origem com nota fiscal ou situação avançada.
+Essa recusa era um erro genérico, convertido em HTTP 500.
+
+A consulta **GET** de produção confirmou pedido **27742 / 848620609**, situação
+**1 (faturada)**, nota associada **848683218**, faturamento em 14/09, produtos
+R$ 245,90, frete R$ 26,08 e total R$ 271,98. O journal foi criado, com
+`prepared=false`, `create_started=false`, `target=null`, sem cancelamento nem
+estorno de contas. A investigação não executou reenvio ou escrita em produção.
+
+O valor total coincidir não comprova equivalência completa: o LiveCart registra
+cinco parcelas, começando em 12/10 (R$ 54,39 nas quatro primeiras e R$ 54,42 na
+última); a Tiny começa em 13/10 (R$ 54,38 e quatro de R$ 54,40), com vencimentos
+posteriores diferentes. A API não devolveu endereço de entrega explícito; o
+endereço cadastral tem o mesmo CEP, mas complemento diferente. CPF e telefone
+conferem após normalização. Não se pode declarar esse exemplo integralmente
+conciliado apenas pelo total e pelo faturamento, nem atribuir os ajustes a um
+operador específico sem histórico de autoria.
+
+Por orientação do usuário, pedidos Tiny já finalizados e **comprovadamente
+corretos** passam a concluir a sincronização local por consulta, sem alterar
+pedido, contato, estoque, nota ou financeiro da Tiny. São conferidos vínculo,
+cliente, endereço, itens, frete, desconto, total, transporte, parcelas e títulos.
+Observações livres de parcelas, capitalização e espaços não são divergências
+comerciais; valores, vencimentos e formas de recebimento continuam validados.
+Títulos recebidos podem comprovar correspondência e nunca são estornados nessa
+via. Títulos ausentes ou divergentes não comprovam conclusão.
+
+A situação real (faturado, preparando_envio, pronto_envio, enviado ou entregue)
+é preservada no vínculo e no histórico, na mesma transação do journal. Não vira
+uma aprovação fictícia nem um novo pedido. Operação com criação ambígua ou
+substituição já em andamento continua pelo mecanismo anterior de recuperação.
+Pedido cancelado ou situação desconhecida não é aceito como venda concluída.
+
+Conflitos verificáveis recebem HTTP 422 com `ERP_RETRY_INVALID_STATE` e os campos
+que precisam de conferência. Falhas técnicas mantêm o contrato de servidor.
+O frontend mostra o motivo da API e atualiza os dados após uma tentativa que
+falhou também; o sucesso informa conciliação, sem afirmar que houve aprovação.
+O prazo dessa chamada passa de 10 para 180 segundos para comportar a fila do ERP,
+sem disparar retentativas automáticas adicionais.
+
+### Cancelados e expirados em “Precisam atenção”
+
+Na consulta da Canto da Art, 14 carrinhos encerrados conservavam status local
+`aberto` no ERP (quatro cancelados e dez expirados). Outros três expirados tinham
+itens com `erp_pending_since`, incluindo os pedidos 1419, 1399 e 1363. Esses
+sinais históricos incluíam 17 casos na triagem independentemente do encerramento.
+Isso não prova que os 14 pedidos ainda estejam abertos na Tiny neste momento.
+
+O filtro compartilhado por lista e contadores passa a manter cancelados e
+expirados na aba Cancelados, mesmo com erro antigo de ERP, item ou envio.
+Somente uma conciliação de pagamento explicitamente pendente
+(`payment_review_required`) preserva a inclusão na triagem. A mudança é de
+classificação: não cancela pedidos no ERP, não apaga falhas nem movimenta estoque.
+
+Testes novos cobrem conciliação sem nenhuma escrita externa, divergências reais,
+falha local e retomada, status/histórico atômicos no pool de produção, preservação
+do marcador após outra cobrança, resposta HTTP 422 versus erro técnico e
+exclusão/inclusão complementar na lista e nos contadores. Nenhuma migration nova.
+
+As quatro suítes afetadas (providers ERP, serviço ERP, integração e pedidos)
+passaram com `-race`, incluindo PostgreSQL descartável no modo de produção.
+O build do backend passou. O fluxo real cartão + PIX na conta de testes passou
+em 149,84s: #118 / 372030444 → #119 / 372032798, com limpeza dos próprios
+títulos/pedidos. Esse ensaio valida o fluxo normal; a nova via sem escritas foi
+validada nos testes de contrato, proteção fiscal e persistência.
+
+### Falhas originais anteriores à publicação
+
 Os três exemplos da Canto da Art estavam pagos no LiveCart, mas falharam na
 conferência comercial antes da aprovação no ERP:
 
@@ -123,11 +195,12 @@ recebimentos. O fluxo estorna os títulos antigos, verifica sua remoção e rela
 a programação correta, conferindo valores e vencimentos. Título lançado não
 significa título recebido. Nenhuma cobrança ou estorno de gateway é executado.
 
-A finalização bloqueia pedidos com nota fiscal, estoque lançado, recebimento
-registrado ou estado incompatível. Relê essas condições antes das etapas
+A via que altera a Tiny bloqueia pedidos com nota fiscal, estoque lançado,
+recebimento registrado ou estado incompatível. Relê essas condições antes das etapas
 sensíveis. As chamadas da Tiny não formam uma transação: alteração simultânea
 pelo lojista ainda pode interromper o fluxo e exigir conciliação. Não se promete
-correção automática de pedidos faturados ou com títulos já recebidos.
+reparo externo automático de pedidos faturados ou com títulos já recebidos;
+quando já correspondem ao checkout, a nova via de consulta conclui apenas o vínculo local.
 
 ## Recuperação e limites
 

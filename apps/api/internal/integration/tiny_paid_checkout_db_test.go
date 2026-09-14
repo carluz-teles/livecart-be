@@ -75,7 +75,8 @@ func TestTinyCheckoutJournalPreservesClaimIsolationAndAtomicBinding(t *testing.T
 	}
 	j := &tinyCheckoutJournal{repo: tinyCheckoutProductionRepository(t), cartID: fx.cartID, storeID: fx.storeID, integrationID: integrationID, sourceID: "1"}
 	op := &providers.TinyCheckoutOperation{ID: uuid.NewString(), CartID: fx.cartID, SourceID: "1", TargetID: "2", TargetNumber: "102", StartedAt: time.Now(),
-		Order: providers.ERPOrder{Checkout: &providers.ERPOrderCheckout{Payments: []providers.ERPInstallment{{AmountCents: 1000, DueDate: time.Now()}}}}}
+		TargetStatus: providers.ERPOrderStatusFaturado,
+		Order:        providers.ERPOrder{Checkout: &providers.ERPOrderCheckout{Payments: []providers.ERPInstallment{{AmountCents: 1000, DueDate: time.Now()}}}}}
 	if err := j.Save(ctx, op); err != nil {
 		t.Fatal(err)
 	}
@@ -105,14 +106,24 @@ func TestTinyCheckoutJournalPreservesClaimIsolationAndAtomicBinding(t *testing.T
 	if err := j.Bind(ctx, op); err != nil {
 		t.Fatal(err)
 	}
-	var cartID, paymentID string
+	var cartID, paymentID, status string
 	var complete bool
-	if err := testPool.QueryRow(ctx, `SELECT c.external_order_id,p.external_order_id,t.completed FROM carts c
- JOIN orders o ON o.cart_id=c.id JOIN order_payments p ON p.order_id=o.id JOIN tiny_checkout_operations t ON t.cart_id=c.id WHERE c.id=$1`, fx.cartID).Scan(&cartID, &paymentID, &complete); err != nil {
+	if err := testPool.QueryRow(ctx, `SELECT c.external_order_id,p.external_order_id,t.completed,c.erp_order_status FROM carts c
+ JOIN orders o ON o.cart_id=c.id JOIN order_payments p ON p.order_id=o.id JOIN tiny_checkout_operations t ON t.cart_id=c.id WHERE c.id=$1`, fx.cartID).Scan(&cartID, &paymentID, &complete, &status); err != nil {
 		t.Fatal(err)
 	}
-	if cartID != "2" || paymentID != "2" || !complete {
+	if cartID != "2" || paymentID != "2" || !complete || status != "faturado" {
 		t.Fatal("partial bind")
+	}
+	if err := j.Bind(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	var observations int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM erp_order_status_events WHERE cart_id=$1 AND status='faturado' AND source='reconciliation'`, fx.cartID).Scan(&observations); err != nil {
+		t.Fatal(err)
+	}
+	if observations != 1 {
+		t.Fatalf("expected one durable status observation, got %d", observations)
 	}
 }
 
@@ -120,6 +131,7 @@ type tinyJournalFinalizer struct {
 	providers.ERPProvider
 	calls         int
 	sourceAnchors []string
+	keepSource    bool
 }
 
 func (p *tinyJournalFinalizer) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheckoutOperation, journal providers.TinyCheckoutJournal) (*providers.OrderResult, error) {
@@ -127,11 +139,42 @@ func (p *tinyJournalFinalizer) FinalizePaidCheckout(ctx context.Context, op *pro
 		p.calls++
 		p.sourceAnchors = append(p.sourceAnchors, op.SourceAnchor)
 		op.TargetID = "test-final-" + op.ID
+		op.Replace = true
+		if p.keepSource {
+			op.TargetID, op.TargetStatus, op.Replace = op.SourceID, providers.ERPOrderStatusFaturado, false
+		}
 		if err := journal.Bind(ctx, op); err != nil {
 			return nil, err
 		}
 	}
 	return &providers.OrderResult{OrderID: op.TargetID}, nil
+}
+
+func TestTinyAdditionalPaymentPreservesReconciledOriginalMarker(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := testPool.Exec(t.Context(), sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`UPDATE products SET external_id='123' WHERE id=$1`, fx.productID)
+	exec(`UPDATE carts SET external_order_id='1',erp_order_state='mutating' WHERE id=$1`, fx.cartID)
+	exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at) VALUES($1,1000,1000,'pix','first',now())`, fx.cartID)
+	svc := &Service{repo: tinyCheckoutProductionRepository(t)}
+	provider := &tinyJournalFinalizer{keepSource: true}
+	if _, err := svc.PrepareTinyPaidOrder(t.Context(), provider, fx.cartID, fx.storeID, "1"); err != nil {
+		t.Fatal(err)
+	}
+	exec(`UPDATE carts SET shipping_cost_cents=900 WHERE id=$1`, fx.cartID)
+	exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at) VALUES($1,900,900,'pix','freight',now())`, fx.cartID)
+	if _, err := svc.PrepareTinyPaidOrder(t.Context(), provider, fx.cartID, fx.storeID, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.sourceAnchors) != 2 || provider.sourceAnchors[1] != "lc-cart-"+fx.cartID {
+		t.Fatalf("read-only reconciliation invented a replacement marker: %v", provider.sourceAnchors)
+	}
 }
 
 func TestTinyAdditionalPaymentKeepsReplacementOwnership(t *testing.T) {

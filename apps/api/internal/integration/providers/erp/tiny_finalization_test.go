@@ -48,6 +48,7 @@ func (j *checkoutTestJournal) resume(t *testing.T) *providers.TinyCheckoutOperat
 }
 
 type checkoutTestTiny struct {
+	writes                                                                                 int
 	rejectCreate                                                                           bool
 	mu                                                                                     sync.Mutex
 	orders                                                                                 map[string]*tinyCheckoutOrder
@@ -60,6 +61,9 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if r.Method != http.MethodGet {
+		f.writes++
+	}
 	write := func(v any) {
 		if err := json.NewEncoder(w).Encode(v); err != nil {
 			t.Error(err)

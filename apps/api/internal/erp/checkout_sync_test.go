@@ -265,6 +265,28 @@ func TestTinyFinalizationRoutingAndFailures(t *testing.T) {
 	}
 }
 
+func TestRetryAlreadyConfirmedTinyInvoiceUsesReadOnlyReconciliation(t *testing.T) {
+	svc, repo, base, collab := montar(map[string]int{"ext-p1": 10})
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	if err := svc.EnsureERPOrderForCart(t.Context(), "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ConfirmERPOrderPayment(t.Context(), "cart-1", "loja-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	repo.definirStatusERP("cart-1", "faturado")
+	beforeStatuses, beforeItems, beforePayments := base.situacoes, base.puts, base.pagamentos
+	collab.erp = &finalizedCheckoutProvider{base}
+	finalizer := &finalizedCheckoutCollaborator{colabSimulado: collab}
+	svc.collab = finalizer
+	if err := svc.RetryERPFinalisation(t.Context(), "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	if finalizer.calls != 1 || repo.carrinho("cart-1").state != OrderStateConfirmed || base.situacoes != beforeStatuses || base.puts != beforeItems || base.pagamentos != beforePayments {
+		t.Fatal("confirmed invoice retry bypassed reconciliation or ran legacy writes")
+	}
+}
+
 type tinyScheduleProvider struct{ *erpComParcelas }
 
 func (p *tinyScheduleProvider) Name() providers.ProviderName { return providers.ProviderTiny }
