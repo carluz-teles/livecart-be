@@ -26,6 +26,13 @@ type BaseProvider struct {
 	RateLimiter   ratelimit.RateLimiter
 }
 
+// RequestNotSentError distinguishes a local failure before HTTP dispatch from
+// an ambiguous network failure after a non-idempotent request may have arrived.
+type RequestNotSentError struct{ Err error }
+
+func (e *RequestNotSentError) Error() string { return e.Err.Error() }
+func (e *RequestNotSentError) Unwrap() error { return e.Err }
+
 // LogFunc is a function that logs integration operations.
 type LogFunc func(ctx context.Context, log IntegrationLog) error
 
@@ -92,7 +99,7 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 				zap.String("method", method), zap.Duration("quota_wait", elapsed), zap.Error(waitErr))
 		}
 		if err := waitErr; err != nil {
-			return nil, nil, err
+			return nil, nil, &RequestNotSentError{Err: err}
 		}
 	}
 
@@ -102,13 +109,13 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 	if body != nil {
 		reqBody, err = json.Marshal(body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("marshaling request body: %w", err)
+			return nil, nil, &RequestNotSentError{Err: fmt.Errorf("marshaling request body: %w", err)}
 		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating request: %w", err)
+		return nil, nil, &RequestNotSentError{Err: fmt.Errorf("creating request: %w", err)}
 	}
 
 	req.Header.Set("Content-Type", "application/json")

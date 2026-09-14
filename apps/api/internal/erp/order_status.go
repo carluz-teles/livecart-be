@@ -417,7 +417,10 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 		return fmt.Errorf("loading ERP order state for retry: %w", err)
 	}
 	if orderState.State == OrderStateConfirmed {
-		return s.OnCartPaidBlingCheckout(ctx, cartID, storeID)
+		if err := s.OnCartPaidBlingCheckout(ctx, cartID, storeID); err != nil {
+			return err
+		}
+		return s.OnCartPaidTinyCheckout(ctx, cartID, storeID)
 	}
 	st, err := s.repo.GetCartERPFinalisationStatus(ctx, cartID)
 	if err != nil {

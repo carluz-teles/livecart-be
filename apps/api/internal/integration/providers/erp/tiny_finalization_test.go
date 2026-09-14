@@ -1,0 +1,386 @@
+package erp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/ratelimit"
+)
+
+type checkoutTestJournal struct {
+	raw          []byte
+	bindFailures int
+	bound        string
+}
+
+func (j *checkoutTestJournal) Save(ctx context.Context, op *providers.TinyCheckoutOperation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var err error
+	j.raw, err = json.Marshal(op)
+	return err
+}
+func (j *checkoutTestJournal) Bind(ctx context.Context, op *providers.TinyCheckoutOperation) error {
+	if j.bindFailures > 0 {
+		j.bindFailures--
+		return errors.New("database unavailable before bind")
+	}
+	j.bound = op.TargetID
+	op.Completed = true
+	return j.Save(ctx, op)
+}
+func (j *checkoutTestJournal) resume(t *testing.T) *providers.TinyCheckoutOperation {
+	t.Helper()
+	var op providers.TinyCheckoutOperation
+	if err := json.Unmarshal(j.raw, &op); err != nil {
+		t.Fatal(err)
+	}
+	return &op
+}
+
+type checkoutTestTiny struct {
+	rejectCreate                                                                           bool
+	mu                                                                                     sync.Mutex
+	orders                                                                                 map[string]*tinyCheckoutOrder
+	accounts                                                                               map[string][]tinyReceivable
+	posts, cancels, reversals                                                              int
+	lostCreate, lostCancel, stockLocked, invoiceAfterCreate, received, readAccountsFailure bool
+}
+
+func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	write := func(v any) {
+		if err := json.NewEncoder(w).Encode(v); err != nil {
+			t.Error(err)
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/contatos/") && r.Method == http.MethodPut {
+		w.WriteHeader(204)
+		return
+	}
+	if r.URL.Path == "/formas-recebimento" {
+		write(map[string]any{"itens": []any{map[string]any{"id": 7, "nome": "Pix", "situacao": "1"}}})
+		return
+	}
+	if r.URL.Path == "/contas-receber" {
+		if f.readAccountsFailure {
+			w.WriteHeader(503)
+			return
+		}
+		accounts := f.accounts[r.URL.Query().Get("idVenda")]
+		if accounts == nil {
+			accounts = []tinyReceivable{}
+		}
+		write(map[string]any{"itens": accounts})
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/recebimentos") {
+		if f.received {
+			write([]any{map[string]any{"id": 55, "valorPago": 1}})
+		} else {
+			write([]any{})
+		}
+		return
+	}
+	if r.URL.Path == "/pedidos" && r.Method == http.MethodGet {
+		items := []any{}
+		for _, o := range f.orders {
+			items = append(items, map[string]any{"id": o.ID, "numeroOrdemCompra": o.Anchor})
+		}
+		write(map[string]any{"itens": items})
+		return
+	}
+	if r.URL.Path == "/pedidos" && r.Method == http.MethodPost {
+		if f.rejectCreate {
+			f.rejectCreate = false
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		f.posts++
+		var data map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			t.Fatal(err)
+		}
+		order := &tinyCheckoutOrder{ID: 2, Number: "102", Status: 0}
+		body, _ := json.Marshal(data)
+		if err := json.Unmarshal(body, order); err != nil {
+			t.Fatal(err)
+		}
+		order.Customer = f.orders["1"].Customer
+		order.Total = 49.90 + order.Freight - order.Discount
+		for i := range order.Payment.Installments {
+			order.Payment.Installments[i].Method.Name = "Pix"
+		}
+		f.orders["2"] = order
+		if f.invoiceAfterCreate {
+			f.orders["1"].InvoiceID = 333
+		}
+		if f.lostCreate {
+			f.lostCreate = false
+			w.WriteHeader(502)
+			return
+		}
+		w.WriteHeader(201)
+		write(map[string]any{"id": 2, "numeroPedido": "102"})
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 2 || parts[0] != "pedidos" {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(404)
+		return
+	}
+	id := parts[1]
+	order := f.orders[id]
+	if order == nil {
+		w.WriteHeader(404)
+		return
+	}
+	if len(parts) == 2 && r.Method == http.MethodGet {
+		write(order)
+		return
+	}
+	if len(parts) == 2 && r.Method == http.MethodPut {
+		var update tinyCheckoutOrder
+		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+			t.Fatal(err)
+		}
+		order.Payment = update.Payment
+		w.WriteHeader(204)
+		return
+	}
+	if len(parts) == 3 {
+		switch parts[2] {
+		case "itens":
+			if f.stockLocked || order.InvoiceID != 0 {
+				w.WriteHeader(400)
+				write(map[string]any{"detalhes": []any{map[string]any{"campo": "pedido.motivosBloqueio[0]", "mensagem": "estoque lançado"}}})
+				return
+			}
+			if len(f.accounts[id]) > 0 {
+				w.WriteHeader(400)
+				write(map[string]any{"detalhes": []any{map[string]any{"campo": "pedido.motivosBloqueio[0]", "mensagem": "contas lançadas"}}})
+				return
+			}
+		case "situacao":
+			var in struct {
+				Status int `json:"situacao"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				t.Fatal(err)
+			}
+			if in.Status == 2 {
+				f.cancels++
+				if f.orders["2"] == nil {
+					t.Error("old reservation cancelled before replacement existed")
+				}
+			}
+			order.Status = in.Status
+			if f.lostCancel {
+				f.lostCancel = false
+				w.WriteHeader(502)
+				return
+			}
+		case "estornar-contas":
+			f.reversals++
+			f.accounts[id] = nil
+		case "lancar-contas":
+			for i, p := range order.Payment.Installments {
+				f.accounts[id] = append(f.accounts[id], tinyReceivable{ID: int64(100 + i), Status: "aberto", DueDate: p.Date, Value: p.Value, Balance: p.Value})
+			}
+		default:
+			t.Errorf("unexpected mutation %s", r.URL.Path)
+		}
+		w.WriteHeader(204)
+		return
+	}
+	w.WriteHeader(404)
+}
+
+type checkoutQuotaFailure struct {
+	ratelimit.RateLimiter
+	fail   bool
+	cancel context.CancelFunc
+}
+
+func (q *checkoutQuotaFailure) WaitRequest(_ context.Context, stringMethod string) error {
+	if q.fail && stringMethod == http.MethodPost {
+		q.fail = false
+		if q.cancel != nil {
+			q.cancel()
+		}
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+func (q *checkoutQuotaFailure) UpdateFromHeaders(int, int) {}
+
+func TestTinyFinalizationRetriesKnownRejectionsWithoutAmbiguousCreate(t *testing.T) {
+	for _, scenario := range []string{"quota before dispatch", "cancelled during quota", "HTTP 429"} {
+		t.Run(scenario, func(t *testing.T) {
+			provider, fake, op := checkoutFinalizationFixture(t)
+			journal := &checkoutTestJournal{}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			if scenario == "HTTP 429" {
+				fake.rejectCreate = true
+			} else {
+				quota := &checkoutQuotaFailure{fail: true}
+				if scenario == "cancelled during quota" {
+					quota.cancel = cancel
+				}
+				provider.RateLimiter = quota
+			}
+			if _, err := provider.FinalizePaidCheckout(ctx, op, journal); err == nil {
+				t.Fatal("expected rejection")
+			}
+			restored := journal.resume(t)
+			if restored.CreateStarted || fake.posts != 0 {
+				t.Fatal("rejected request left an ambiguous creation")
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), restored, journal); err != nil {
+				t.Fatal(err)
+			}
+			if fake.posts != 1 || fake.cancels != 1 {
+				t.Fatal("recovery duplicated order or cancellation")
+			}
+		})
+	}
+}
+
+func checkoutFinalizationFixture(t *testing.T) (*Tiny, *checkoutTestTiny, *providers.TinyCheckoutOperation) {
+	t.Helper()
+	checkout := &providers.ERPOrderCheckout{Customer: providers.ERPContactInput{Name: "Comprador Teste"}, FreightCents: 1859, DiscountCents: 250,
+		Payments: []providers.ERPInstallment{{AmountCents: 6599, DueDate: time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC), Method: "pix", Note: "Pago teste"}}}
+	op := &providers.TinyCheckoutOperation{ID: "operation-1", CartID: "cart-1", SourceID: "1", StartedAt: time.Now(), Order: providers.ERPOrder{
+		ExternalID: "cart-1-paid-operation-1", ContactID: "8", Checkout: checkout, TotalAmount: 6599, Items: []providers.ERPOrderItem{{ProductID: "20", Quantity: 1, UnitPrice: 4990}}}}
+	source := &tinyCheckoutOrder{ID: 1, Number: "101", Anchor: "lc-cart-cart-1", Total: 49.90}
+	source.Customer.Name = "Comprador Teste"
+	body := []byte(`{"itens":[{"produto":{"id":20},"quantidade":1,"valorUnitario":49.9}]}`)
+	if err := json.Unmarshal(body, source); err != nil {
+		t.Fatal(err)
+	}
+	fake := &checkoutTestTiny{orders: map[string]*tinyCheckoutOrder{"1": source}, accounts: map[string][]tinyReceivable{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fake.serve(t, w, r) }))
+	t.Cleanup(srv.Close)
+	return newTinyAgainst(t, srv), fake, op
+}
+
+func TestTinyFinalizationResumesWithoutDuplicateOrReservationGap(t *testing.T) {
+	for _, failure := range []string{"none", "lost create response", "lost cancel response", "database bind"} {
+		t.Run(failure, func(t *testing.T) {
+			provider, fake, op := checkoutFinalizationFixture(t)
+			journal := &checkoutTestJournal{}
+			fake.lostCreate = failure == "lost create response"
+			fake.lostCancel = failure == "lost cancel response"
+			if failure == "database bind" {
+				journal.bindFailures = 1
+			}
+			result, err := provider.FinalizePaidCheckout(t.Context(), op, journal)
+			if failure != "none" {
+				if err == nil {
+					t.Fatal("failure was not propagated")
+				}
+				result, err = provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.OrderID != "2" || journal.bound != "2" {
+				t.Fatalf("wrong binding: %+v", result)
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal); err != nil {
+				t.Fatal(err)
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if fake.posts != 1 || fake.cancels != 1 || fake.orders["1"].Status != 2 {
+				t.Fatalf("posts=%d cancels=%d", fake.posts, fake.cancels)
+			}
+		})
+	}
+}
+
+func TestTinyFinalizationProtectsFiscalStockAndReceivedAccounts(t *testing.T) {
+	for _, scenario := range []string{"invoice", "stock launched", "stock and accounts launched", "partially received", "receipt despite full balance", "invoice races creation", "financial read unavailable"} {
+		t.Run(scenario, func(t *testing.T) {
+			provider, fake, op := checkoutFinalizationFixture(t)
+			journal := &checkoutTestJournal{}
+			switch scenario {
+			case "invoice":
+				fake.orders["1"].InvoiceID = 99
+			case "stock launched":
+				fake.stockLocked = true
+			case "stock and accounts launched":
+				fake.stockLocked = true
+				fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", Value: 49.9, Balance: 49.9}}
+			case "partially received":
+				fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "parcial", Value: 49.9, Balance: 20}}
+			case "receipt despite full balance":
+				fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", Value: 49.9, Balance: 49.9}}
+				fake.received = true
+			case "invoice races creation":
+				fake.invoiceAfterCreate = true
+			case "financial read unavailable":
+				fake.readAccountsFailure = true
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), op, journal); err == nil {
+				t.Fatal("protected order accepted")
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if fake.cancels != 0 || fake.reversals != 0 || journal.bound != "" {
+				t.Fatal("protected order mutated or bound")
+			}
+		})
+	}
+}
+
+func TestTinyFinalizationRebuildsOnlyOpenReceivables(t *testing.T) {
+	provider, fake, op := checkoutFinalizationFixture(t)
+	journal := &checkoutTestJournal{bindFailures: 1}
+	fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", DueDate: "2026-09-14", Value: 49.9, Balance: 49.9}}
+	if _, err := provider.FinalizePaidCheckout(t.Context(), op, journal); err == nil {
+		t.Fatal("bind failure missing")
+	}
+	if _, err := provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.reversals != 1 || len(fake.accounts["1"]) != 0 || !tinyReceivablesMatch(fake.accounts["2"], op.Order.Checkout.Payments) {
+		t.Fatalf("wrong receivables: %+v", fake.accounts)
+	}
+}
+
+func TestTinyPaidCardSchedulePreservesTotalAndReleaseDate(t *testing.T) {
+	paid := time.Date(2026, 9, 14, 15, 0, 0, 0, time.UTC)
+	release := paid.AddDate(0, 0, 2)
+	got, err := TinyPaidInstallments(&providers.ERPOrderPayment{Method: "credit_card", Amount: 6599, Installments: 2, PaidAt: paid, MoneyReleaseDate: &release, PaymentID: "card-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].AmountCents != 3299 || got[1].AmountCents != 3300 || got[0].DueDate.Format("2006-01-02") != "2026-09-16" || !strings.Contains(got[1].Note, "card-test") {
+		t.Fatalf("schedule %+v", got)
+	}
+}
+
+func TestTinyReceivableMismatchCannotReportSuccessfulCheckout(t *testing.T) {
+	provider, fake, op := checkoutFinalizationFixture(t)
+	fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", DueDate: "2026-09-14", Value: 49.9, Balance: 49.9}}
+	if err := provider.SetOrderInstallments(t.Context(), "1", op.Order.Checkout.Payments); err == nil {
+		t.Fatal("stale financial title ignored")
+	}
+}

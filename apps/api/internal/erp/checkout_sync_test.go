@@ -206,3 +206,120 @@ func TestAdditionalBlingPaymentRespectsFirstPaymentAndBusyOrInvoicedOrders(t *te
 		})
 	}
 }
+
+// The replacement flow belongs to providers that implement it. Merely using
+// an integration collaborator must not divert other providers from their flow.
+type finalizedCheckoutProvider struct{ *erpSimulado }
+
+func (p *finalizedCheckoutProvider) FinalizePaidCheckout(context.Context, *providers.TinyCheckoutOperation, providers.TinyCheckoutJournal) (*providers.OrderResult, error) {
+	panic("the integration collaborator owns the durable operation")
+}
+
+type finalizedCheckoutCollaborator struct {
+	*colabSimulado
+	calls   int
+	failure error
+}
+
+func (c *finalizedCheckoutCollaborator) PrepareTinyPaidOrder(_ context.Context, _ providers.ERPProvider, _, _, source string) (string, error) {
+	c.calls++
+	return source, c.failure
+}
+
+func TestTinyFinalizationRoutingAndFailures(t *testing.T) {
+	for _, scenario := range []string{"tiny", "bling", "failure", "missing collaborator"} {
+		t.Run(scenario, func(t *testing.T) {
+			svc, repo, base, collab := montar(map[string]int{"ext-p1": 10})
+			if scenario == "bling" {
+				repo.provider = "bling"
+			}
+			repo.criarCarrinho("cart-1", item("p1", 1))
+			if err := svc.EnsureERPOrderForCart(t.Context(), "cart-1", "loja-1"); err != nil {
+				t.Fatal(err)
+			}
+			collab.erp = &finalizedCheckoutProvider{base}
+			finalizer := &finalizedCheckoutCollaborator{colabSimulado: collab}
+			if scenario != "missing collaborator" {
+				svc.collab = finalizer
+			}
+			if scenario == "failure" {
+				finalizer.failure = errors.New("checkpoint unavailable")
+			}
+			err := svc.ConfirmERPOrderPayment(t.Context(), "cart-1", "loja-1", nil)
+			if scenario == "failure" || scenario == "missing collaborator" {
+				if err == nil || repo.carrinho("cart-1").state != OrderStateOpen || base.situacoes != 0 || base.puts != 0 {
+					t.Fatalf("failed finalization leaked into legacy writes: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "tiny" && (finalizer.calls != 1 || base.situacoes != 0 || base.puts != 0) {
+				t.Fatal("Tiny finalization ran legacy writes")
+			}
+			if scenario == "bling" && (finalizer.calls != 0 || base.situacoes != 1) {
+				t.Fatal("Bling was diverted into Tiny flow")
+			}
+		})
+	}
+}
+
+type tinyScheduleProvider struct{ *erpComParcelas }
+
+func (p *tinyScheduleProvider) Name() providers.ProviderName { return providers.ProviderTiny }
+
+type tinyScheduleCollaborator struct {
+	*colabSimulado
+	installments []providers.ERPInstallment
+}
+
+func (c *tinyScheduleCollaborator) LoadTinyPaidInstallments(context.Context, string, string) ([]providers.ERPInstallment, error) {
+	return c.installments, nil
+}
+
+func TestTinyRecompositionPreservesCardScheduleAndOutstandingBalance(t *testing.T) {
+	svc, repo, base := montarParcelas(map[string]int{"ext-p1": 20})
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	if err := svc.EnsureERPOrderForCart(t.Context(), "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	pagar(t, svc, repo, "cart-1", 4000)
+	base.usarForcado, base.totalForcado = true, 6000
+	collab := svc.collab.(*colabSimulado)
+	collab.erp = &tinyScheduleProvider{base}
+	first := time.Now().AddDate(0, 1, 0)
+	second := first.AddDate(0, 1, 0)
+	svc.collab = &tinyScheduleCollaborator{colabSimulado: collab, installments: []providers.ERPInstallment{{AmountCents: 2000, DueDate: first, Method: "credit_card"}, {AmountCents: 2000, DueDate: second, Method: "credit_card"}}}
+	split, err := svc.RecomporParcelasDoPedidoPago(t.Context(), "cart-1", "loja-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installments := base.parcelas[repo.carrinho("cart-1").externalOrderID]
+	if split.SaldoCents != 2000 || len(installments) != 3 || !installments[0].DueDate.Equal(first) || !installments[1].DueDate.Equal(second) || installments[2].AmountCents != 2000 || installments[2].Method != "" {
+		t.Fatalf("schedule lost: %+v", installments)
+	}
+}
+
+func TestTinyAdditionalPaymentResumesAfterSourceCancellation(t *testing.T) {
+	svc, repo, base, collab := montar(map[string]int{"ext-p1": 10})
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	if err := svc.EnsureERPOrderForCart(t.Context(), "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ConfirmERPOrderPayment(t.Context(), "cart-1", "loja-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	repo.mu.Lock()
+	repo.carrinhos["cart-1"].statusERP = "cancelado"
+	repo.mu.Unlock()
+	collab.erp = &finalizedCheckoutProvider{base}
+	finalizer := &finalizedCheckoutCollaborator{colabSimulado: collab}
+	svc.collab = finalizer
+	if err := svc.OnCartPaidTinyCheckout(t.Context(), "cart-1", "loja-1"); err != nil {
+		t.Fatal(err)
+	}
+	if finalizer.calls != 1 || repo.carrinho("cart-1").state != OrderStateConfirmed {
+		t.Fatal("cancelled reservation prevented checkpoint recovery")
+	}
+}

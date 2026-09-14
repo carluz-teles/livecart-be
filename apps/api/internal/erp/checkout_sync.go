@@ -14,6 +14,10 @@ import (
 	"livecart/apps/api/lib/logger"
 )
 
+type tinyPaidOrderPreparer interface {
+	PrepareTinyPaidOrder(context.Context, providers.ERPProvider, string, string, string) (string, error)
+}
+
 func (s *Service) syncPaidCheckout(ctx context.Context, provider providers.ERPProvider, cartID, storeID, externalOrderID string) (bool, error) {
 	syncer, ok := provider.(providers.ERPOrderCheckoutSyncer)
 	if !ok {
@@ -39,7 +43,15 @@ func (s *Service) syncPaidCheckout(ctx context.Context, provider providers.ERPPr
 // contains the gateway payment ID. The first payment is still finalized by
 // order.paid; later payments do not create a second immutable Order and must
 // refresh the already confirmed Bling checkout through this separate hook.
-func (s *Service) OnCartPaidBlingCheckout(ctx context.Context, cartID, storeID string) (resultErr error) {
+func (s *Service) OnCartPaidBlingCheckout(ctx context.Context, cartID, storeID string) error {
+	return s.onCartPaidCheckout(ctx, cartID, storeID, string(providers.ProviderBling))
+}
+
+func (s *Service) OnCartPaidTinyCheckout(ctx context.Context, cartID, storeID string) error {
+	return s.onCartPaidCheckout(ctx, cartID, storeID, string(providers.ProviderTiny))
+}
+
+func (s *Service) onCartPaidCheckout(ctx context.Context, cartID, storeID, expectedProvider string) (resultErr error) {
 	integration, err := s.repo.GetActiveERP(ctx, storeID)
 	if errors.Is(err, pgx.ErrNoRows) || httpx.IsNotFound(err) {
 		return nil
@@ -47,7 +59,7 @@ func (s *Service) OnCartPaidBlingCheckout(ctx context.Context, cartID, storeID s
 	if err != nil {
 		return fmt.Errorf("loading ERP for additional checkout payment: %w", err)
 	}
-	if integration.Provider != string(providers.ProviderBling) {
+	if integration.Provider != expectedProvider {
 		return nil
 	}
 	ctx = logger.WithStore(ctx, storeID, "")
@@ -79,7 +91,12 @@ func (s *Service) OnCartPaidBlingCheckout(ctx context.Context, cartID, storeID s
 	if state.ExternalOrderID == "" {
 		return ErrCartNotConverted
 	}
-	if closed, reason := pedidoJaFaturado(state.OrderStatus); closed {
+	// Tiny may have cancelled the old reservation and then lost the database
+	// connection before binding its replacement. Let the durable finalizer
+	// verify that specific recovery; a cancelled source without such a recorded
+	// operation is still rejected by the provider before any mutation.
+	tinyCancelledSource := expectedProvider == string(providers.ProviderTiny) && state.OrderStatus == string(providers.ERPOrderStatusCancelado)
+	if closed, reason := pedidoJaFaturado(state.OrderStatus); closed && !tinyCancelledSource {
 		s.collab.MarkFinalisationFailed(ctx, cartID, "pagamento adicional exige reconciliação no ERP: "+reason)
 		return fmt.Errorf("additional payment requires reconciliation: %s: %w", reason, ErrPedidoFaturado)
 	}
@@ -110,6 +127,16 @@ func (s *Service) OnCartPaidBlingCheckout(ctx context.Context, cartID, storeID s
 	provider, err := s.collab.ResolveProvider(ctx, integration)
 	if err != nil {
 		return fmt.Errorf("resolving additional checkout provider: %w", err)
+	}
+	if expectedProvider == string(providers.ProviderTiny) {
+		prepare, ok := s.collab.(tinyPaidOrderPreparer)
+		if !ok {
+			return fmt.Errorf("tiny checkout finalizer not configured")
+		}
+		return s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+			_, err := prepare.PrepareTinyPaidOrder(ctx, provider, cartID, storeID, state.ExternalOrderID)
+			return err
+		})
 	}
 	handled, err := s.syncPaidCheckout(ctx, provider, cartID, storeID, state.ExternalOrderID)
 	if err != nil {

@@ -860,7 +860,8 @@ func (s *Service) cartGrid(ctx context.Context, cartID string) ([]providers.ERPO
 // =============================================================================
 
 // ConfirmERPOrderPayment fecha a venda: grava as parcelas reais do gateway e
-// aprova o pedido. Duas escritas, zero movimentação de estoque.
+// aprova o pedido. Na Tiny, pode substituir a reserva por um pedido completo.
+// O fluxo de finalização não lança nem estorna estoque físico.
 //
 // A reserva feita no primeiro comentário segue de pé e vira baixa física quando
 // o lojista fatura — nós não lançamos. Devolve ErrCartNotConverted quando o
@@ -991,31 +992,41 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		}
 	}()
 
-	// A GRADE É RECONCILIADA ANTES DE APROVAR. Sempre.
-	//
-	// É a rede que o resto do sistema não consegue ser: a mutação converge por
-	// releitura, mas há um vão entre a última leitura e a liberação do estado, e
-	// um comentário que caia nele fica só no carrinho. Numa live simulada de 15
-	// compradores isso foi uma unidade em quinze.
-	//
-	// No pagamento, essa diferença deixa de ser aceitável: o pedido que o
-	// comprador paga tem de ser o carrinho que ele montou. Custa UM PUT por
-	// VENDA — não por comentário —, porque daqui não dá para saber o que o pedido
-	// tem sem perguntar, e perguntar custaria o mesmo que escrever.
-	if _, recErr := s.applyCartGridToOrder(ctx, cartID, storeID, fresh.ExternalOrderID, nil); recErr != nil {
-		s.collab.MarkFinalisationFailed(ctx, cartID, "reconciliação da grade antes de aprovar falhou: "+recErr.Error())
-		return fmt.Errorf("reconciling grid before approving: %w", recErr)
-	}
-
 	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
 	if err != nil {
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
-
-	checkoutSynced, checkoutErr := s.syncPaidCheckout(ctx, erpProvider, cartID, storeID, fresh.ExternalOrderID)
-	if checkoutErr != nil {
-		s.collab.MarkFinalisationFailed(ctx, cartID, "sincronização dos valores do checkout falhou: "+checkoutErr.Error())
-		return fmt.Errorf("synchronizing paid checkout before approval: %w", checkoutErr)
+	checkoutSynced := false
+	tinyFinalized := false
+	if _, supportsFinalization := erpProvider.(providers.TinyPaidCheckoutFinalizer); erpIntegration.Provider == "tiny" && supportsFinalization {
+		prepare, ok := s.collab.(tinyPaidOrderPreparer)
+		if !ok {
+			return fmt.Errorf("tiny checkout finalizer not configured")
+		}
+		var targetID string
+		err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+			var err error
+			targetID, err = prepare.PrepareTinyPaidOrder(ctx, erpProvider, cartID, storeID, fresh.ExternalOrderID)
+			return err
+		})
+		if err != nil {
+			s.collab.MarkFinalisationFailed(ctx, cartID, "finalização Tiny pendente: "+err.Error())
+			return fmt.Errorf("finalizing Tiny paid checkout: %w", err)
+		}
+		fresh.ExternalOrderID, checkoutSynced, tinyFinalized = targetID, true, true
+	} else {
+		// Existing provider flow. Tiny's replacement path verifies its own grid
+		// and must not run the legacy automatic stock reversal first.
+		if _, err := s.applyCartGridToOrder(ctx, cartID, storeID, fresh.ExternalOrderID, nil); err != nil {
+			s.collab.MarkFinalisationFailed(ctx, cartID, "reconciliação da grade antes de aprovar falhou: "+err.Error())
+			return fmt.Errorf("reconciling grid before approving: %w", err)
+		}
+		var err error
+		checkoutSynced, err = s.syncPaidCheckout(ctx, erpProvider, cartID, storeID, fresh.ExternalOrderID)
+		if err != nil {
+			s.collab.MarkFinalisationFailed(ctx, cartID, "sincronização dos valores do checkout falhou: "+err.Error())
+			return fmt.Errorf("synchronizing paid checkout before approval: %w", err)
+		}
 	}
 
 	if status != nil && !checkoutSynced {
@@ -1052,31 +1063,34 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		}
 	}
 
-	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
-		return erpProvider.SetOrderSituacao(ctx, fresh.ExternalOrderID, providers.SituacaoAprovada)
-	}); err != nil {
-		// Um ERP que RECUSA a transição não pode travar a venda.
-		//
-		// É o caso da conta Bling cujos ids de situação não batem com a tabela
-		// semeada: o adapter se recusa a escrever um id que pode significar
-		// outra coisa, e está certo. Mas nesse ponto o pedido já existe no ERP,
-		// com os itens e o pagamento gravados — a venda ESTÁ lá. Abortar aqui
-		// deixaria o pior estado possível: pedido correto no ERP do lojista e
-		// carrinho eternamente "não confirmado" no LiveCart.
-		//
-		// A situação que fica é "Em aberto", que continua reservando a peça
-		// (medido em 30/08/2026). Fica ruidoso no log de propósito: é
-		// configuração faltando, não um erro do dia a dia.
-		if errors.Is(err, providers.ErrOperationNotSupported) {
-			logger.From(ctx, s.logger).Error("o ERP recusou mudar a situação do pedido pago; a venda segue confirmada no LiveCart",
-				zap.String("cart_id", cartID),
-				zap.String("external_order_id", fresh.ExternalOrderID),
-				zap.Error(err),
-			)
-		} else {
-			s.collab.MarkFinalisationFailed(ctx, cartID, "aprovação do pedido falhou: "+err.Error())
-			return fmt.Errorf("approving order: %w", err)
+	if !tinyFinalized {
+		if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+			return erpProvider.SetOrderSituacao(ctx, fresh.ExternalOrderID, providers.SituacaoAprovada)
+		}); err != nil {
+			// Um ERP que RECUSA a transição não pode travar a venda.
+			//
+			// É o caso da conta Bling cujos ids de situação não batem com a tabela
+			// semeada: o adapter se recusa a escrever um id que pode significar
+			// outra coisa, e está certo. Mas nesse ponto o pedido já existe no ERP,
+			// com os itens e o pagamento gravados — a venda ESTÁ lá. Abortar aqui
+			// deixaria o pior estado possível: pedido correto no ERP do lojista e
+			// carrinho eternamente "não confirmado" no LiveCart.
+			//
+			// A situação que fica é "Em aberto", que continua reservando a peça
+			// (medido em 30/08/2026). Fica ruidoso no log de propósito: é
+			// configuração faltando, não um erro do dia a dia.
+			if errors.Is(err, providers.ErrOperationNotSupported) {
+				logger.From(ctx, s.logger).Error("o ERP recusou mudar a situação do pedido pago; a venda segue confirmada no LiveCart",
+					zap.String("cart_id", cartID),
+					zap.String("external_order_id", fresh.ExternalOrderID),
+					zap.Error(err),
+				)
+			} else {
+				s.collab.MarkFinalisationFailed(ctx, cartID, "aprovação do pedido falhou: "+err.Error())
+				return fmt.Errorf("approving order: %w", err)
+			}
 		}
+
 	}
 
 	won, err = s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateMutating, OrderStateConfirmed)

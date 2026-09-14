@@ -891,6 +891,10 @@ type ERPOrder struct {
 	Observation string         `json:"observation,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 
+	// Checkout carries the verified paid snapshot when replacing a Tiny reservation.
+	// Other providers keep their existing creation contract.
+	Checkout *ERPOrderCheckout `json:"checkout,omitempty"`
+
 	// ShippingAddress is the delivery address. When set, the provider ships it
 	// as enderecoEntrega (or equivalent) on the order.
 	ShippingAddress *ERPShippingAddress `json:"shipping_address,omitempty"`
