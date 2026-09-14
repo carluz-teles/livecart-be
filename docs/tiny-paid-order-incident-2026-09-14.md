@@ -53,6 +53,83 @@ O pedido de produção não foi reenviado por esta investigação.
 
 ## Incidente de produção
 
+### Reenvios das 16:33 após o PR #77: concluir os pedidos existentes
+
+O deploy `92e64b1` estava ativo. O pedido 1492 foi reenviado às 19:33:02 UTC;
+o 1487 (`cf5623d6-3ecf-4a0c-a98c-642a87e55086`) às 19:33:18 e 19:33:22 UTC.
+Ambos retornaram **422**, com `despesas adicionais do pedido`. A correção do
+HTTP 500 havia sido publicada, mas a regra continuava impedindo a conclusão.
+
+A comparação completa confirmou, nos dois exemplos, correspondência de nome,
+documento, email, telefone, endereço cadastral, produtos, quantidades, preços,
+transportadora, frete e parcela PIX da venda. O impedimento era a representação
+do desconto/arredondamento e a exigência de que vencimento financeiro fosse
+idêntico à data do PIX:
+
+| Campo | 1492 / Tiny 848620337 | 1487 / Tiny 848620120 |
+| --- | --- | --- |
+| Produtos | R$ 55,90 | R$ 544,70 |
+| Frete | R$ 15,16 | R$ 30,57 |
+| Total Tiny = pago LiveCart | R$ 68,27 | R$ 548,04 |
+| Desconto bruto retornado pela Tiny | 2.795 | 27.235000000000003 |
+| Outras despesas Tiny | 0.01 | 0.01 |
+| Desconto líquido LiveCart | 279 centavos | 2723 centavos |
+| Parcela PIX na venda e no LiveCart | 12/09, R$ 68,27 | 13/09, R$ 548,04 |
+| Título a receber | 848668883, aberto, 14/09 | 848670098, aberto, 14/09 |
+
+O centavo compensa a diferença de arredondamento do desconto, preservando
+exatamente o total pago. Não é justificativa para excluir uma linha financeira
+ou criar outro pedido. A comparação anterior do desconto isolado foi restritiva
+demais para esses casos. O vencimento de uma conta a receber é um campo separado
+da parcela que registra o PIX; sua alteração é documentada em
+[Atualizar conta a receber](https://api-docs.erp.olist.com/api-reference/contas-a-receber/atualizar-conta-a-receber).
+
+**Regra implementada:**
+
+- Antes de substituir uma reserva, conferir se a venda já está completa.
+- Aceitar, somente nessa conferência, despesa de exatamente um centavo que
+  compense o desconto arredondado, com desconto líquido e total pago idênticos.
+  Não existe tolerância de um centavo no total. Outros ajustes permanecem
+  protegidos; o caminho de criação continua exigindo os valores enviados.
+- Preservar o vencimento de um único título PIX com ID, valor e situação
+  verificáveis. A parcela da venda continua exigindo data, valor e método do
+  pagamento. Parcelamento de cartão, pagamentos mistos, título ausente,
+  duplicado, cancelado ou com valor diferente não recebem essa exceção.
+- Para uma venda correta ainda aberta e sem nota, enviar apenas a aprovação
+  e reler pedido/financeiro antes do vínculo local. Se já estiver aprovada ou
+  faturada, conciliar mantendo a situação real, sem escrita na Tiny.
+- Não cancelar/recriar pedido, estornar estoque/contas, lançar recebimento ou
+  reescrever contato, entrega, frete e parcelas nesse caminho. Uma criação
+  anterior de resultado incerto impede a adoção da origem.
+
+Logs de sucesso: `tiny existing paid checkout reconciled`, com `cart_id`,
+`order_id`, `erp_status`, `approved_existing_order`,
+`receivable_dates_preserved` e `rounding_adjustment_preserved`.
+
+Os dois cenários de arredondamento foram reproduzidos localmente: falhavam na
+comparação antiga e passam na nova. Os testes cobrem estoque bloqueado, retomada
+de falha no vínculo local, replay sem duplicação e preservação dos valores e
+IDs financeiros. O pedido 1495 continua fora dessa exceção: tem complemento e
+parcelamento de cartão divergentes, além de um título único para cinco parcelas.
+
+Homologação real na conta ADABYTE: pedido fictício **#121 / 372067576**, PIX
+R$ 65,99, estoque e contas previamente lançados e título **372067604** com
+vencimento diferente do dia do PIX. O serviço completo com PostgreSQL local
+concluiu a finalização usando o mesmo ID e gravou `erp_finalisation_status=done`.
+A única escrita da conciliação foi `PUT /pedidos/372067576/situacao`; quantidade,
+ID, valor, saldo e vencimento do título permaneceram iguais, assim como estoque
+físico, reservado e disponível. O replay não criou outro pedido. Passou em
+72,30s; depois o teste limpou apenas suas próprias contas, estoque e pedido.
+O arredondamento fracionado é coberto pelas reproduções locais dos retornos de
+produção; o teste real valida a aprovação sem alterar estoque/financeiro.
+
+Reprodução adicional: executar o teste opt-in abaixo com
+`TINY_E2E_EXISTING_PIX=1`. As suítes de providers ERP, serviço ERP, integração e
+pedidos passaram com `-race`; o build do backend também passou.
+
+As leituras dos pedidos de produção foram somente GET/SELECT. Nenhum deles foi
+reenviado ou alterado pela investigação. Não há migration ou mudança de frontend.
+
 ### Reenvios das 16:15 após o PR #76: pedidos 1495 e 1492
 
 Backend `8c10d8f` e frontend `10e1eec` estavam publicados com sucesso.
@@ -86,7 +163,8 @@ duplicação de pedido por essas tentativas.
 - A conciliação informa divergências comerciais e de contas a receber juntas,
   evitando que uma nova tentativa apenas revele a próxima divergência.
 
-**Pendências reais que o código não deve apagar automaticamente:**
+**Diferenças encontradas nessa leitura (o arredondamento/PIX do 1492 foi
+reavaliado na seção das 16:33; os valores não devem ser apagados):**
 
 - 1492: situação Tiny `0` (aberto), sem nota vinculada. Produtos R$ 55,90,
   frete R$ 15,16 e total R$ 68,27 conferem. A API retorna desconto `2.795`
