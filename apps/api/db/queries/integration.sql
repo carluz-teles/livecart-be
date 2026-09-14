@@ -133,24 +133,6 @@ ORDER BY token_expires_at ASC
 LIMIT 100;
 
 -- =============================================================================
--- INTEGRATION LOGS
--- =============================================================================
-
--- name: CreateIntegrationLog :one
-INSERT INTO integration_logs (integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING *;
-
--- name: ListIntegrationLogs :many
-SELECT * FROM integration_logs
-WHERE integration_id = $1
-ORDER BY created_at DESC
-LIMIT $2 OFFSET $3;
-
--- name: CountIntegrationLogs :one
-SELECT COUNT(*) FROM integration_logs WHERE integration_id = $1;
-
--- =============================================================================
 -- IDEMPOTENCY KEYS
 -- =============================================================================
 

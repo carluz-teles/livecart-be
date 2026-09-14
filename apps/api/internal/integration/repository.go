@@ -565,43 +565,6 @@ func (r *Repository) ListWithExpiringTokens(ctx context.Context, expiresBefore t
 }
 
 // =============================================================================
-// INTEGRATION LOGS
-// =============================================================================
-
-// CreateLog creates an integration log entry.
-func (r *Repository) CreateLog(ctx context.Context, integrationID, entityType, entityID, direction, status string, requestPayload, responsePayload []byte, errorMessage string) error {
-	intID, err := parseUUID(integrationID)
-	if err != nil {
-		return err
-	}
-
-	var entID pgtype.UUID
-	if entityID != "" {
-		entID, err = parseUUID(entityID)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Convert []byte to valid JSON for JSONB insertion.
-	// If payload is not valid JSON, wrap it as a JSON string.
-	reqPayload := json.RawMessage(ensureValidJSON(requestPayload))
-	respPayload := json.RawMessage(ensureValidJSON(responsePayload))
-
-	_, err = r.queries.CreateIntegrationLog(ctx, sqlc.CreateIntegrationLogParams{
-		IntegrationID:   intID,
-		EntityType:      pgtype.Text{String: entityType, Valid: entityType != ""},
-		EntityID:        entID,
-		Direction:       pgtype.Text{String: direction, Valid: direction != ""},
-		Status:          pgtype.Text{String: status, Valid: status != ""},
-		RequestPayload:  reqPayload,
-		ResponsePayload: respPayload,
-		ErrorMessage:    pgtype.Text{String: errorMessage, Valid: errorMessage != ""},
-	})
-	return err
-}
-
-// =============================================================================
 // WEBHOOK EVENTS
 // =============================================================================
 
@@ -3274,20 +3237,6 @@ func parseUUID(s string) (pgtype.UUID, error) {
 		return pgtype.UUID{}, httpx.ErrUnprocessable(fmt.Sprintf("invalid UUID: %s", s))
 	}
 	return uuid, nil
-}
-
-// ensureValidJSON returns the payload as-is if it's valid JSON,
-// otherwise wraps it as a JSON string. Returns "{}" for nil/empty input.
-func ensureValidJSON(data []byte) string {
-	if len(data) == 0 {
-		return "{}"
-	}
-	if json.Valid(data) {
-		return string(data)
-	}
-	// Wrap non-JSON content as a JSON string value
-	wrapped, _ := json.Marshal(string(data))
-	return string(wrapped)
 }
 
 func uuidToString(uuid pgtype.UUID) string {
