@@ -23,6 +23,10 @@ func TestTinyInstallmentsDoNotFeedWebhookLoop(t *testing.T) {
 				state.InvoiceID = 123
 			}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/contas-receber" {
+					_, _ = w.Write([]byte(`{"itens":[]}`))
+					return
+				}
 				if r.Method == http.MethodGet {
 					_ = json.NewEncoder(w).Encode(state)
 					return
@@ -73,6 +77,10 @@ func TestTinyPaidCheckoutRequiresVerifiedCommercialSnapshot(t *testing.T) {
 			}
 			writes := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/contas-receber" {
+					_, _ = w.Write([]byte(`{"itens":[]}`))
+					return
+				}
 				if r.Method == http.MethodGet {
 					_ = json.NewEncoder(w).Encode(state)
 					return

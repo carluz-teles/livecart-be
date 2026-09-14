@@ -1262,6 +1262,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := integrationSvc.ERP().OnCartPaidBlingCheckout(ctx, p.CartID, p.StoreID); err != nil {
 				return err
 			}
+			if err := integrationSvc.ERP().OnCartPaidTinyCheckout(ctx, p.CartID, p.StoreID); err != nil {
+				return err
+			}
 			// Coupon reactor: confirm the redemption (reserved → confirmed) in
 			// reaction to cart.paid, replacing the inline coupon confirm that ran
 			// first in integration's fan-out. Idempotent (no-op unless 'reserved');

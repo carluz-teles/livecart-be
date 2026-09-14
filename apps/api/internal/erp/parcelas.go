@@ -202,6 +202,15 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 	}
 
 	parcelas := extratoDeParcelas(pagamentos, desconto, split.SaldoCents)
+	if loader, ok := s.collab.(interface {
+		LoadTinyPaidInstallments(context.Context, string, string) ([]providers.ERPInstallment, error)
+	}); ok && erpProvider.Name() == providers.ProviderTiny {
+		paidSchedule, err := loader.LoadTinyPaidInstallments(ctx, cartID, storeID)
+		if err != nil {
+			return split, fmt.Errorf("loading Tiny installment schedule: %w", err)
+		}
+		parcelas = append(paidSchedule, parcelas[len(pagamentos):]...)
+	}
 	if reader, ok := erpProvider.(interface {
 		OrderInstallmentsMatch(context.Context, string, []providers.ERPInstallment) (bool, error)
 	}); ok {

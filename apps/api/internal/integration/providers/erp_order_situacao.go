@@ -167,3 +167,5 @@ func (s ERPOrderStatus) VoltouAViver() bool {
 // Confundir esta recusa com um erro qualquer, e estornar por precaução, infla a
 // reserva de forma irreversível — ver a nota em ReverseOrderStock.
 var ErrOrderStockLaunched = errors.New("pedido bloqueado para edição: estoque lançado")
+
+var ErrOrderAccountsLaunched = errors.New("pedido bloqueado para edição: contas lançadas")
