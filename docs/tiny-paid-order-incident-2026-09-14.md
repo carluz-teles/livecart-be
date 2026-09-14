@@ -2,12 +2,54 @@
 
 ## Situação da entrega
 
-Correção preparada para `stg` e para a branch isolada
-`fix/tiny-paid-order-sync-production`, baseada em `origin/main` (`969cb43`).
-O PR de produção deve usar essa branch isolada, que não inclui o Pagar.me Hub
-presente em staging. Nenhum pedido, pagamento, contato ou estoque de produção
-foi alterado. As escritas externas
-foram feitas exclusivamente na conta Tiny de testes ADABYTE LTDA.
+A correção inicial foi entregue em `stg` e na branch isolada
+`fix/tiny-paid-order-sync-production`, baseada em `origin/main` (`969cb43`),
+e publicada pelo usuário no merge `7b46a23` (PR #74). O ajuste adicional de
+serialização descrito abaixo parte desse merge e mantém a branch de produção
+sem o Pagar.me Hub presente em staging. Esta investigação não alterou pedidos,
+pagamentos, contatos ou estoque de produção. As escritas externas dos testes
+foram feitas exclusivamente na conta Tiny ADABYTE LTDA.
+
+## Erro 500 no reenvio após a publicação
+
+O botão **Tentar novamente** do pedido 1495, carrinho
+`41b670ac-cf19-436f-af9a-2b3fdb782729`, falhou em 14/09 às
+13:37:21 e 13:37:22 de Brasília. Os logs da versão `7b46a23` e o erro
+persistido em `order_payments` confirmaram:
+
+```text
+saving Tiny checkout checkpoint: ERROR: invalid input syntax for type json (SQLSTATE 22P02)
+```
+
+A migration 155 estava aplicada. Não havia operação em
+`tiny_checkout_operations` para esse carrinho: a primeira gravação falhou
+antes de executar a finalização na Tiny. Portanto, esses reenvios não chegaram
+a criar substituto, cancelar a reserva nem refazer títulos. O vínculo continuou
+no pedido Tiny 27742 / 848620609. No recorte desde a publicação às 13:33,
+somente o pedido 1495 tinha esse erro de JSON; isso não implica ausência de
+outros tipos de falha nos demais pedidos.
+
+**Causa no LiveCart:** o pool da aplicação usa `pgx.QueryExecModeSimpleProtocol`,
+que codifica `[]byte` como `bytea`. As duas escritas do journal (`Save` e `Bind`)
+passavam o resultado de `json.Marshal` como `[]byte` para uma coluna JSONB.
+Os testes anteriores usavam o protocolo padrão do pgx, que reconhecia o tipo
+JSONB do parâmetro e ocultava o defeito. Não foi rate limit nem rejeição da Tiny.
+
+**Correção:** passar `json.RawMessage` nas duas escritas, preservando o tipo JSON
+sem mudar o pool, o esquema ou as regras comerciais. Os testes de banco e o
+teste opt-in com a Tiny agora constroem o repositório com `database.NewPool`,
+o mesmo construtor da aplicação. Com essa configuração, dois testes reproduziram
+o SQLSTATE 22P02 antes do ajuste e passaram depois, incluindo conclusão atômica
+do vínculo e retomada com pagamento adicional.
+
+Validação adicional: suíte completa de integração com `-race` passou em 30,75s;
+build `go build ./apps/api/...` passou. O teste real com cartão + PIX do frete,
+usando agora o pool da aplicação, passou em 149,78s: reserva fictícia
+371926386 → pedido final 371926650, aprovação e contas conferidas, replay sem
+nova criação. A limpeza dos próprios títulos e pedidos fictícios também concluiu.
+
+A correção exige nova publicação do backend, mas nenhuma migration adicional.
+O pedido de produção não foi reenviado por esta investigação.
 
 ## Incidente de produção
 
