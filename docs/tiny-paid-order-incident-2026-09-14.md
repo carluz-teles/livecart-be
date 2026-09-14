@@ -53,6 +53,69 @@ O pedido de produção não foi reenviado por esta investigação.
 
 ## Incidente de produção
 
+### Reenvios das 16:15 após o PR #76: pedidos 1495 e 1492
+
+Backend `8c10d8f` e frontend `10e1eec` estavam publicados com sucesso.
+As tentativas de 14/09/2026 às 19:15 UTC foram identificadas pelos logs e por
+`erp_last_attempt_at`, sem executar retry ou escrita em produção:
+
+| Pedido LiveCart | Pedido Tiny | HTTP | Causa imediata |
+| --- | --- | --- | --- |
+| 1495 | 27742 / 848620609 | 422 | Endereço, parcelas e forma de envio divergentes na comparação |
+| 1492 | 27739 / 848620337 | 500 | Despesas adicionais do ERP bloqueiam substituição; erro ainda genérico |
+
+O journal de ambos continuou sem preparação, criação, cancelamento ou estorno.
+O erro de serialização JSON não retornou. Nenhuma das consultas constatou
+duplicação de pedido por essas tentativas.
+
+**Defeitos corrigidos nesta rodada:**
+
+- Ajustes protegidos de despesas/itens retornam o erro de conciliação tipado,
+  com campo identificável e HTTP 422, em vez de erro interno 500.
+- Na conciliação somente por leitura, `enderecoEntrega=null` usa o endereço
+  do cliente. Endereço de entrega explícito, mesmo incompleto, continua tendo
+  prioridade; não se ocultam complemento ou destino diferentes. A verificação
+  estrita do pedido substituto não recebeu esse fallback.
+- A mesma transportadora pode ter cadastro direto e via Smart Envios. A Tiny
+  retornou Jadlog direto `774610201` e Jadlog via Smart Envios `842253615`; o
+  pedido 1495 usa o segundo. Para Loggi, a listagem também tem vários IDs,
+  incluindo `842253618`, usado no 1492. A conferência de um pedido existente
+  aceita nome exato da transportadora ou sua variante `via Smart Envios`, sem
+  aceitar outra transportadora por substring. A criação continua verificando
+  o ID solicitado.
+- A conciliação informa divergências comerciais e de contas a receber juntas,
+  evitando que uma nova tentativa apenas revele a próxima divergência.
+
+**Pendências reais que o código não deve apagar automaticamente:**
+
+- 1492: situação Tiny `0` (aberto), sem nota vinculada. Produtos R$ 55,90,
+  frete R$ 15,16 e total R$ 68,27 conferem. A API retorna desconto `2.795`
+  e outras despesas `0.01`; o LiveCart espera desconto de 279 centavos.
+  O endereço cadastral confere por completo. A parcela PIX da venda vence em
+  12/09, mas o título `848668883` de R$ 68,27 vence em 14/09 e está aberto.
+- 1495: segue faturado. O complemento cadastral difere do checkout; valores
+  e vencimentos das cinco parcelas diferem conforme detalhado abaixo.
+  Além disso, `/contas-receber?idVenda=848620609` retorna um único título,
+  `848683038`, de R$ 271,98, aberto, vencendo em 28/09, enquanto o LiveCart
+  registra cinco parcelas. Portanto, o total pago igual não comprova que
+  financeiro, entrega e sincronização estejam conciliados.
+
+Não se atribuem essas mudanças a uma pessoa sem histórico de autoria. Esta
+rodada não marca nenhum desses pedidos como concluído nem altera seus valores.
+As credenciais, endereços e respostas completas ficaram em artefatos privados.
+
+Validação: reproduções locais dos formatos de resposta dos dois incidentes,
+testes de comparação de endereço e múltiplos cadastros da transportadora,
+conflitos financeiros reportados em conjunto e contrato HTTP 422/500. Os testes
+verificam zero escritas na Tiny para os conflitos e conciliações por leitura.
+Nenhuma migration ou alteração de frontend é necessária nesta rodada.
+
+Referências: [consulta do pedido na API v3](https://api-docs.erp.olist.com/api-reference/pedidos/obter-pedido)
+e [separação de endereço cadastral e entrega na integração Olist](https://ajuda.olist.com/plataformas-de-e-commerce/integracao-erp-da-olist-com-xtech).
+A documentação descreve endereços separados para destinos diferentes; a resposta
+real confirma `enderecoEntrega=null` nestes dois pedidos. Os múltiplos cadastros
+de transportadora foram comprovados por GET de `/formas-envio` da própria loja.
+
 ### Novo reenvio às 15:30: pedido já faturado
 
 O deploy `e51657a` (PR #75) estava ativo. O erro de JSON não reapareceu.
