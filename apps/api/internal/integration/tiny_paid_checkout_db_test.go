@@ -6,8 +6,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/database"
 )
+
+// Use the application's pool configuration, not pgx's prepared-statement
+// default: production serializes parameters with the simple query protocol.
+func tinyCheckoutProductionRepository(t *testing.T) *Repository {
+	t.Helper()
+	requireDB(t)
+	pool, err := database.NewPool(t.Context(), testPool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if pool.Config().ConnConfig.DefaultQueryExecMode != pgx.QueryExecModeSimpleProtocol {
+		t.Fatal("Tiny regression tests must exercise the production query protocol")
+	}
+	return NewRepository(sqlc.New(pool), pool)
+}
 
 func TestTinyCheckoutLoadsSeparateFreightAndCardSchedule(t *testing.T) {
 	requireDB(t)
@@ -27,7 +46,7 @@ func TestTinyCheckoutLoadsSeparateFreightAndCardSchedule(t *testing.T) {
  VALUES($1,1800,2000,'credit_card','card-1','2026-09-14T15:00:00Z'),($1,900,900,'pix','freight-1','2026-09-14T16:00:00Z')`, fx.cartID)
 	exec(`UPDATE order_payments p SET gateway_snapshot='{"payment_id":"card-1","installments":2,"money_release_date":"2026-09-16T15:00:00Z"}'
  FROM orders o WHERE o.id=p.order_id AND o.cart_id=$1`, fx.cartID)
-	svc := &Service{repo: testRepo}
+	svc := &Service{repo: tinyCheckoutProductionRepository(t)}
 	got, err := svc.loadTinyPaidCheckout(ctx, fx.cartID, fx.storeID)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +73,7 @@ func TestTinyCheckoutJournalPreservesClaimIsolationAndAtomicBinding(t *testing.T
 	if err := testPool.QueryRow(ctx, `SELECT id::text FROM integrations WHERE store_id=$1`, fx.storeID).Scan(&integrationID); err != nil {
 		t.Fatal(err)
 	}
-	j := &tinyCheckoutJournal{repo: testRepo, cartID: fx.cartID, storeID: fx.storeID, integrationID: integrationID, sourceID: "1"}
+	j := &tinyCheckoutJournal{repo: tinyCheckoutProductionRepository(t), cartID: fx.cartID, storeID: fx.storeID, integrationID: integrationID, sourceID: "1"}
 	op := &providers.TinyCheckoutOperation{ID: uuid.NewString(), CartID: fx.cartID, SourceID: "1", TargetID: "2", TargetNumber: "102", StartedAt: time.Now(),
 		Order: providers.ERPOrder{Checkout: &providers.ERPOrderCheckout{Payments: []providers.ERPInstallment{{AmountCents: 1000, DueDate: time.Now()}}}}}
 	if err := j.Save(ctx, op); err != nil {
@@ -128,7 +147,7 @@ func TestTinyAdditionalPaymentKeepsReplacementOwnership(t *testing.T) {
 	exec(`UPDATE products SET external_id='123' WHERE id=$1`, fx.productID)
 	exec(`UPDATE carts SET external_order_id='1',erp_order_state='mutating' WHERE id=$1`, fx.cartID)
 	exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at) VALUES($1,1000,1000,'pix','first-payment',now())`, fx.cartID)
-	svc := &Service{repo: testRepo}
+	svc := &Service{repo: tinyCheckoutProductionRepository(t)}
 	provider := &tinyJournalFinalizer{}
 	first, err := svc.PrepareTinyPaidOrder(ctx, provider, fx.cartID, fx.storeID, "1")
 	if err != nil {

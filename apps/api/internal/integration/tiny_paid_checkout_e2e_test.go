@@ -164,8 +164,9 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 	if err := tinyDemoAPI(ctx, provider, http.MethodPost, "/pedidos/"+old.OrderID+"/lancar-contas", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	svc := &Service{repo: testRepo, logger: zap.NewNop()}
-	flow := erp.NewService(erpRepoAdapter{testRepo}, &tinyDemoCollaborator{Service: svc, provider: provider}, zap.NewNop())
+	productionRepo := tinyCheckoutProductionRepository(t)
+	svc := &Service{repo: productionRepo, logger: zap.NewNop()}
+	flow := erp.NewService(erpRepoAdapter{productionRepo}, &tinyDemoCollaborator{Service: svc, provider: provider}, zap.NewNop())
 	if err := flow.ConfirmERPOrderPayment(ctx, fx.cartID, fx.storeID, nil); err != nil {
 		t.Fatal(err)
 	}
