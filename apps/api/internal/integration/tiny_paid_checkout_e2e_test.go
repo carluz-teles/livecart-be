@@ -76,7 +76,16 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 		t.Fatalf("unexpected demo account: err=%v", err)
 	}
 	guard.verified = true
-	old, err := provider.CreateOrder(ctx, providers.ERPOrder{ExternalID: fx.cartID, ContactID: strconv.FormatInt(cid, 10), Items: []providers.ERPOrderItem{{ProductID: strconv.FormatInt(pid, 10), Quantity: 1, UnitPrice: 4990}}, Observation: "LC-TINY-TEST FINALIZATION - NAO FATURAR"})
+	existingPIX := os.Getenv("TINY_E2E_EXISTING_PIX") == "1"
+	reservation := providers.ERPOrder{ExternalID: fx.cartID, ContactID: strconv.FormatInt(cid, 10), Items: []providers.ERPOrderItem{{ProductID: strconv.FormatInt(pid, 10), Quantity: 1, UnitPrice: 4990}}, Observation: "LC-TINY-TEST FINALIZATION - NAO FATURAR"}
+	if existingPIX {
+		reservation.TotalAmount = 6599
+		reservation.Shipping = &providers.ERPOrderShipping{Carrier: "Correios", Service: "PAC", CostCents: 1859}
+		reservation.ShippingAddress = &providers.ERPShippingAddress{RecipientName: fixture.Run + " Comprador completo", Street: "Praca da Se", Number: "42", Neighborhood: "Se", City: "Sao Paulo", State: "SP", ZipCode: "01001000"}
+		reservation.Checkout = &providers.ERPOrderCheckout{Customer: providers.ERPContactInput{Name: fixture.Run + " Comprador completo", Email: "livecart-tiny-test@example.invalid", Phone: "11900000000"}, Address: reservation.ShippingAddress, Shipping: reservation.Shipping, FreightCents: 1859, DiscountCents: 250,
+			Payments: []providers.ERPInstallment{{Method: "pix", AmountCents: 6599, DueDate: time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC), Note: "PIX TESTE"}}}
+	}
+	old, err := provider.CreateOrder(ctx, reservation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +136,12 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 					continue
 				}
 			}
+			if existingPIX {
+				if err := tinyDemoAPI(cleanup, provider, http.MethodPost, "/pedidos/"+id+"/estornar-estoque", nil, nil); err != nil {
+					t.Error(err)
+					continue
+				}
+			}
 			if order.Status != 2 {
 				if err := provider.SetOrderSituacao(cleanup, id, 2); err != nil {
 					t.Error(err)
@@ -147,23 +162,57 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
  customer_name=$2,customer_email='livecart-tiny-test@example.invalid',customer_phone='11900000000',
  shipping_address='{"street":"Praca da Se","number":"42","neighborhood":"Se","city":"Sao Paulo","state":"SP","zipCode":"01001000"}' WHERE id=$3`, old.OrderID, fixture.Run+" Comprador completo", fx.cartID)
 	cardPaid, cardGross := 6599, 6849
-	if os.Getenv("TINY_E2E_MIXED_PAYMENTS") == "1" {
-		cardPaid, cardGross = 4740, 4990
-		exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at) VALUES($1::uuid,1859,1859,'pix','tiny-demo-freight-'||$1::text,'2026-09-14T16:00:00Z')`, fx.cartID)
-	}
-	exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at)
+	if existingPIX {
+		exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at) VALUES($1::uuid,6599,6849,'pix','tiny-demo-pix-'||$1::text,'2026-09-12T15:00:00Z')`, fx.cartID)
+	} else {
+		if os.Getenv("TINY_E2E_MIXED_PAYMENTS") == "1" {
+			cardPaid, cardGross = 4740, 4990
+			exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at) VALUES($1::uuid,1859,1859,'pix','tiny-demo-freight-'||$1::text,'2026-09-14T16:00:00Z')`, fx.cartID)
+		}
+		exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at)
  VALUES($1::uuid,$2,$3,'credit_card','tiny-demo-card-'||$1::text,'2026-09-14T15:00:00Z')`, fx.cartID, cardPaid, cardGross)
-	exec(`UPDATE order_payments p SET gateway_snapshot=jsonb_build_object('payment_id','tiny-demo-card-'||$1::text,'installments',2)
+		exec(`UPDATE order_payments p SET gateway_snapshot=jsonb_build_object('payment_id','tiny-demo-card-'||$1::text,'installments',2)
  FROM orders o WHERE o.id=p.order_id AND o.cart_id=$1::uuid`, fx.cartID)
-	if err := provider.SetOrderInstallments(ctx, old.OrderID, []providers.ERPInstallment{{AmountCents: 4990, DueDate: time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC), Note: "RESERVA TESTE"}}); err != nil {
-		t.Fatal(err)
+		if err := provider.SetOrderInstallments(ctx, old.OrderID, []providers.ERPInstallment{{AmountCents: 4990, DueDate: time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC), Note: "RESERVA TESTE"}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := provider.SetOrderSituacao(ctx, old.OrderID, 3); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := provider.SetOrderSituacao(ctx, old.OrderID, 3); err != nil {
-		t.Fatal(err)
+	if existingPIX {
+		if err := tinyDemoAPI(ctx, provider, http.MethodPost, "/pedidos/"+old.OrderID+"/lancar-estoque", nil, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := tinyDemoAPI(ctx, provider, http.MethodPost, "/pedidos/"+old.OrderID+"/lancar-contas", nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	if existingPIX {
+		var accounts struct {
+			Items []struct {
+				ID int64 `json:"id"`
+			} `json:"itens"`
+		}
+		if err := tinyDemoAPI(ctx, provider, http.MethodGet, "/contas-receber?idVenda="+old.OrderID, nil, &accounts); err != nil {
+			t.Fatal(err)
+		}
+		if len(accounts.Items) != 1 {
+			t.Fatal("expected one owned PIX receivable")
+		}
+		guard.receivableID = accounts.Items[0].ID
+		if err := tinyDemoAPI(ctx, provider, http.MethodPut, "/contas-receber/"+strconv.FormatInt(guard.receivableID, 10), map[string]any{"dataVencimento": "2026-09-14"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var existingStock providers.ERPStockDetail
+	if existingPIX {
+		existingStock, err = provider.GetProductStockDetail(ctx, strconv.FormatInt(pid, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	priorWrites := len(guard.writes)
 	productionRepo := tinyCheckoutProductionRepository(t)
 	svc := &Service{repo: productionRepo, logger: zap.NewNop()}
 	flow := erp.NewService(erpRepoAdapter{productionRepo}, &tinyDemoCollaborator{Service: svc, provider: provider}, zap.NewNop())
@@ -171,7 +220,7 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, target, _, _ := cartERPState(t, fx.cartID)
-	if state != erp.OrderStateConfirmed || target == old.OrderID || target == "" {
+	if state != erp.OrderStateConfirmed || target == "" || (existingPIX && target != old.OrderID) || (!existingPIX && target == old.OrderID) {
 		t.Fatalf("wrong finalization %s %s", state, target)
 	}
 	var progress []byte
@@ -193,7 +242,38 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 	if situation, err := provider.GetOrderSituacao(ctx, target); err != nil || situation != 3 {
 		t.Fatalf("final approval=%d err=%v", situation, err)
 	}
-	t.Logf("demo final order=%s confirmed; original=%s cancelled; replay created=0; accounts rebuilt", target, old.OrderID)
+	if existingPIX {
+		finalStatus, _, _, _, _ := cartFinalisationState(t, fx.cartID)
+		if finalStatus != "done" {
+			t.Fatalf("payment sync still pending: %s", finalStatus)
+		}
+		stock, err := provider.GetProductStockDetail(ctx, strconv.FormatInt(pid, 10))
+		if err != nil || stock != existingStock {
+			t.Fatalf("stock changed: before=%+v after=%+v err=%v", existingStock, stock, err)
+		}
+		writes := guard.writes[priorWrites:]
+		if len(writes) != 1 || writes[0] != "PUT /pedidos/"+old.OrderID+"/situacao" {
+			t.Fatalf("unexpected writes during reconciliation: %v", writes)
+		}
+		var accounts struct {
+			Items []struct {
+				ID      int64   `json:"id"`
+				Value   float64 `json:"valor"`
+				Balance float64 `json:"saldo"`
+				DueDate string  `json:"dataVencimento"`
+				Status  string  `json:"situacao"`
+			} `json:"itens"`
+		}
+		if err := tinyDemoAPI(ctx, provider, http.MethodGet, "/contas-receber?idVenda="+target, nil, &accounts); err != nil {
+			t.Fatal(err)
+		}
+		if len(accounts.Items) != 1 || accounts.Items[0].ID != guard.receivableID || accounts.Items[0].Value != 65.99 || accounts.Items[0].Balance != 65.99 || accounts.Items[0].DueDate != "2026-09-14" || accounts.Items[0].Status != "aberto" {
+			t.Fatalf("existing receivable changed: %+v", accounts)
+		}
+		t.Logf("demo existing PIX order=%s approved; stock, accounts and due date preserved; replay created=0", target)
+	} else {
+		t.Logf("demo final order=%s confirmed; original=%s cancelled; replay created=0; accounts rebuilt", target, old.OrderID)
+	}
 }
 
 func tinyDemoAPI(ctx context.Context, p *providererp.Tiny, method, path string, payload, target any) error {
@@ -236,6 +316,8 @@ type tinyDemoCheckoutTransport struct {
 	orders               map[string]bool
 	created              int
 	trace                func(string, string, int)
+	receivableID         int64
+	writes               []string
 }
 
 func (g *tinyDemoCheckoutTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -250,6 +332,9 @@ func (g *tinyDemoCheckoutTransport) RoundTrip(r *http.Request) (*http.Response, 
 			return nil, fmt.Errorf("demo account not verified")
 		}
 		allowed := path == "/contatos/"+strconv.FormatInt(g.contactID, 10) && r.Method == http.MethodPut
+		if g.receivableID > 0 && path == "/contas-receber/"+strconv.FormatInt(g.receivableID, 10) && r.Method == http.MethodPut {
+			allowed = true
+		}
 		if path == "/pedidos" && r.Method == http.MethodPost {
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -277,6 +362,9 @@ func (g *tinyDemoCheckoutTransport) RoundTrip(r *http.Request) (*http.Response, 
 				if path == "/pedidos/"+id || path == "/pedidos/"+id+"/itens" || path == "/pedidos/"+id+"/situacao" || path == "/pedidos/"+id+"/estornar-contas" || path == "/pedidos/"+id+"/lancar-contas" {
 					allowed = true
 				}
+				if os.Getenv("TINY_E2E_EXISTING_PIX") == "1" && (path == "/pedidos/"+id+"/lancar-estoque" || path == "/pedidos/"+id+"/estornar-estoque") && r.Method == http.MethodPost {
+					allowed = true
+				}
 			}
 		}
 		if !allowed {
@@ -299,6 +387,9 @@ func (g *tinyDemoCheckoutTransport) RoundTrip(r *http.Request) (*http.Response, 
 	}
 	if g.trace != nil {
 		g.trace(r.Method, path, resp.StatusCode)
+	}
+	if r.Method != http.MethodGet && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		g.writes = append(g.writes, r.Method+" "+path)
 	}
 	if path == "/pedidos" && r.Method == http.MethodPost && resp.StatusCode == 201 {
 		raw, err := io.ReadAll(resp.Body)
