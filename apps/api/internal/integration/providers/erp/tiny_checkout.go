@@ -12,17 +12,43 @@ import (
 )
 
 type tinyCheckoutInstallment struct {
-	Value float64 `json:"valor"`
-	Date  string  `json:"data"`
-	Note  string  `json:"observacoes"`
+	Value  float64 `json:"valor"`
+	Date   string  `json:"data"`
+	Note   string  `json:"observacoes"`
+	Method struct {
+		ID   int64  `json:"id"`
+		Name string `json:"nome"`
+	} `json:"formaRecebimento"`
 }
 
 type tinyCheckoutOrder struct {
+	Shipping struct {
+		Form *tinyCheckoutReference `json:"formaEnvio"`
+	} `json:"transportador"`
+	Deposit       *tinyCheckoutReference `json:"deposito"`
+	Nature        *tinyCheckoutReference `json:"naturezaOperacao"`
+	PriceList     *tinyCheckoutReference `json:"listaPreco"`
+	Seller        *tinyCheckoutReference `json:"vendedor"`
+	OtherExpenses float64                `json:"valorOutrasDespesas"`
+	ID            int64                  `json:"id"`
+	Number        json.Number            `json:"numeroPedido"`
+	Status        int                    `json:"situacao"`
+	Anchor        string                 `json:"numeroOrdemCompra"`
+	Observation   string                 `json:"observacoes"`
+	Items         []struct {
+		Product struct {
+			ID int64 `json:"id"`
+		} `json:"produto"`
+		Quantity  int     `json:"quantidade"`
+		UnitPrice float64 `json:"valorUnitario"`
+		Note      string  `json:"infoAdicional"`
+	} `json:"itens"`
 	InvoiceID int64   `json:"idNotaFiscal"`
 	Total     float64 `json:"valorTotalPedido"`
 	Freight   float64 `json:"valorFrete"`
 	Discount  float64 `json:"valorDesconto"`
 	Customer  struct {
+		ID       int64  `json:"id"`
 		Name     string `json:"nome"`
 		Document string `json:"cpfCnpj"`
 		Email    string `json:"email"`
@@ -41,6 +67,11 @@ type tinyCheckoutOrder struct {
 	Payment struct {
 		Installments []tinyCheckoutInstallment `json:"parcelas"`
 	} `json:"pagamento"`
+}
+
+type tinyCheckoutReference struct {
+	ID   int64  `json:"id"`
+	Name string `json:"nome"`
 }
 
 func (t *Tiny) readCheckoutOrder(ctx context.Context, orderID string) (*tinyCheckoutOrder, error) {
@@ -70,6 +101,27 @@ func (t *Tiny) SyncOrderCheckout(ctx context.Context, orderID string, checkout p
 	if order.InvoiceID != 0 {
 		return fmt.Errorf("tiny: checkout requer conciliação: pedido com nota fiscal")
 	}
+	fields := tinyCheckoutDifferences(order, checkout)
+	if len(fields) > 0 {
+		return fmt.Errorf("tiny: checkout requer conciliação de %s; API v3 não permite atualizar esses campos no pedido existente", strings.Join(fields, ", "))
+	}
+	if err := t.SetOrderInstallments(ctx, orderID, checkout.Payments); err != nil {
+		return err
+	}
+	verified, err := t.readCheckoutOrder(ctx, orderID)
+	if err != nil {
+		return err
+	}
+	if len(tinyCheckoutDifferences(verified, checkout)) > 0 || verified.InvoiceID != 0 {
+		return fmt.Errorf("tiny: dados comerciais alterados durante a confirmação; conciliação necessária")
+	}
+	if !tinyInstallmentsMatch(verified.Payment.Installments, checkout.Payments) {
+		return fmt.Errorf("tiny: parcelas divergentes após gravação; confirmação pendente")
+	}
+	return t.verifyCheckoutReceivables(ctx, orderID, checkout.Payments)
+}
+
+func tinyCheckoutDifferences(order *tinyCheckoutOrder, checkout providers.ERPOrderCheckout) []string {
 	fields := []string{}
 	if checkout.Customer.Phone != "" && digitsOnlyTiny(order.Customer.Phone) != digitsOnlyTiny(checkout.Customer.Phone) && digitsOnlyTiny(order.Customer.Mobile) != digitsOnlyTiny(checkout.Customer.Phone) {
 		fields = append(fields, "telefone do cliente")
@@ -104,24 +156,7 @@ func (t *Tiny) SyncOrderCheckout(ctx context.Context, orderID string, checkout p
 	if len(checkout.Payments) == 0 || int64(math.Round(order.Total*100)) != paid {
 		fields = append(fields, "total pago/desconto")
 	}
-	if len(fields) > 0 {
-		return fmt.Errorf("tiny: checkout requer conciliação de %s; API v3 não permite atualizar esses campos no pedido existente", strings.Join(fields, ", "))
-	}
-	if err := t.SetOrderInstallments(ctx, orderID, checkout.Payments); err != nil {
-		return err
-	}
-	verified, err := t.readCheckoutOrder(ctx, orderID)
-	if err != nil {
-		return err
-	}
-	if verified.Total != order.Total || verified.Freight != order.Freight || verified.Discount != order.Discount ||
-		verified.Customer != order.Customer || verified.Address != order.Address {
-		return fmt.Errorf("tiny: dados comerciais alterados durante a confirmação; conciliação necessária")
-	}
-	if !tinyInstallmentsMatch(verified.Payment.Installments, checkout.Payments) {
-		return fmt.Errorf("tiny: parcelas divergentes após gravação; confirmação pendente")
-	}
-	return nil
+	return fields
 }
 
 func (t *Tiny) GetOrderCommercialDiscount(ctx context.Context, orderID string) (int64, error) {
@@ -147,7 +182,16 @@ func (t *Tiny) OrderInstallmentsMatch(ctx context.Context, orderID string, desir
 		return false, err
 	}
 	// A concurrently issued invoice also makes this reflection read-only.
-	return current.InvoiceID != 0 || tinyInstallmentsMatch(current.Payment.Installments, desired), nil
+	if current.InvoiceID != 0 {
+		return true, nil
+	}
+	if !tinyInstallmentsMatch(current.Payment.Installments, desired) {
+		return false, nil
+	}
+	if err := t.verifyCheckoutReceivables(ctx, orderID, desired); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func tinyInstallmentsMatch(current []tinyCheckoutInstallment, desired []providers.ERPInstallment) bool {

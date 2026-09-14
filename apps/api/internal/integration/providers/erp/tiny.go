@@ -243,6 +243,12 @@ func (t *Tiny) TestConnection(ctx context.Context) (*providers.TestConnectionRes
 
 	// Parse account info
 	var info struct {
+		Name     string `json:"razaoSocial"`
+		Document string `json:"cpfCnpj"`
+		Address  struct {
+			City  string `json:"municipio"`
+			State string `json:"uf"`
+		} `json:"enderecoEmpresa"`
 		Empresa struct {
 			Nome   string `json:"nome"`
 			CNPJ   string `json:"cnpj"`
@@ -253,13 +259,19 @@ func (t *Tiny) TestConnection(ctx context.Context) (*providers.TestConnectionRes
 			Nome string `json:"nome"`
 		} `json:"plano"`
 	}
-	if err := json.Unmarshal(body, &info); err == nil && info.Empresa.Nome != "" {
-		result.AccountInfo = map[string]any{
-			"empresa": info.Empresa.Nome,
-			"cnpj":    info.Empresa.CNPJ,
-			"cidade":  info.Empresa.Cidade,
-			"uf":      info.Empresa.UF,
-			"plano":   info.Plano.Nome,
+	if err := json.Unmarshal(body, &info); err == nil {
+		if info.Name != "" {
+			info.Empresa.Nome, info.Empresa.CNPJ = info.Name, info.Document
+			info.Empresa.Cidade, info.Empresa.UF = info.Address.City, info.Address.State
+		}
+		if info.Empresa.Nome != "" {
+			result.AccountInfo = map[string]any{
+				"empresa": info.Empresa.Nome,
+				"cnpj":    info.Empresa.CNPJ,
+				"cidade":  info.Empresa.Cidade,
+				"uf":      info.Empresa.UF,
+				"plano":   info.Plano.Nome,
+			}
 		}
 	}
 
@@ -1143,8 +1155,14 @@ func (t *Tiny) SyncProduct(ctx context.Context, product ERPProduct) (*SyncResult
 // `transportador` block is sent; carrier/service/deadline (which we cannot
 // translate to Tiny IDs locally) are stamped on `observacoesInternas` for
 // the merchant.
-func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error) {
+func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (result *OrderResult, resultErr error) {
 	endpoint := tinyAPIBaseURL + "/pedidos"
+	dispatched := false
+	defer func() {
+		if order.Checkout != nil && resultErr != nil && !dispatched {
+			resultErr = &tinyCreateRejected{detail: resultErr.Error(), cause: resultErr}
+		}
+	}()
 
 	contactID, err := strconv.ParseInt(order.ContactID, 10, 64)
 	if err != nil {
@@ -1225,24 +1243,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		// carimbaria uma entrega que ninguém vai despachar. Foi assim que um
 		// pedido de retirada saiu com "SmartEnvios" e o Tiny recusou o pedido
 		// inteiro com "Forma de envio não habilitada".
-		var (
-			formaEnvioID   int64
-			formaEnvioErr  error
-			formaEnvioName = ship.Carrier
-		)
-		if !isStorePickup(ship.Carrier) {
-			// Try to resolve the formaEnvio id, preferring the carrier name
-			// (Correios / Jadlog / etc.) and falling back to "SmartEnvios" so
-			// stores that cadastrou só o agregador também batem.
-			formaEnvioID, formaEnvioErr = t.lookupFormaEnvioID(ctx, ship.Carrier)
-			if formaEnvioErr == nil && formaEnvioID == 0 && ship.Carrier != "SmartEnvios" {
-				id, err := t.lookupFormaEnvioID(ctx, "SmartEnvios")
-				if err == nil && id > 0 {
-					formaEnvioID = id
-					formaEnvioName = "SmartEnvios"
-				}
-			}
-		}
+		formaEnvioID, formaEnvioName, formaEnvioErr := t.resolveShippingForm(ctx, ship.Carrier)
 		// UM lugar decide a mensagem. Quando a retirada só pulava a consulta lá
 		// em cima, ela desembocava no `default` e saía como WARN dizendo que a
 		// busca não achou nada — afirmando uma consulta que nunca houve, num
@@ -1385,6 +1386,30 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		)
 	}
 
+	if checkout := order.Checkout; checkout != nil {
+		if headers, ok := order.Metadata["tiny_order_headers"].(map[string]any); ok {
+			for _, key := range []string{"deposito", "naturezaOperacao", "listaPreco", "vendedor"} {
+				if value, exists := headers[key]; exists {
+					payload[key] = value
+				}
+			}
+		}
+		payment, err := t.checkoutPaymentPayload(ctx, checkout.Payments)
+		if err != nil {
+			return nil, err
+		}
+		payload["pagamento"] = payment
+		payload["valorFrete"] = float64(checkout.FreightCents) / 100
+		payload["valorDesconto"] = float64(checkout.DiscountCents) / 100
+		payload["situacao"] = 0
+		if checkout.Shipping != nil && checkout.Shipping.Carrier != "" && checkout.Shipping.Carrier != providers.StorePickupCarrier {
+			transport, _ := payload["transportador"].(map[string]any)
+			if transport["formaEnvio"] == nil {
+				return nil, fmt.Errorf("tiny: forma de envio não encontrada para %s", checkout.Shipping.Carrier)
+			}
+		}
+	}
+
 	feeCents := int64(0)
 	netCents := int64(0)
 	paymentMethod := ""
@@ -1406,8 +1431,13 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Int64("net_amount_cents", netCents),
 	)
 
+	dispatched = true
 	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
+		var notSent *providers.RequestNotSentError
+		if order.Checkout != nil && (errors.As(err, &notSent) || (resp != nil && resp.StatusCode == http.StatusTooManyRequests)) {
+			return nil, &tinyCreateRejected{detail: err.Error(), cause: err}
+		}
 		return nil, fmt.Errorf("creating order: %w", err)
 	}
 
@@ -1435,7 +1465,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 	}
 
-	if !providers.IsSuccessStatus(resp.StatusCode) && isFormaEnvioRejection(body) && dropFormaEnvio(payload) {
+	if order.Checkout == nil && !providers.IsSuccessStatus(resp.StatusCode) && isFormaEnvioRejection(body) && dropFormaEnvio(payload) {
 		logger.From(ctx, t.Logger).Warn("tiny recusou a forma de envio; reenviando o pedido sem ela",
 			zap.String("external_id", order.ExternalID),
 			zap.Int("status", resp.StatusCode),
@@ -1453,6 +1483,9 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	}
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
+		if order.Checkout != nil && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusConflict {
+			return nil, &tinyCreateRejected{status: resp.StatusCode, detail: tinyErrorDetail(body)}
+		}
 		return nil, fmt.Errorf("create order failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 
@@ -1467,6 +1500,9 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 
 	if err := json.Unmarshal(body, &orderResp); err != nil {
 		return nil, fmt.Errorf("parsing order response: %w", err)
+	}
+	if orderResp.ID <= 0 {
+		return nil, fmt.Errorf("tiny: criação sem ID verificável")
 	}
 
 	orderID := strconv.FormatInt(orderResp.ID, 10)
@@ -2052,6 +2088,9 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 		if bloqueioPorEstoqueLancado(body) {
 			return providers.ErrOrderStockLaunched
 		}
+		if bloqueioSomentePorContas(body) {
+			return providers.ErrOrderAccountsLaunched
+		}
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: pedido %s: %s",
 				providers.ErrOrderNotFound, orderID, tinyErrorDetail(body))
@@ -2148,6 +2187,24 @@ func bloqueioPorEstoqueLancado(body []byte) bool {
 	return false
 }
 
+func bloqueioSomentePorContas(body []byte) bool {
+	var response struct {
+		Details []struct {
+			Field   string `json:"campo"`
+			Message string `json:"mensagem"`
+		} `json:"detalhes"`
+	}
+	if json.Unmarshal(body, &response) != nil || len(response.Details) == 0 {
+		return false
+	}
+	for _, d := range response.Details {
+		if !strings.HasPrefix(d.Field, "pedido.motivosBloqueio") || !strings.Contains(strings.ToLower(d.Message), "contas lan") {
+			return false
+		}
+	}
+	return true
+}
+
 // bloqueioPorNotaFiscal reconhece a recusa de edição por nota fiscal emitida.
 //
 // Forma exata capturada contra a API real em 27/08/2026, depois de gerar uma
@@ -2210,6 +2267,11 @@ func (t *Tiny) SetOrderInstallments(ctx context.Context, orderID string, parcela
 	}
 	if current.InvoiceID != 0 {
 		return fmt.Errorf("tiny: pedido com nota fiscal; parcelas preservadas")
+	}
+	// A matching GET /pedidos does not prove the launched receivables match.
+	// Financial rebuilds are handled by the durable checkout operation.
+	if err := t.verifyCheckoutReceivables(ctx, orderID, parcelas); err != nil {
+		return err
 	}
 	if tinyInstallmentsMatch(current.Payment.Installments, parcelas) {
 		return nil

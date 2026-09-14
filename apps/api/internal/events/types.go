@@ -275,7 +275,10 @@ var DefaultPolicies = map[string]QueuePolicy{
 var EventTimeouts = map[Name]time.Duration{
 	ERPWebhookProcess: 90 * time.Second,
 	OrderPaid:         90 * time.Second,
-	OrderRefunded:     90 * time.Second,
+	// Additional Tiny payments reconcile freight and may replace the previous
+	// reservation under the same per-account API quota as order.paid.
+	CartPaid:      90 * time.Second,
+	OrderRefunded: 90 * time.Second,
 	// `comment.received` passou a criar o pedido de venda no ERP — antes ele só
 	// lançava um movimento de estoque. O trabalho agora é resolver o contato do
 	// comprador (busca + criação, para quem é novo) e criar o pedido, tudo em
