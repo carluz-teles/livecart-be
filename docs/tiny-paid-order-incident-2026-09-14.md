@@ -53,6 +53,47 @@ O pedido de produção não foi reenviado por esta investigação.
 
 ## Incidente de produção
 
+### Reenvios das 17:56: versão pendente e pedido 1479 não localizado
+
+Às 20:57 UTC, a Railway continuava executando o backend `92e64b1` (PR #77),
+deploy `6a6fec85-a7bc-4426-8095-9a2bb555debf`, criado às 19:31 UTC. O commit
+`e56f8c1`, que reaproveita as reservas com arredondamento e preserva o vencimento
+do título PIX, estava em staging e na branch de correção, mas ainda fora de
+`origin/main`. O usuário confirmou expressamente a preservação do vencimento
+da Tiny quando o restante confere.
+
+Os logs e as últimas tentativas em `order_payments` identificaram:
+
+| Pedido | Tentativa UTC | Resultado |
+| --- | --- | --- |
+| 1487 | 20:56:10 | 422 por despesas adicionais; correção `e56f8c1` ainda não publicada |
+| 1495 | 20:56:28 | 422 por endereço, parcelas e contas a receber divergentes |
+| 1479 | 20:56:43 e 20:56:44 | 500 causado por GET Tiny retornando 404 |
+
+O 1479, carrinho `fc6777e4-5767-4b2b-a544-e2e58608399d`, continua vinculado ao
+pedido Tiny **27722 / 848619303**. O pagamento local ocorreu em 12/09 às
+18:31:31 UTC. A consulta direta do pedido retornou 404; buscas somente por
+leitura com `numero=27722` e pelo documento cadastrado da cliente retornaram
+zero resultados. Não há evidência suficiente para atribuir exclusão a uma
+pessoa, identificar outro pedido como substituto ou criar uma nova venda.
+Foi solicitada ao usuário a conferência no painel da Tiny.
+
+O journal `fa0fe45c-2661-4524-9550-48592c500773` permanecia sem preparação,
+criação iniciada, pedido substituto, cancelamento ou estorno. Essas tentativas
+pararam na consulta da origem.
+
+**Correção adicional:** o GET 404 do checkout passa a produzir o conflito Tiny
+tipado, com mensagem de pedido não encontrado e HTTP 422. A origem ausente não
+entra na conciliação de um objeto nulo nem no fluxo legado que recria reservas
+não pagas. O mesmo tratamento cobre substituto ausente antes e depois do
+cancelamento da origem. Erros de autorização e falhas do servidor continuam
+sendo erros técnicos; não são interpretados como ausência da venda.
+
+Os testes exercitam duas tentativas por estágio, sem escrita no ERP, troca de
+vínculo ou descarte do checkpoint, e verificam o contrato HTTP. Não há migration,
+alteração de frontend ou escrita em produção. Publicar o pacote resolve o
+tratamento do erro; recuperar o 1479 exige esclarecer o vínculo com a Tiny.
+
 ### Reenvios das 16:33 após o PR #77: concluir os pedidos existentes
 
 O deploy `92e64b1` estava ativo. O pedido 1492 foi reenviado às 19:33:02 UTC;

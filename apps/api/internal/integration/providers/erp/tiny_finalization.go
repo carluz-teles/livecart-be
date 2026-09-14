@@ -192,7 +192,7 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 		source, err := t.sourceForCheckout(ctx, op)
 		if err != nil {
 			var conflict *providers.TinyCheckoutReconciliationError
-			if errors.As(err, &conflict) && tinyCheckoutCanReuseSource(op) {
+			if source != nil && errors.As(err, &conflict) && tinyCheckoutCanReuseSource(op) {
 				return t.reconcileExistingCheckout(ctx, op, journal, source)
 			}
 			return nil, err
