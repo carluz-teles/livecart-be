@@ -54,10 +54,17 @@ func testSharedInstagramSales(t *testing.T, kind string) {
 			return &sharedInstagramPayment{}, nil
 		},
 	})
-	var firstMedia, firstPayment string
+	var firstMedia, firstPayment, instagramOwner string
 	for index, fx := range []scaleFixture{a, b} {
 		provider := []string{"tiny", "bling"}[index]
-		seedSharedInstagram(t, fx.storeID, account, "scoped-"+account, "active")
+		if index == 0 {
+			instagramOwner = seedSharedInstagram(t, fx.storeID, account, "scoped-"+account, "active")
+			if _, err := testPool.Exec(ctx, `UPDATE integrations SET token_expires_at=now()+interval '1 hour' WHERE id=$1`, instagramOwner); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := linkInstagramFixture(t, instagramOwner, fx.storeID, account); err != nil {
+			t.Fatal(err)
+		}
 		erpRow, err := testRepo.Create(ctx, CreateIntegrationParams{StoreID: fx.storeID, Type: "erp", Provider: provider, Status: "active", Credentials: []byte("erp-" + fx.storeID)})
 		if err != nil {
 			t.Fatal(err)

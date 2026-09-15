@@ -656,6 +656,10 @@ type IntegrationRow struct {
 	LastSyncedAt   *time.Time
 	CreatedAt      time.Time
 	Priority       int
+
+	// Server-managed reference, never accepted from request metadata.
+	InstagramCredentialsSourceID      string
+	InstagramCredentialsSourceStoreID string
 }
 
 // CreateIntegrationParams contains parameters for creating an integration.

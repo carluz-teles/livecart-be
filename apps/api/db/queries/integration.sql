@@ -13,6 +13,13 @@ SELECT * FROM integrations WHERE id = $1 AND store_id = $2;
 -- name: GetIntegrationByIDOnly :one
 SELECT * FROM integrations WHERE id = $1;
 
+-- name: GetAnyIntegrationByType :one
+SELECT * FROM integrations WHERE store_id = $1 AND type = $2
+ORDER BY created_at ASC, id ASC LIMIT 1;
+
+-- name: HasInstagramCredentialAliases :one
+SELECT EXISTS (SELECT 1 FROM integrations WHERE instagram_credentials_source_id = $1);
+
 -- name: ListIntegrationsByStore :many
 SELECT * FROM integrations WHERE store_id = $1 ORDER BY created_at DESC;
 
@@ -69,13 +76,16 @@ WHERE id = $1;
 -- name: ListActiveInstagramStoreIDsByAccount :many
 -- Account-level DMs may belong to several stores; media-based purchases are
 -- resolved separately through the session's event.
-SELECT DISTINCT store_id
-FROM integrations
-WHERE type = 'social' AND provider = 'instagram' AND status = 'active'
+SELECT DISTINCT i.store_id
+FROM integrations i
+JOIN integrations source ON source.id = COALESCE(i.instagram_credentials_source_id, i.id)
+WHERE i.type = 'social' AND i.provider = 'instagram' AND i.status = 'active'
+  AND source.type = 'social' AND source.provider = 'instagram' AND source.status = 'active'
+  AND source.instagram_credentials_source_id IS NULL
   AND sqlc.arg(account_id)::text <> ''
-  AND (metadata->>'instagram_user_id' = sqlc.arg(account_id)::text
-       OR metadata->>'instagram_app_scoped_id' = sqlc.arg(account_id)::text)
-ORDER BY store_id;
+  AND (source.metadata->>'instagram_user_id' = sqlc.arg(account_id)::text
+       OR source.metadata->>'instagram_app_scoped_id' = sqlc.arg(account_id)::text)
+ORDER BY i.store_id;
 
 -- name: GetIntegrationByProvider :one
 SELECT * FROM integrations
@@ -129,6 +139,7 @@ DELETE FROM integrations WHERE id = $1 AND store_id = $2;
 -- Used by background token refresh worker.
 SELECT * FROM integrations
 WHERE status = 'active'
+  AND instagram_credentials_source_id IS NULL
   AND token_expires_at IS NOT NULL
   AND token_expires_at <= $1
   -- ⚠ Acrescentar provider aqui é a mudança de UMA PALAVRA que pode derrubar a

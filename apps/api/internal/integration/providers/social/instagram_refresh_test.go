@@ -14,8 +14,10 @@ package social
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +46,50 @@ func newTestInstagram(t *testing.T, creds *providers.Credentials, handler http.H
 	return ig, func() {
 		instagramGraphAPIBaseURL = original
 		srv.Close()
+	}
+}
+
+func TestRefreshTokenClassifiesFailuresWithoutExposingCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		permanent bool
+	}{
+		{"rate limit", 429, `{"error":{"code":190,"message":"secret-token"}}`, false},
+		{"server error", 503, `{"error":{"code":190,"message":"secret-token"}}`, false},
+		{"expired", 400, `{"error":{"code":190,"message":"secret-token"}}`, true},
+		{"unauthorized", 401, `secret-token`, true},
+		{"transient", 400, `{"error":{"code":190,"is_transient":true}}`, false},
+		{"unknown", 400, `{"error":{"message":"secret-token"}}`, false},
+		{"missing expiry", 200, `{"access_token":"secret-token"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ig, done := newTestInstagram(t, &providers.Credentials{AccessToken: "secret-token", ExpiresAt: time.Now().Add(time.Hour)}, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			defer done()
+			_, err := ig.RefreshToken(t.Context())
+			if err == nil || strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("unsafe or missing error: %v", err)
+			}
+			var classified interface{ Permanent() bool }
+			if permanent := errors.As(err, &classified) && classified.Permanent(); permanent != tc.permanent {
+				t.Fatalf("permanent=%v want=%v", permanent, tc.permanent)
+			}
+		})
+	}
+}
+
+func TestRefreshTokenNetworkErrorDoesNotExposeURL(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	ig, done := newTestInstagram(t, &providers.Credentials{AccessToken: "secret-token", ExpiresAt: time.Now().Add(time.Hour)}, func(http.ResponseWriter, *http.Request) { t.Error("cancelled request reached server") })
+	defer done()
+	_, err := ig.RefreshToken(ctx)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "access_token=") {
+		t.Fatalf("unsafe or lost network cause: %v", err)
 	}
 }
 
