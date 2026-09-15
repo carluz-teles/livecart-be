@@ -75,6 +75,7 @@ func TestTinyCheckoutJournalPreservesClaimIsolationAndAtomicBinding(t *testing.T
 	}
 	j := &tinyCheckoutJournal{repo: tinyCheckoutProductionRepository(t), cartID: fx.cartID, storeID: fx.storeID, integrationID: integrationID, sourceID: "1"}
 	op := &providers.TinyCheckoutOperation{ID: uuid.NewString(), CartID: fx.cartID, SourceID: "1", TargetID: "2", TargetNumber: "102", StartedAt: time.Now(),
+		SourceStockLaunched: true, StockReverseStarted: true, StockReversed: true, StockLaunchStarted: true, StockLaunched: true,
 		TargetStatus: providers.ERPOrderStatusFaturado,
 		Order:        providers.ERPOrder{Checkout: &providers.ERPOrderCheckout{Payments: []providers.ERPInstallment{{AmountCents: 1000, DueDate: time.Now()}}}}}
 	if err := j.Save(ctx, op); err != nil {
@@ -84,7 +85,7 @@ func TestTinyCheckoutJournalPreservesClaimIsolationAndAtomicBinding(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.ID != op.ID || !tinySameSnapshot(loaded.Order.Checkout, op.Order.Checkout) {
+	if loaded.ID != op.ID || !loaded.StockReversed || !loaded.StockLaunched || !tinySameSnapshot(loaded.Order.Checkout, op.Order.Checkout) {
 		t.Fatal("checkpoint changed across JSON roundtrip")
 	}
 	other := *op
@@ -107,12 +108,12 @@ func TestTinyCheckoutJournalPreservesClaimIsolationAndAtomicBinding(t *testing.T
 		t.Fatal(err)
 	}
 	var cartID, paymentID, status string
-	var complete bool
-	if err := testPool.QueryRow(ctx, `SELECT c.external_order_id,p.external_order_id,t.completed,c.erp_order_status FROM carts c
- JOIN orders o ON o.cart_id=c.id JOIN order_payments p ON p.order_id=o.id JOIN tiny_checkout_operations t ON t.cart_id=c.id WHERE c.id=$1`, fx.cartID).Scan(&cartID, &paymentID, &complete, &status); err != nil {
+	var complete, stockLaunched bool
+	if err := testPool.QueryRow(ctx, `SELECT c.external_order_id,p.external_order_id,t.completed,c.erp_order_status,c.erp_stock_launched FROM carts c
+	 JOIN orders o ON o.cart_id=c.id JOIN order_payments p ON p.order_id=o.id JOIN tiny_checkout_operations t ON t.cart_id=c.id WHERE c.id=$1`, fx.cartID).Scan(&cartID, &paymentID, &complete, &status, &stockLaunched); err != nil {
 		t.Fatal(err)
 	}
-	if cartID != "2" || paymentID != "2" || !complete || status != "faturado" {
+	if cartID != "2" || paymentID != "2" || !complete || !stockLaunched || status != "faturado" {
 		t.Fatal("partial bind")
 	}
 	if err := j.Bind(ctx, op); err != nil {

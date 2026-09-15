@@ -39,7 +39,8 @@ import (
 var arquivosQuePodemEstornarEstoque = map[string]string{
 	// O ponto único: a recuperação dentro de applyCartGridToOrder, e SÓ depois
 	// de o ERP ter recusado a edição com ErrOrderStockLaunched.
-	"erp/order_lifecycle.go": "a recuperação do pedido travado por lançamento manual",
+	"erp/order_lifecycle.go":                           "a recuperação do pedido travado por lançamento manual",
+	"integration/providers/erp/tiny_checkout_stock.go": "finalização paga autorizada: recusa por estoque lançado, substituto conferido e checkpoint antes do estorno; relançamento no pedido final",
 
 	// A declaração da interface ERPProvider. Não é chamada, é assinatura.
 	"integration/providers/types.go": "declaração da interface",
@@ -209,6 +210,11 @@ func TestMovimentoManualDeEstoqueNaoRessuscita(t *testing.T) {
 			return nil
 		}
 		for _, p := range proibidos {
+			// Regra autorizada em 15/09/2026: restaurar SOMENTE o lançamento
+			// previamente estornado pela finalização de um checkout pago.
+			if rel == "integration/providers/erp/tiny_checkout_stock.go" && p == "lancar-estoque" {
+				continue
+			}
 			if strings.Contains(codigo, p) {
 				infratores = append(infratores, rel+" → "+strings.TrimSuffix(p, "("))
 			}

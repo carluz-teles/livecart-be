@@ -2004,22 +2004,7 @@ func tinyCartMarker(cartID string) string { return "lc-cart-" + cartID }
 // ReverseOrderStock returns stock in Tiny for all items in the order.
 // POST /pedidos/{idPedido}/estornar-estoque
 func (t *Tiny) ReverseOrderStock(ctx context.Context, orderID string) error {
-	endpoint := fmt.Sprintf("%s/pedidos/%s/estornar-estoque", tinyAPIBaseURL, orderID)
-
-	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, nil, t.authHeaders())
-	if err != nil {
-		return fmt.Errorf("reversing order stock: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		return fmt.Errorf("reverse stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
-	}
-
-	return nil
+	return t.checkoutStockRequest(ctx, orderID, "estornar-estoque")
 }
 
 // ApproveOrder sets the order status to "Aprovado" (3) in Tiny.

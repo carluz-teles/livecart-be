@@ -16,14 +16,24 @@ import (
 )
 
 type checkoutTestJournal struct {
-	raw          []byte
-	bindFailures int
-	bound        string
+	failStockReverseSave bool
+	failStockLaunchSave  bool
+	raw                  []byte
+	bindFailures         int
+	bound                string
 }
 
 func (j *checkoutTestJournal) Save(ctx context.Context, op *providers.TinyCheckoutOperation) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if j.failStockReverseSave && op.StockReversed {
+		j.failStockReverseSave = false
+		return errors.New("database unavailable after stock reversal")
+	}
+	if j.failStockLaunchSave && op.StockLaunched {
+		j.failStockLaunchSave = false
+		return errors.New("database unavailable after stock launch")
 	}
 	var err error
 	j.raw, err = json.Marshal(op)
@@ -48,14 +58,18 @@ func (j *checkoutTestJournal) resume(t *testing.T) *providers.TinyCheckoutOperat
 }
 
 type checkoutTestTiny struct {
-	shippingForms                                                                          []tinyCheckoutReference
-	writes                                                                                 int
-	rejectCreate                                                                           bool
-	mu                                                                                     sync.Mutex
-	orders                                                                                 map[string]*tinyCheckoutOrder
-	accounts                                                                               map[string][]tinyReceivable
-	posts, cancels, reversals                                                              int
-	lostCreate, lostCancel, stockLocked, invoiceAfterCreate, received, readAccountsFailure bool
+	merchantChangeAfterCreate                                                               bool
+	noReplacement, lostStockReverse, lostStockLaunch, rejectStockReverse, rejectStockLaunch bool
+	shippingForms                                                                           []tinyCheckoutReference
+	writes                                                                                  int
+	rejectCreate                                                                            bool
+	mu                                                                                      sync.Mutex
+	orders                                                                                  map[string]*tinyCheckoutOrder
+	accounts                                                                                map[string][]tinyReceivable
+	posts, cancels, reversals                                                               int
+	lostCreate, lostCancel, stockLocked, invoiceAfterCreate, received, readAccountsFailure  bool
+	stockReversals, stockLaunches                                                           int
+	targetStockLocked                                                                       bool
 }
 
 func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -136,6 +150,9 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 		if f.invoiceAfterCreate {
 			f.orders["1"].InvoiceID = 333
 		}
+		if f.merchantChangeAfterCreate {
+			f.orders["1"].Items[0].Quantity++
+		}
 		if f.lostCreate {
 			f.lostCreate = false
 			w.WriteHeader(502)
@@ -173,7 +190,7 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 	if len(parts) == 3 {
 		switch parts[2] {
 		case "itens":
-			if f.stockLocked || order.InvoiceID != 0 {
+			if (id == "1" && f.stockLocked) || (id == "2" && f.targetStockLocked) || order.InvoiceID != 0 {
 				w.WriteHeader(400)
 				write(map[string]any{"detalhes": []any{map[string]any{"campo": "pedido.motivosBloqueio[0]", "mensagem": "estoque lançado"}}})
 				return
@@ -205,6 +222,48 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 		case "estornar-contas":
 			f.reversals++
 			f.accounts[id] = nil
+		case "estornar-estoque":
+			if id != "1" || !f.stockLocked {
+				t.Error("stock reversed without a launched source")
+			}
+			if f.orders["2"] == nil && !f.noReplacement {
+				t.Error("stock released before verified replacement exists")
+			}
+			if f.rejectStockReverse {
+				f.rejectStockReverse = false
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(429)
+				return
+			}
+			f.stockReversals++
+			f.stockLocked = false
+			if f.lostStockReverse {
+				f.lostStockReverse = false
+				w.WriteHeader(502)
+				return
+			}
+		case "lancar-estoque":
+			if !f.noReplacement && (id != "2" || f.orders["1"].Status != 2) {
+				t.Error("stock launched before replacement completed")
+			}
+			if f.rejectStockLaunch {
+				f.rejectStockLaunch = false
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(429)
+				return
+			}
+			if f.targetStockLocked {
+				w.WriteHeader(400)
+				write(map[string]any{"mensagem": "Estoque já lançado."})
+				return
+			}
+			f.stockLaunches++
+			f.targetStockLocked = true
+			if f.lostStockLaunch {
+				f.lostStockLaunch = false
+				w.WriteHeader(502)
+				return
+			}
 		case "lancar-contas":
 			for i, p := range order.Payment.Installments {
 				f.accounts[id] = append(f.accounts[id], tinyReceivable{ID: int64(100 + i), Status: "aberto", DueDate: p.Date, Value: p.Value, Balance: p.Value})
@@ -322,19 +381,14 @@ func TestTinyFinalizationResumesWithoutDuplicateOrReservationGap(t *testing.T) {
 	}
 }
 
-func TestTinyFinalizationProtectsFiscalStockAndReceivedAccounts(t *testing.T) {
-	for _, scenario := range []string{"invoice", "stock launched", "stock and accounts launched", "partially received", "receipt despite full balance", "invoice races creation", "financial read unavailable"} {
+func TestTinyFinalizationProtectsFiscalAndReceivedAccounts(t *testing.T) {
+	for _, scenario := range []string{"invoice", "partially received", "receipt despite full balance", "invoice races creation", "financial read unavailable"} {
 		t.Run(scenario, func(t *testing.T) {
 			provider, fake, op := checkoutFinalizationFixture(t)
 			journal := &checkoutTestJournal{}
 			switch scenario {
 			case "invoice":
 				fake.orders["1"].InvoiceID = 99
-			case "stock launched":
-				fake.stockLocked = true
-			case "stock and accounts launched":
-				fake.stockLocked = true
-				fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", Value: 49.9, Balance: 49.9}}
 			case "partially received":
 				fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "parcial", Value: 49.9, Balance: 20}}
 			case "receipt despite full balance":
@@ -352,6 +406,47 @@ func TestTinyFinalizationProtectsFiscalStockAndReceivedAccounts(t *testing.T) {
 			defer fake.mu.Unlock()
 			if fake.cancels != 0 || fake.reversals != 0 || journal.bound != "" {
 				t.Fatal("protected order mutated or bound")
+			}
+		})
+	}
+}
+
+func TestTinyFinalizationRestoresLaunchedStockOnPaidReplacement(t *testing.T) {
+	for _, scenario := range []string{"stock only", "stock and open accounts", "bind failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			provider, fake, op := checkoutFinalizationFixture(t)
+			fake.stockLocked = true
+			journal := &checkoutTestJournal{}
+			if scenario == "stock and open accounts" {
+				fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", Value: 49.9, Balance: 49.9}}
+			}
+			if scenario == "bind failure" {
+				journal.bindFailures = 1
+			}
+			result, err := provider.FinalizePaidCheckout(t.Context(), op, journal)
+			if scenario == "bind failure" {
+				if err == nil {
+					t.Fatal("bind failure was not propagated")
+				}
+				result, err = provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.OrderID != "2" || journal.bound != "2" {
+				t.Fatalf("unexpected result: %+v", result)
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal); err != nil {
+				t.Fatal(err)
+			}
+			if fake.stockReversals != 1 || fake.stockLaunches != 1 || fake.posts != 1 || fake.cancels != 1 {
+				t.Fatalf("reversals=%d launches=%d creates=%d cancels=%d", fake.stockReversals, fake.stockLaunches, fake.posts, fake.cancels)
+			}
+			if !fake.targetStockLocked || fake.stockLocked {
+				t.Fatal("stock was not transferred to final order")
+			}
+			if len(tinyCheckoutDifferences(fake.orders["2"], *op.Order.Checkout)) != 0 {
+				t.Fatal("final checkout differs")
 			}
 		})
 	}
