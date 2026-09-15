@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 )
 
 type checkoutTestJournal struct {
+	failContactSave      bool
 	failStockReverseSave bool
 	failStockLaunchSave  bool
 	raw                  []byte
@@ -26,6 +28,10 @@ type checkoutTestJournal struct {
 func (j *checkoutTestJournal) Save(ctx context.Context, op *providers.TinyCheckoutOperation) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if j.failContactSave && op.Order.ContactID == "9" {
+		j.failContactSave = false
+		return errors.New("database unavailable before contact checkpoint")
 	}
 	if j.failStockReverseSave && op.StockReversed {
 		j.failStockReverseSave = false
@@ -58,6 +64,11 @@ func (j *checkoutTestJournal) resume(t *testing.T) *providers.TinyCheckoutOperat
 }
 
 type checkoutTestTiny struct {
+	contacts                                                                                map[string]map[string]any
+	contactUpdates                                                                          []string
+	contactSearchStatus                                                                     int
+	contactSearchItems                                                                      []map[string]any
+	contactSearchTotal                                                                      int
 	merchantChangeAfterCreate                                                               bool
 	noReplacement, lostStockReverse, lostStockLaunch, rejectStockReverse, rejectStockLaunch bool
 	shippingForms                                                                           []tinyCheckoutReference
@@ -84,7 +95,52 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 			t.Error(err)
 		}
 	}
+	if r.URL.Path == "/contatos" && r.Method == http.MethodGet {
+		if f.contactSearchStatus != 0 {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(f.contactSearchStatus)
+			return
+		}
+		items := f.contactSearchItems
+		if items == nil {
+			items = []map[string]any{}
+			for _, contact := range f.contacts {
+				if contact["cpfCnpj"] == r.URL.Query().Get("cpfCnpj") {
+					items = append(items, contact)
+				}
+			}
+		}
+		write(map[string]any{"itens": items, "paginacao": map[string]any{"total": max(len(items), f.contactSearchTotal)}})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/contatos/") && r.Method == http.MethodGet {
+		contact := f.contacts[strings.TrimPrefix(r.URL.Path, "/contatos/")]
+		if contact == nil {
+			w.WriteHeader(404)
+			return
+		}
+		write(contact)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/contatos/") && r.Method == http.MethodPut {
+		id := strings.TrimPrefix(r.URL.Path, "/contatos/")
+		f.contactUpdates = append(f.contactUpdates, id)
+		if f.contacts != nil {
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			for otherID, contact := range f.contacts {
+				if otherID != id && payload["cpfCnpj"] != nil && contact["cpfCnpj"] == payload["cpfCnpj"] {
+					w.WriteHeader(400)
+					write(map[string]any{"mensagem": "Ocorreram erros de validação", "detalhes": []any{map[string]any{"campo": "cnpj", "mensagem": "Contato com CNPJ já existe"}}})
+					return
+				}
+			}
+			for key, value := range payload {
+				f.contacts[id][key] = value
+			}
+		}
 		w.WriteHeader(204)
 		return
 	}
@@ -142,6 +198,16 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 			t.Fatal(err)
 		}
 		order.Customer = f.orders["1"].Customer
+		if f.contacts != nil {
+			var id int64
+			if err := json.Unmarshal(data["idContato"], &id); err != nil {
+				t.Error(err)
+			}
+			contact, _ := json.Marshal(f.contacts[strconv.FormatInt(id, 10)])
+			if err := json.Unmarshal(contact, &order.Customer); err != nil {
+				t.Error(err)
+			}
+		}
 		order.Total = 49.90 + order.Freight - order.Discount
 		for i := range order.Payment.Installments {
 			order.Payment.Installments[i].Method.Name = "Pix"
@@ -344,6 +410,52 @@ func checkoutFinalizationFixture(t *testing.T) (*Tiny, *checkoutTestTiny, *provi
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fake.serve(t, w, r) }))
 	t.Cleanup(srv.Close)
 	return newTinyAgainst(t, srv), fake, op
+}
+
+func TestTinyFinalizationReusesCheckoutDocumentContact(t *testing.T) {
+	for _, tt := range []struct {
+		name                 string
+		prepared, lostCreate bool
+	}{
+		{name: "new finalization"},
+		{name: "resume existing checkpoint", prepared: true},
+		{name: "lost creation response", prepared: true, lostCreate: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, fake, op := checkoutFinalizationFixture(t)
+			fake.contacts = map[string]map[string]any{
+				"8": {"id": 8, "nome": "instagram_reserva", "cpfCnpj": "", "situacao": "B"},
+				"9": {"id": 9, "nome": "Comprador Teste", "cpfCnpj": "529.982.247-25", "situacao": "A"},
+			}
+			op.Order.Checkout.Customer.CpfCnpj = "52998224725"
+			fake.orders["1"].Customer.ID = 8
+			fake.orders["1"].Customer.Name = "instagram_reserva"
+			fake.stockLocked = true
+			op.Prepared, op.Replace, op.SourceStockLaunched = tt.prepared, tt.prepared, tt.prepared
+			journal := &checkoutTestJournal{bindFailures: 1}
+			wantError := "database unavailable before bind"
+			if tt.lostCreate {
+				fake.lostCreate, journal.bindFailures, wantError = true, 0, "502"
+			}
+			_, err := provider.FinalizePaidCheckout(t.Context(), op, journal)
+			if err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("expected %s, got %v", wantError, err)
+			}
+			restored := journal.resume(t)
+			if restored.Order.ContactID != "9" || fake.orders["2"].Customer.ID != 9 {
+				t.Fatal("resolved checkout contact was not persisted/used")
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), restored, journal); err != nil {
+				t.Fatal(err)
+			}
+			if fake.posts != 1 || fake.cancels != 1 || fake.stockReversals != 1 || fake.stockLaunches != 1 {
+				t.Fatal("resuming duplicated the order or stock movements")
+			}
+			if len(fake.contactUpdates) != 1 || fake.contactUpdates[0] != "9" || fake.contacts["8"]["cpfCnpj"] != "" {
+				t.Fatal("reservation contact was overwritten or update repeated after creation")
+			}
+		})
+	}
 }
 
 func TestTinyFinalizationResumesWithoutDuplicateOrReservationGap(t *testing.T) {
