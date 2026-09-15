@@ -4738,7 +4738,6 @@ func (s *Service) HandleMessageReceived(ctx context.Context, input ProcessInstag
 		zap.String("account_id", input.AccountID),
 		zap.String("sender_id", input.SenderID),
 		zap.String("message_id", input.MessageID),
-		zap.String("text", input.Text),
 		zap.String("reply_to_story_id", input.ReplyToStoryID),
 		zap.Bool("is_echo", input.IsEcho),
 	)
@@ -4761,59 +4760,43 @@ func (s *Service) HandleMessageReceived(ctx context.Context, input ProcessInstag
 		return nil
 	}
 
-	// Non-story DM: resolve the store from the Instagram account ID for audit +
-	// the "Testar notificação" setup capture.
-	integration, err := s.repo.GetByInstagramUserID(ctx, input.AccountID)
+	// A shared Instagram account does not identify the business that owns a
+	// generic DM. Only a setup code can select a store without a media binding.
+	storeIDs, err := s.repo.ListInstagramStoreIDs(ctx, input.AccountID)
 	if err != nil {
-		logger.From(ctx, s.logger).Error("failed to find integration by instagram account",
-			zap.String("account_id", input.AccountID),
-			zap.Error(err),
-		)
-		return nil // Don't fail the webhook, just skip storage
+		return fmt.Errorf("resolving instagram message stores: %w", err)
 	}
-	if integration == nil {
-		logger.From(ctx, s.logger).Warn("no integration found for instagram account",
-			zap.String("account_id", input.AccountID),
-		)
+	if len(storeIDs) == 0 {
+		logger.From(ctx, s.logger).Info("instagram message ignored: account has no active stores",
+			zap.String("account_id", input.AccountID), zap.String("message_id", input.MessageID))
 		return nil
 	}
-
-	// Store resolved (account_id → integration): enrich the ctx for the logs below.
-	ctx = logger.WithStore(ctx, integration.StoreID, "")
-
-	// Store webhook event for audit trail
-	if len(input.RawPayload) > 0 {
-		if err := s.StoreWebhookEvent(ctx, StoreWebhookInput{
-			StoreID:        integration.StoreID,
-			Provider:       "instagram",
-			EventType:      "messaging",
-			EventID:        input.MessageID,
-			Payload:        input.RawPayload,
-			SignatureValid: input.SignatureValid,
-		}); err != nil {
-			logger.From(ctx, s.logger).Error("failed to store instagram dm webhook event",
-				zap.String("message_id", input.MessageID),
-				zap.Error(err),
-			)
-			// Don't return error - continue processing
+	storeID := ""
+	if s.notificationService != nil && input.Text != "" {
+		storeID, err = s.notificationService.CompleteTestRecipientSetup(ctx, storeIDs, input.Text, input.SenderID, "")
+		if err != nil {
+			return fmt.Errorf("completing instagram notification setup: %w", err)
+		}
+		if storeID != "" {
+			logger.From(ctx, s.logger).Info("test recipient configured",
+				zap.String("store_id", storeID), zap.String("account_id", input.AccountID))
 		}
 	}
-
-	// If the message text matches an active "Testar notificação" setup code,
-	// capture this sender as the store's test recipient. We swallow errors
-	// here because a webhook should never fail on optional bookkeeping.
-	if s.notificationService != nil && input.Text != "" {
-		storeID, setupErr := s.notificationService.CompleteTestRecipientSetup(ctx, input.Text, input.SenderID, "")
-		if setupErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to complete test recipient setup",
-				zap.String("account_id", input.AccountID),
-				zap.Error(setupErr),
-			)
-		} else if storeID != "" {
-			logger.From(ctx, s.logger).Info("test recipient configured",
-				zap.String("store_id", storeID),
-				zap.String("sender_id", input.SenderID),
-			)
+	if storeID == "" {
+		if len(storeIDs) != 1 {
+			logger.From(ctx, s.logger).Info("instagram message ignored: shared account without store context",
+				zap.String("account_id", input.AccountID), zap.String("message_id", input.MessageID), zap.Int("connected_stores", len(storeIDs)))
+			return nil
+		}
+		storeID = storeIDs[0]
+	}
+	ctx = logger.WithStore(ctx, storeID, "")
+	if len(input.RawPayload) > 0 {
+		if err := s.StoreWebhookEvent(ctx, StoreWebhookInput{
+			StoreID: storeID, Provider: "instagram", EventType: "messaging",
+			EventID: input.MessageID, Payload: input.RawPayload, SignatureValid: input.SignatureValid,
+		}); err != nil {
+			return fmt.Errorf("storing instagram message webhook: %w", err)
 		}
 	}
 

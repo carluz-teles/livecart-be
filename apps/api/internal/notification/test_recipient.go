@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
@@ -29,9 +31,10 @@ type TestRecipient struct {
 	SetupExpires time.Time
 }
 
-// Configured reports whether the store has captured a recipient yet.
+// Configured reports whether the store has captured the sender ID used for DMs.
+// Instagram messaging webhooks need not include the sender's public handle.
 func (r TestRecipient) Configured() bool {
-	return r.PSID != "" && r.Handle != ""
+	return r.PSID != ""
 }
 
 // SetupActive reports whether there is a non-expired setup code waiting for an
@@ -101,41 +104,32 @@ func (s *Service) StartTestRecipientSetup(ctx context.Context, storeID string) (
 	return s.GetTestRecipient(ctx, storeID)
 }
 
-// CompleteTestRecipientSetup looks up the store that owns the given setup code
-// and saves the sender as that store's test recipient. Returns the store ID on
-// success so the caller can continue any follow-up logic. Returns an empty
-// string if no active code matches — the caller should treat that as "this DM
-// is a regular customer message, not a setup attempt".
-func (s *Service) CompleteTestRecipientSetup(ctx context.Context, candidateCode, senderPSID, senderHandle string) (string, error) {
+// CompleteTestRecipientSetup captures a sender only for a connected store with
+// an unambiguous active code. The caller supplies stores resolved from the
+// receiving Instagram account, never from the sender or the message alone.
+func (s *Service) CompleteTestRecipientSetup(ctx context.Context, storeIDs []string, candidateCode, senderPSID, senderHandle string) (string, error) {
 	code := normalizeSetupCode(candidateCode)
-	if code == "" {
+	if code == "" || senderPSID == "" || len(storeIDs) == 0 {
 		return "", nil
 	}
-
-	storeUID, err := s.queries.FindStoreByActiveTestSetupCode(ctx, pgtype.Text{
-		String: code,
-		Valid:  true,
+	ids := make([]pgtype.UUID, 0, len(storeIDs))
+	for _, storeID := range storeIDs {
+		id, err := parseUUID(storeID)
+		if err != nil {
+			return "", err
+		}
+		ids = append(ids, id)
+	}
+	storeID, err := s.queries.CompleteStoreTestRecipientSetup(ctx, sqlc.CompleteStoreTestRecipientSetupParams{
+		StoreIds: ids, SetupCode: code, SenderPsid: senderPSID, SenderHandle: senderHandle,
 	})
-	if err != nil {
-		// Not found is the common case: the message text is not a setup code.
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
-
-	if err := s.queries.SetStoreTestRecipient(ctx, sqlc.SetStoreTestRecipientParams{
-		ID: storeUID,
-		NotificationTestRecipientPsid: pgtype.Text{
-			String: senderPSID,
-			Valid:  senderPSID != "",
-		},
-		NotificationTestRecipientHandle: pgtype.Text{
-			String: senderHandle,
-			Valid:  senderHandle != "",
-		},
-	}); err != nil {
-		return "", fmt.Errorf("storing test recipient: %w", err)
+	if err != nil {
+		return "", fmt.Errorf("completing test recipient setup: %w", err)
 	}
-
-	return storeUID.String(), nil
+	return storeID.String(), nil
 }
 
 // SendTest renders the given template with sample variables and dispatches a

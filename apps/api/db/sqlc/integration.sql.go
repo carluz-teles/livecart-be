@@ -577,6 +577,38 @@ func (q *Queries) HealIntegrationFromError(ctx context.Context, id pgtype.UUID) 
 	return result.RowsAffected(), nil
 }
 
+const listActiveInstagramStoreIDsByAccount = `-- name: ListActiveInstagramStoreIDsByAccount :many
+SELECT DISTINCT store_id
+FROM integrations
+WHERE type = 'social' AND provider = 'instagram' AND status = 'active'
+  AND $1::text <> ''
+  AND (metadata->>'instagram_user_id' = $1::text
+       OR metadata->>'instagram_app_scoped_id' = $1::text)
+ORDER BY store_id
+`
+
+// Account-level DMs may belong to several stores; media-based purchases are
+// resolved separately through the session's event.
+func (q *Queries) ListActiveInstagramStoreIDsByAccount(ctx context.Context, accountID string) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listActiveInstagramStoreIDsByAccount, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var store_id pgtype.UUID
+		if err := rows.Scan(&store_id); err != nil {
+			return nil, err
+		}
+		items = append(items, store_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listIntegrationsByStore = `-- name: ListIntegrationsByStore :many
 SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
 `
