@@ -66,6 +66,17 @@ UPDATE integrations
 SET erp_account_id = $2
 WHERE id = $1;
 
+-- name: ListActiveInstagramStoreIDsByAccount :many
+-- Account-level DMs may belong to several stores; media-based purchases are
+-- resolved separately through the session's event.
+SELECT DISTINCT store_id
+FROM integrations
+WHERE type = 'social' AND provider = 'instagram' AND status = 'active'
+  AND sqlc.arg(account_id)::text <> ''
+  AND (metadata->>'instagram_user_id' = sqlc.arg(account_id)::text
+       OR metadata->>'instagram_app_scoped_id' = sqlc.arg(account_id)::text)
+ORDER BY store_id;
+
 -- name: GetIntegrationByProvider :one
 SELECT * FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status IN ('active', 'pending_auth')

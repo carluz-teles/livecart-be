@@ -12,6 +12,48 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const completeStoreTestRecipientSetup = `-- name: CompleteStoreTestRecipientSetup :one
+WITH matches AS (
+    SELECT id FROM stores
+    WHERE id = ANY($4::uuid[])
+      AND notification_test_setup_code = $3::text
+      AND notification_test_setup_expires_at > now()
+), unique_match AS (
+    SELECT min(id::text)::uuid AS id FROM matches HAVING count(*) = 1
+)
+UPDATE stores AS s
+SET notification_test_recipient_psid = $1::text,
+    notification_test_recipient_handle = NULLIF($2::text, ''),
+    notification_test_setup_code = NULL,
+    notification_test_setup_expires_at = NULL
+WHERE s.id = (SELECT id FROM unique_match)
+  AND s.notification_test_setup_code = $3::text
+  AND s.notification_test_setup_expires_at > now()
+RETURNING s.id
+`
+
+type CompleteStoreTestRecipientSetupParams struct {
+	SenderPsid   string        `json:"sender_psid"`
+	SenderHandle string        `json:"sender_handle"`
+	SetupCode    string        `json:"setup_code"`
+	StoreIds     []pgtype.UUID `json:"store_ids"`
+}
+
+// Consume a code only within the stores connected to the receiving Instagram
+// account. Ambiguous codes and concurrent replays cannot choose another store
+// or overwrite the recipient captured by the first message.
+func (q *Queries) CompleteStoreTestRecipientSetup(ctx context.Context, arg CompleteStoreTestRecipientSetupParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, completeStoreTestRecipientSetup,
+		arg.SenderPsid,
+		arg.SenderHandle,
+		arg.SetupCode,
+		arg.StoreIds,
+	)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const countNotificationsByStatus = `-- name: CountNotificationsByStatus :one
 SELECT
     COUNT(*) FILTER (WHERE status = 'sent')::int AS sent,
@@ -140,24 +182,6 @@ func (q *Queries) CreateNotificationLog(ctx context.Context, arg CreateNotificat
 		&i.PlatformCommentID,
 	)
 	return i, err
-}
-
-const findStoreByActiveTestSetupCode = `-- name: FindStoreByActiveTestSetupCode :one
-SELECT id
-FROM stores
-WHERE notification_test_setup_code = $1
-  AND notification_test_setup_expires_at IS NOT NULL
-  AND notification_test_setup_expires_at > now()
-LIMIT 1
-`
-
-// Looks up the store that owns a non-expired setup code. Used by the IG
-// webhook handler to route an incoming DM to the right store.
-func (q *Queries) FindStoreByActiveTestSetupCode(ctx context.Context, notificationTestSetupCode pgtype.Text) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, findStoreByActiveTestSetupCode, notificationTestSetupCode)
-	var id pgtype.UUID
-	err := row.Scan(&id)
-	return id, err
 }
 
 const getLastNotificationForUser = `-- name: GetLastNotificationForUser :one
@@ -562,28 +586,6 @@ type SetNotificationUndeliveredReasonParams struct {
 // junto com as que nunca foram tentadas.
 func (q *Queries) SetNotificationUndeliveredReason(ctx context.Context, arg SetNotificationUndeliveredReasonParams) error {
 	_, err := q.db.Exec(ctx, setNotificationUndeliveredReason, arg.ID, arg.UndeliveredReason)
-	return err
-}
-
-const setStoreTestRecipient = `-- name: SetStoreTestRecipient :exec
-UPDATE stores
-SET notification_test_recipient_psid = $2,
-    notification_test_recipient_handle = $3,
-    notification_test_setup_code = NULL,
-    notification_test_setup_expires_at = NULL
-WHERE id = $1
-`
-
-type SetStoreTestRecipientParams struct {
-	ID                              pgtype.UUID `json:"id"`
-	NotificationTestRecipientPsid   pgtype.Text `json:"notification_test_recipient_psid"`
-	NotificationTestRecipientHandle pgtype.Text `json:"notification_test_recipient_handle"`
-}
-
-// Stores the captured PSID + handle and clears the setup code. Called from the
-// IG webhook when an incoming DM matches the active setup code.
-func (q *Queries) SetStoreTestRecipient(ctx context.Context, arg SetStoreTestRecipientParams) error {
-	_, err := q.db.Exec(ctx, setStoreTestRecipient, arg.ID, arg.NotificationTestRecipientPsid, arg.NotificationTestRecipientHandle)
 	return err
 }
 

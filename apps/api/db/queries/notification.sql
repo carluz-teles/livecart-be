@@ -151,25 +151,27 @@ SET notification_test_setup_code = $2,
     notification_test_setup_expires_at = $3
 WHERE id = $1;
 
--- name: SetStoreTestRecipient :exec
--- Stores the captured PSID + handle and clears the setup code. Called from the
--- IG webhook when an incoming DM matches the active setup code.
-UPDATE stores
-SET notification_test_recipient_psid = $2,
-    notification_test_recipient_handle = $3,
+-- name: CompleteStoreTestRecipientSetup :one
+-- Consume a code only within the stores connected to the receiving Instagram
+-- account. Ambiguous codes and concurrent replays cannot choose another store
+-- or overwrite the recipient captured by the first message.
+WITH matches AS (
+    SELECT id FROM stores
+    WHERE id = ANY(sqlc.arg(store_ids)::uuid[])
+      AND notification_test_setup_code = sqlc.arg(setup_code)::text
+      AND notification_test_setup_expires_at > now()
+), unique_match AS (
+    SELECT min(id::text)::uuid AS id FROM matches HAVING count(*) = 1
+)
+UPDATE stores AS s
+SET notification_test_recipient_psid = sqlc.arg(sender_psid)::text,
+    notification_test_recipient_handle = NULLIF(sqlc.arg(sender_handle)::text, ''),
     notification_test_setup_code = NULL,
     notification_test_setup_expires_at = NULL
-WHERE id = $1;
-
--- name: FindStoreByActiveTestSetupCode :one
--- Looks up the store that owns a non-expired setup code. Used by the IG
--- webhook handler to route an incoming DM to the right store.
-SELECT id
-FROM stores
-WHERE notification_test_setup_code = $1
-  AND notification_test_setup_expires_at IS NOT NULL
-  AND notification_test_setup_expires_at > now()
-LIMIT 1;
+WHERE s.id = (SELECT id FROM unique_match)
+  AND s.notification_test_setup_code = sqlc.arg(setup_code)::text
+  AND s.notification_test_setup_expires_at > now()
+RETURNING s.id;
 
 -- =============================================================================
 -- WHATSAPP (PRD 006)

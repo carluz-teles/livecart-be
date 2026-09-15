@@ -398,64 +398,17 @@ func (r *Repository) GetByProvider(ctx context.Context, storeID, integrationType
 	return r.toIntegrationRow(row), nil
 }
 
-// GetByInstagramUserID returns an active Instagram integration by the Instagram
-// account ID that the webhook carries in entry.id.
-//
-// Casa contra os DOIS ids porque a Meta tem dois e nós já gravamos o errado: o
-// da troca do código é app-scoped (28139…) e o da conta profissional é o que
-// aparece no webhook (17841…). Toda integração conectada antes da correção tem
-// só o app-scoped gravado, e sem este OR ela continuaria sem resolver até o
-// lojista reconectar — ou seja, a correção do código não chegaria em ninguém.
-func (r *Repository) GetByInstagramUserID(ctx context.Context, instagramUserID string) (*IntegrationRow, error) {
-	query := `
-		SELECT id, store_id, type, provider, status, credentials, token_expires_at, metadata, last_synced_at, created_at
-		FROM integrations
-		WHERE provider = 'instagram'
-		  AND status = 'active'
-		  AND (metadata->>'instagram_user_id' = $1
-		       OR metadata->>'instagram_app_scoped_id' = $1)
-		LIMIT 1
-	`
-
-	row := r.pool.QueryRow(ctx, query, instagramUserID)
-
-	var id, storeID pgtype.UUID
-	var intType, provider, status string
-	var credentials []byte
-	var tokenExpiresAt pgtype.Timestamptz
-	var metadata []byte
-	var lastSyncedAt pgtype.Timestamptz
-	var createdAt time.Time
-
-	err := row.Scan(&id, &storeID, &intType, &provider, &status, &credentials, &tokenExpiresAt, &metadata, &lastSyncedAt, &createdAt)
+// ListInstagramStoreIDs returns every active store connected to this account.
+func (r *Repository) ListInstagramStoreIDs(ctx context.Context, accountID string) ([]string, error) {
+	rows, err := r.queries.ListActiveInstagramStoreIDsByAccount(ctx, accountID)
 	if err != nil {
-		if err.Error() == "no rows in result set" {
-			return nil, nil // Not found, return nil without error
-		}
-		return nil, fmt.Errorf("getting integration by instagram user id: %w", err)
+		return nil, fmt.Errorf("listing stores by instagram account: %w", err)
 	}
-
-	result := &IntegrationRow{
-		ID:          uuidToString(id),
-		StoreID:     uuidToString(storeID),
-		Type:        intType,
-		Provider:    provider,
-		Status:      status,
-		Credentials: credentials,
-		CreatedAt:   createdAt,
+	stores := make([]string, 0, len(rows))
+	for _, id := range rows {
+		stores = append(stores, id.String())
 	}
-
-	if tokenExpiresAt.Valid {
-		result.TokenExpiresAt = &tokenExpiresAt.Time
-	}
-	if lastSyncedAt.Valid {
-		result.LastSyncedAt = &lastSyncedAt.Time
-	}
-	if len(metadata) > 0 {
-		_ = json.Unmarshal(metadata, &result.Metadata)
-	}
-
-	return result, nil
+	return stores, nil
 }
 
 // GetByPagarmeAccountID returns the active Pagar.me payment integration whose
