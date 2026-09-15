@@ -40,6 +40,7 @@ func (t *Tiny) reconcileExistingCheckout(ctx context.Context, op *providers.Tiny
 
 func tinyCheckoutCanReuseSource(op *providers.TinyCheckoutOperation) bool {
 	return !op.CreateStarted && !op.SourceCancelled && !op.AccountsCleared &&
+		!op.StockReverseStarted && !op.StockReversed &&
 		(op.TargetID == "" || op.TargetID == op.SourceID)
 }
 
