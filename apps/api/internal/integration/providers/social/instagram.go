@@ -118,8 +118,7 @@ func (i *Instagram) RefreshToken(ctx context.Context) (*providers.Credentials, e
 	}
 	// Vencido: a Graph recusa e a única saída é reconectar a conta.
 	if !i.credentials.ExpiresAt.IsZero() && time.Now().After(i.credentials.ExpiresAt) {
-		return nil, fmt.Errorf("instagram token expired at %s — the account must be reconnected",
-			i.credentials.ExpiresAt.Format(time.RFC3339))
+		return nil, &instagramRefreshError{permanent: true, expired: true}
 	}
 	// Renovado há menos de 24h: a Graph recusa. Não é falha — é cedo demais.
 	if !i.credentials.ExpiresAt.IsZero() && time.Until(i.credentials.ExpiresAt) > 59*24*time.Hour {
@@ -135,14 +134,31 @@ func (i *Instagram) RefreshToken(ctx context.Context) (*providers.Credentials, e
 	}
 	resp, err := i.client.Do(req)
 	if err != nil {
+		// net/url.Error contains the full URL, including the access token.
+		if urlErr, ok := err.(*neturl.Error); ok {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("sending refresh request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading Instagram refresh response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("instagram token refresh failed: status %d, body: %s",
-			resp.StatusCode, truncate(string(body), 300))
+		var failure struct {
+			Error struct {
+				Code      int  `json:"code"`
+				Transient bool `json:"is_transient"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &failure)
+		// Unknown failures, rate limits and outages remain retryable. Do not
+		// expose the response body, which can echo request credentials.
+		permanent := !failure.Error.Transient && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests &&
+			(resp.StatusCode == http.StatusUnauthorized || failure.Error.Code == 190)
+		return nil, &instagramRefreshError{status: resp.StatusCode, code: failure.Error.Code, permanent: permanent}
 	}
 
 	var out struct {
@@ -155,6 +171,9 @@ func (i *Instagram) RefreshToken(ctx context.Context) (*providers.Credentials, e
 	}
 	if out.AccessToken == "" {
 		return nil, fmt.Errorf("instagram token refresh returned no access_token")
+	}
+	if out.ExpiresIn <= 0 || out.ExpiresIn > 60*24*60*60 {
+		return nil, fmt.Errorf("instagram token refresh returned invalid expires_in")
 	}
 
 	// Copia as credenciais para preservar o que não vem na resposta (Extra

@@ -2214,7 +2214,7 @@ func (q *Queries) GetProductQuantityInUserCart(ctx context.Context, arg GetProdu
 }
 
 const getStorePaymentIntegration = `-- name: GetStorePaymentIntegration :one
-SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata, i.priority, i.erp_account_id
+SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata, i.priority, i.erp_account_id, i.instagram_credentials_source_id
 FROM integrations i
 WHERE i.store_id = $1
   AND i.type = 'payment'
@@ -2242,6 +2242,7 @@ func (q *Queries) GetStorePaymentIntegration(ctx context.Context, storeID pgtype
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
@@ -3746,7 +3747,7 @@ func (q *Queries) ListSessionConfirmedRevenueByEvent(ctx context.Context, eventI
 }
 
 const listStorePaymentIntegrations = `-- name: ListStorePaymentIntegrations :many
-SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata, i.priority, i.erp_account_id
+SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata, i.priority, i.erp_account_id, i.instagram_credentials_source_id
 FROM integrations i
 WHERE i.store_id = $1
   AND i.type = 'payment'
@@ -3780,6 +3781,7 @@ func (q *Queries) ListStorePaymentIntegrations(ctx context.Context, storeID pgty
 			&i.Metadata,
 			&i.Priority,
 			&i.ErpAccountID,
+			&i.InstagramCredentialsSourceID,
 		); err != nil {
 			return nil, err
 		}

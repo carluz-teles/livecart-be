@@ -31,11 +31,24 @@ func TestInstagramSharedAccountMessages(t *testing.T) {
 	ctx := t.Context()
 	a, b, other := seedStoreForReconnect(t), seedStoreForReconnect(t), seedStoreForReconnect(t)
 	account, alt := "account-"+a, "scoped-"+a
-	seedSharedInstagram(t, a, account, alt, "active")
-	second := seedSharedInstagram(t, b, account, alt, "active")
+	owner := seedSharedInstagram(t, a, account, alt, "active")
+	if _, err := testPool.Exec(ctx, `UPDATE integrations SET token_expires_at=now()+interval '1 hour' WHERE id=$1`, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkInstagramFixture(t, owner, b, account); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := testRepo.GetAnyByType(ctx, b, "social")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := linked.ID
 	seedSharedInstagram(t, other, account, alt, "error")
 	// Duplicate rows in one store must not create a false multiple-store match.
-	seedSharedInstagram(t, a, account, alt, "active")
+	if _, err := testPool.Exec(ctx, `INSERT INTO integrations (store_id,type,provider,status,metadata)
+		SELECT store_id,type,provider,status,metadata FROM integrations WHERE store_id=$1`, a); err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []string{account, alt} {
 		stores, err := testRepo.ListInstagramStoreIDs(ctx, id)
 		if err != nil || len(stores) != 2 || !containsID(stores, a) || !containsID(stores, b) {
@@ -88,7 +101,8 @@ func TestInstagramSharedAccountMessages(t *testing.T) {
 
 	// With a single connected store, ordinary DMs retain their existing audit.
 	unique := fmt.Sprintf("unique-%s", other)
-	seedSharedInstagram(t, other, unique, "", "active")
+	uniqueStore := seedStoreForReconnect(t)
+	seedSharedInstagram(t, uniqueStore, unique, "", "active")
 	message.AccountID, message.MessageID, message.Text = unique, "unique-message-"+other, "hello"
 	if err := svc.HandleMessageReceived(ctx, message); err != nil {
 		t.Fatal(err)

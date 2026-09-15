@@ -625,6 +625,15 @@ func (s *Service) mirrorToOrder(ctx context.Context, cartID string) {
 
 // Create creates a new integration.
 func (s *Service) Create(ctx context.Context, input CreateIntegrationInput) (*CreateIntegrationOutput, error) {
+	if input.Provider == "instagram" {
+		existing, err := s.requireInstagramAuthorizationOwner(ctx, input.StoreID)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return nil, httpx.ErrConflict("Instagram já conectado. Use a reconexão pelo OAuth.")
+		}
+	}
 	// Enforce single-ERP-per-store: a merchant must disconnect the current ERP
 	// before connecting a new one. Mirrors the partial unique index in the DB
 	// but surfaces a friendly PT-BR message instead of a constraint violation.
@@ -816,6 +825,9 @@ func (s *Service) GetOAuthURL(ctx context.Context, input GetOAuthURLInput) (*Get
 	case "tiny":
 		return s.getTinyOAuthURL(input.StoreID)
 	case "instagram":
+		if _, err := s.requireInstagramAuthorizationOwner(ctx, input.StoreID); err != nil {
+			return nil, err
+		}
 		return s.getInstagramOAuthURL(input.StoreID)
 	case "melhor_envio":
 		return s.getMelhorEnvioOAuthURL(input.StoreID)
@@ -1381,6 +1393,10 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 	defer s.repo.DeleteOAuthState(ctx, input.State)
 
 	storeID := oauthState.StoreID.String()
+	existing, err := s.requireInstagramAuthorizationOwner(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Step 1: Exchange code for short-lived token
 	shortLivedToken, instagramUserID, err := s.exchangeInstagramCode(ctx, appID, appSecret, redirectURI, input.Code)
@@ -1449,39 +1465,10 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 
 	tokenExpiresAt := creds.ExpiresAt
 
-	// Check if integration already exists for this store
-	existing, _ := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
-
 	var integrationID string
 	if existing != nil {
-		// Update existing integration
-		err = s.repo.UpdateCredentials(ctx, existing.ID, encryptedCreds, &tokenExpiresAt)
-		if err != nil {
-			return nil, fmt.Errorf("updating credentials: %w", err)
-		}
-		err = s.repo.UpdateStatus(ctx, existing.ID, "active")
-		if err != nil {
-			return nil, fmt.Errorf("updating status: %w", err)
-		}
-		// O metadata TAMBÉM é reescrito ao reconectar.
-		//
-		// Antes só credenciais e status eram atualizados, então uma integração
-		// gravada com o id errado ficava errada para sempre: reconectar, que é o
-		// que qualquer um tenta primeiro, não tocava no campo que a resolução de
-		// loja lê. Preserva connected_at — a data da PRIMEIRA conexão não muda
-		// porque o lojista reconectou.
-		merged := map[string]any{}
-		for k, v := range existing.Metadata {
-			merged[k] = v
-		}
-		for k, v := range igMetadata {
-			merged[k] = v
-		}
-		if _, ok := merged["connected_at"]; !ok {
-			merged["connected_at"] = time.Now()
-		}
-		if err := s.repo.UpdateMetadata(ctx, existing.ID, merged); err != nil {
-			return nil, fmt.Errorf("updating instagram metadata: %w", err)
+		if err := s.saveInstagramAuthorization(ctx, existing, encryptedCreds, tokenExpiresAt, igMetadata); err != nil {
+			return nil, err
 		}
 		integrationID = existing.ID
 	} else {
@@ -6202,6 +6189,16 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 }
 
 func (s *Service) createProviderFromRow(ctx context.Context, integration *IntegrationRow) (providers.Provider, error) {
+	if integration.InstagramCredentialsSourceID != "" {
+		current, err := s.repo.GetByID(ctx, integration.ID, integration.StoreID)
+		if err != nil {
+			return nil, err
+		}
+		if current.Status != "active" {
+			return nil, httpx.ErrConflict("A conexão compartilhada do Instagram não está ativa.")
+		}
+		integration = current
+	}
 	// Decrypt credentials
 	creds, err := s.decryptCredentials(integration.Credentials)
 	if err != nil {
@@ -6278,16 +6275,26 @@ func (s *Service) refreshToken(ctx context.Context, integration *IntegrationRow,
 		if observeErr := s.factory.ObserveBlingTokenError(ctx, err); observeErr != nil {
 			err = errors.Join(err, observeErr)
 		}
+	} else if integration.Provider == string(providers.ProviderInstagram) {
+		refreshed, err = s.refreshInstagramToken(ctx, integration, creds)
 	} else {
 		refreshed, err = s.refreshTokenWithRepository(ctx, s.repo, integration, creds)
 	}
 	if err != nil {
 		return nil, err
 	}
-	logger.From(ctx, s.logger).Info("token refresh completed",
+	fields := []zap.Field{
 		zap.String("integration_id", integration.ID),
 		zap.String("provider", integration.Provider),
-	)
+	}
+	if integration.Provider == "instagram" {
+		sourceID := integration.InstagramCredentialsSourceID
+		if sourceID == "" {
+			sourceID = integration.ID
+		}
+		fields = append(fields, zap.String("instagram_credentials_source_id", sourceID))
+	}
+	logger.From(ctx, s.logger).Info("token refresh completed", fields...)
 	return refreshed, nil
 }
 
@@ -6360,7 +6367,7 @@ func (s *Service) refreshTokenWithRepository(
 	newCreds, err := provider.RefreshToken(ctx)
 	if err != nil {
 		permanent := true
-		if integration.Provider == string(providers.ProviderBling) {
+		if integration.Provider == string(providers.ProviderBling) || integration.Provider == string(providers.ProviderInstagram) {
 			var classified interface{ Permanent() bool }
 			permanent = errors.As(err, &classified) && classified.Permanent()
 		}

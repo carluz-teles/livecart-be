@@ -427,7 +427,8 @@ type Integration struct {
 	Metadata       json.RawMessage    `json:"metadata"`
 	Priority       int32              `json:"priority"`
 	// Identificador da CONTA no ERP (Bling: data.id de /empresas/me/dados-basicos, que é o mesmo companyId do webhook). Chave de rate limit e de roteamento de webhook por URL única. NULL para Tiny, que não tem esse conceito.
-	ErpAccountID pgtype.Text `json:"erp_account_id"`
+	ErpAccountID                 pgtype.Text `json:"erp_account_id"`
+	InstagramCredentialsSourceID pgtype.UUID `json:"instagram_credentials_source_id"`
 }
 
 type LiveComment struct {
