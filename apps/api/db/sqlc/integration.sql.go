@@ -83,7 +83,7 @@ const createIntegration = `-- name: CreateIntegration :one
 
 INSERT INTO integrations (store_id, type, provider, status, credentials, token_expires_at, metadata)
 VALUES ($1, $2, $3, $4, $5, $6, COALESCE(NULLIF($7::text, '')::jsonb, '{}'::jsonb))
-RETURNING id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id
+RETURNING id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id
 `
 
 type CreateIntegrationParams struct {
@@ -123,6 +123,7 @@ func (q *Queries) CreateIntegration(ctx context.Context, arg CreateIntegrationPa
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
@@ -243,7 +244,7 @@ func (q *Queries) DeleteOAuthState(ctx context.Context, state string) error {
 }
 
 const getActiveERPByAccount = `-- name: GetActiveERPByAccount :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations
 WHERE type = 'erp' AND provider = $1 AND erp_account_id = $2 AND status = 'active'
 LIMIT 1
 `
@@ -274,12 +275,13 @@ func (q *Queries) GetActiveERPByAccount(ctx context.Context, arg GetActiveERPByA
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
 
 const getActiveERPIntegration = `-- name: GetActiveERPIntegration :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations
 WHERE store_id = $1 AND type = 'erp' AND status = 'active'
 ORDER BY created_at ASC, id ASC
 LIMIT 1
@@ -319,12 +321,13 @@ func (q *Queries) GetActiveERPIntegration(ctx context.Context, storeID pgtype.UU
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
 
 const getActiveIntegrationByProvider = `-- name: GetActiveIntegrationByProvider :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status = 'active'
 LIMIT 1
 `
@@ -351,6 +354,38 @@ func (q *Queries) GetActiveIntegrationByProvider(ctx context.Context, arg GetAct
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
+	)
+	return i, err
+}
+
+const getAnyIntegrationByType = `-- name: GetAnyIntegrationByType :one
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations WHERE store_id = $1 AND type = $2
+ORDER BY created_at ASC, id ASC LIMIT 1
+`
+
+type GetAnyIntegrationByTypeParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Type    string      `json:"type"`
+}
+
+func (q *Queries) GetAnyIntegrationByType(ctx context.Context, arg GetAnyIntegrationByTypeParams) (Integration, error) {
+	row := q.db.QueryRow(ctx, getAnyIntegrationByType, arg.StoreID, arg.Type)
+	var i Integration
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Type,
+		&i.Provider,
+		&i.Status,
+		&i.TokenExpiresAt,
+		&i.LastSyncedAt,
+		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
+		&i.Priority,
+		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
@@ -419,7 +454,7 @@ func (q *Queries) GetIdempotencyByKey(ctx context.Context, arg GetIdempotencyByK
 }
 
 const getIntegrationByID = `-- name: GetIntegrationByID :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations WHERE id = $1 AND store_id = $2
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations WHERE id = $1 AND store_id = $2
 `
 
 type GetIntegrationByIDParams struct {
@@ -443,12 +478,13 @@ func (q *Queries) GetIntegrationByID(ctx context.Context, arg GetIntegrationByID
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
 
 const getIntegrationByIDOnly = `-- name: GetIntegrationByIDOnly :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations WHERE id = $1
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations WHERE id = $1
 `
 
 func (q *Queries) GetIntegrationByIDOnly(ctx context.Context, id pgtype.UUID) (Integration, error) {
@@ -467,12 +503,13 @@ func (q *Queries) GetIntegrationByIDOnly(ctx context.Context, id pgtype.UUID) (I
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
 
 const getIntegrationByProvider = `-- name: GetIntegrationByProvider :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status IN ('active', 'pending_auth')
 ORDER BY created_at DESC
 LIMIT 1
@@ -500,6 +537,7 @@ func (q *Queries) GetIntegrationByProvider(ctx context.Context, arg GetIntegrati
 		&i.Metadata,
 		&i.Priority,
 		&i.ErpAccountID,
+		&i.InstagramCredentialsSourceID,
 	)
 	return i, err
 }
@@ -552,6 +590,17 @@ func (q *Queries) GetWebhookEventByEventID(ctx context.Context, arg GetWebhookEv
 	return i, err
 }
 
+const hasInstagramCredentialAliases = `-- name: HasInstagramCredentialAliases :one
+SELECT EXISTS (SELECT 1 FROM integrations WHERE instagram_credentials_source_id = $1)
+`
+
+func (q *Queries) HasInstagramCredentialAliases(ctx context.Context, instagramCredentialsSourceID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, hasInstagramCredentialAliases, instagramCredentialsSourceID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const healIntegrationFromError = `-- name: HealIntegrationFromError :execrows
 UPDATE integrations
 SET status = 'active'
@@ -577,8 +626,43 @@ func (q *Queries) HealIntegrationFromError(ctx context.Context, id pgtype.UUID) 
 	return result.RowsAffected(), nil
 }
 
+const listActiveInstagramStoreIDsByAccount = `-- name: ListActiveInstagramStoreIDsByAccount :many
+SELECT DISTINCT i.store_id
+FROM integrations i
+JOIN integrations source ON source.id = COALESCE(i.instagram_credentials_source_id, i.id)
+WHERE i.type = 'social' AND i.provider = 'instagram' AND i.status = 'active'
+  AND source.type = 'social' AND source.provider = 'instagram' AND source.status = 'active'
+  AND source.instagram_credentials_source_id IS NULL
+  AND $1::text <> ''
+  AND (source.metadata->>'instagram_user_id' = $1::text
+       OR source.metadata->>'instagram_app_scoped_id' = $1::text)
+ORDER BY i.store_id
+`
+
+// Account-level DMs may belong to several stores; media-based purchases are
+// resolved separately through the session's event.
+func (q *Queries) ListActiveInstagramStoreIDsByAccount(ctx context.Context, accountID string) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listActiveInstagramStoreIDsByAccount, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var store_id pgtype.UUID
+		if err := rows.Scan(&store_id); err != nil {
+			return nil, err
+		}
+		items = append(items, store_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listIntegrationsByStore = `-- name: ListIntegrationsByStore :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UUID) ([]Integration, error) {
@@ -603,6 +687,7 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 			&i.Metadata,
 			&i.Priority,
 			&i.ErpAccountID,
+			&i.InstagramCredentialsSourceID,
 		); err != nil {
 			return nil, err
 		}
@@ -615,7 +700,7 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 }
 
 const listIntegrationsByType = `-- name: ListIntegrationsByType :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations
 WHERE store_id = $1 AND type = $2 AND status = 'active'
 ORDER BY created_at DESC
 `
@@ -647,6 +732,7 @@ func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegratio
 			&i.Metadata,
 			&i.Priority,
 			&i.ErpAccountID,
+			&i.InstagramCredentialsSourceID,
 		); err != nil {
 			return nil, err
 		}
@@ -659,8 +745,9 @@ func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegratio
 }
 
 const listIntegrationsWithExpiringTokens = `-- name: ListIntegrationsWithExpiringTokens :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id, instagram_credentials_source_id FROM integrations
 WHERE status = 'active'
+  AND instagram_credentials_source_id IS NULL
   AND token_expires_at IS NOT NULL
   AND token_expires_at <= $1
   -- ⚠ Acrescentar provider aqui é a mudança de UMA PALAVRA que pode derrubar a
@@ -700,6 +787,7 @@ func (q *Queries) ListIntegrationsWithExpiringTokens(ctx context.Context, tokenE
 			&i.Metadata,
 			&i.Priority,
 			&i.ErpAccountID,
+			&i.InstagramCredentialsSourceID,
 		); err != nil {
 			return nil, err
 		}

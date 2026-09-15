@@ -73,6 +73,13 @@ func cartFinalisationLockSlots(pool *pgxpool.Pool) int {
 
 // Create creates a new integration.
 func (r *Repository) Create(ctx context.Context, params CreateIntegrationParams) (*IntegrationRow, error) {
+	if params.Provider == "instagram" {
+		return r.createInstagram(ctx, params)
+	}
+	return r.createIntegration(ctx, params)
+}
+
+func (r *Repository) createIntegration(ctx context.Context, params CreateIntegrationParams) (*IntegrationRow, error) {
 	storeID, err := parseUUID(params.StoreID)
 	if err != nil {
 		return nil, err
@@ -109,7 +116,7 @@ func (r *Repository) Create(ctx context.Context, params CreateIntegrationParams)
 		return nil, fmt.Errorf("creating integration: %w", err)
 	}
 
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
 // GetAnyByType returns the first integration of the given type for a store
@@ -122,27 +129,14 @@ func (r *Repository) GetAnyByType(ctx context.Context, storeID, integrationType 
 	if err != nil {
 		return nil, err
 	}
-	const q = `
-		SELECT id, store_id, type, provider, status, credentials,
-		       token_expires_at, metadata, last_synced_at, created_at
-		FROM integrations
-		WHERE store_id = $1 AND type = $2
-		ORDER BY created_at ASC
-		LIMIT 1
-	`
-	var row sqlc.Integration
-	scanErr := r.pool.QueryRow(ctx, q, sID, integrationType).Scan(
-		&row.ID, &row.StoreID, &row.Type, &row.Provider, &row.Status,
-		&row.Credentials, &row.TokenExpiresAt, &row.Metadata,
-		&row.LastSyncedAt, &row.CreatedAt,
-	)
+	row, scanErr := r.queries.GetAnyIntegrationByType(ctx, sqlc.GetAnyIntegrationByTypeParams{StoreID: sID, Type: integrationType})
 	if errors.Is(scanErr, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if scanErr != nil {
 		return nil, fmt.Errorf("checking existing integration: %w", scanErr)
 	}
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
 // GetByID retrieves an integration by ID and store ID.
@@ -167,7 +161,7 @@ func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*Integrat
 		return nil, fmt.Errorf("getting integration: %w", err)
 	}
 
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
 // withIntegrationRefreshLock serializes rotating OAuth credentials across API
@@ -227,7 +221,7 @@ func (r *Repository) GetByIDOnly(ctx context.Context, id string) (*IntegrationRo
 		return nil, fmt.Errorf("getting integration: %w", err)
 	}
 
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
 // ListByStore lists all integrations for a store with pagination.
@@ -262,7 +256,11 @@ func (r *Repository) ListByStore(ctx context.Context, storeID string, pagination
 	paginatedRows := rows[start:end]
 	result := make([]IntegrationRow, len(paginatedRows))
 	for i, row := range paginatedRows {
-		result[i] = *r.toIntegrationRow(row)
+		resolved, err := r.resolveIntegrationRow(ctx, row)
+		if err != nil {
+			return nil, 0, err
+		}
+		result[i] = *resolved
 	}
 
 	return result, total, nil
@@ -285,7 +283,11 @@ func (r *Repository) ListByType(ctx context.Context, storeID, integrationType st
 
 	result := make([]IntegrationRow, len(rows))
 	for i, row := range rows {
-		result[i] = *r.toIntegrationRow(row)
+		resolved, err := r.resolveIntegrationRow(ctx, row)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = *resolved
 	}
 
 	return result, nil
@@ -310,7 +312,7 @@ func (r *Repository) GetActiveByProvider(ctx context.Context, storeID, integrati
 		return nil, fmt.Errorf("getting active integration: %w", err)
 	}
 
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
 // GetActiveERP resolve o ERP ATIVO da loja SEM perguntar por provider.
@@ -337,7 +339,7 @@ func (r *Repository) GetActiveERP(ctx context.Context, storeID string) (*Integra
 		return nil, fmt.Errorf("getting active erp integration: %w", err)
 	}
 
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
 // GetActiveERPByAccount resolve a LOJA a partir da conta do ERP.
@@ -361,7 +363,7 @@ func (r *Repository) GetActiveERPByAccount(ctx context.Context, provider, accoun
 		}
 		return nil, fmt.Errorf("getting erp integration by account: %w", err)
 	}
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
 // SetERPAccountID grava a identidade da conta do ERP no fim do fluxo OAuth.
@@ -395,67 +397,20 @@ func (r *Repository) GetByProvider(ctx context.Context, storeID, integrationType
 		return nil, fmt.Errorf("getting integration: %w", err)
 	}
 
-	return r.toIntegrationRow(row), nil
+	return r.resolveIntegrationRow(ctx, row)
 }
 
-// GetByInstagramUserID returns an active Instagram integration by the Instagram
-// account ID that the webhook carries in entry.id.
-//
-// Casa contra os DOIS ids porque a Meta tem dois e nós já gravamos o errado: o
-// da troca do código é app-scoped (28139…) e o da conta profissional é o que
-// aparece no webhook (17841…). Toda integração conectada antes da correção tem
-// só o app-scoped gravado, e sem este OR ela continuaria sem resolver até o
-// lojista reconectar — ou seja, a correção do código não chegaria em ninguém.
-func (r *Repository) GetByInstagramUserID(ctx context.Context, instagramUserID string) (*IntegrationRow, error) {
-	query := `
-		SELECT id, store_id, type, provider, status, credentials, token_expires_at, metadata, last_synced_at, created_at
-		FROM integrations
-		WHERE provider = 'instagram'
-		  AND status = 'active'
-		  AND (metadata->>'instagram_user_id' = $1
-		       OR metadata->>'instagram_app_scoped_id' = $1)
-		LIMIT 1
-	`
-
-	row := r.pool.QueryRow(ctx, query, instagramUserID)
-
-	var id, storeID pgtype.UUID
-	var intType, provider, status string
-	var credentials []byte
-	var tokenExpiresAt pgtype.Timestamptz
-	var metadata []byte
-	var lastSyncedAt pgtype.Timestamptz
-	var createdAt time.Time
-
-	err := row.Scan(&id, &storeID, &intType, &provider, &status, &credentials, &tokenExpiresAt, &metadata, &lastSyncedAt, &createdAt)
+// ListInstagramStoreIDs returns every active store connected to this account.
+func (r *Repository) ListInstagramStoreIDs(ctx context.Context, accountID string) ([]string, error) {
+	rows, err := r.queries.ListActiveInstagramStoreIDsByAccount(ctx, accountID)
 	if err != nil {
-		if err.Error() == "no rows in result set" {
-			return nil, nil // Not found, return nil without error
-		}
-		return nil, fmt.Errorf("getting integration by instagram user id: %w", err)
+		return nil, fmt.Errorf("listing stores by instagram account: %w", err)
 	}
-
-	result := &IntegrationRow{
-		ID:          uuidToString(id),
-		StoreID:     uuidToString(storeID),
-		Type:        intType,
-		Provider:    provider,
-		Status:      status,
-		Credentials: credentials,
-		CreatedAt:   createdAt,
+	stores := make([]string, 0, len(rows))
+	for _, id := range rows {
+		stores = append(stores, id.String())
 	}
-
-	if tokenExpiresAt.Valid {
-		result.TokenExpiresAt = &tokenExpiresAt.Time
-	}
-	if lastSyncedAt.Valid {
-		result.LastSyncedAt = &lastSyncedAt.Time
-	}
-	if len(metadata) > 0 {
-		_ = json.Unmarshal(metadata, &result.Metadata)
-	}
-
-	return result, nil
+	return stores, nil
 }
 
 // UpdateCredentials updates an integration's credentials.
@@ -540,10 +495,15 @@ func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
 		return err
 	}
 
-	return r.queries.DeleteIntegration(ctx, sqlc.DeleteIntegrationParams{
+	err = r.queries.DeleteIntegration(ctx, sqlc.DeleteIntegrationParams{
 		ID:      integrationID,
 		StoreID: sID,
 	})
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.ConstraintName == "integrations_instagram_credentials_source_fk" {
+		return httpx.ErrConflict("Este Instagram atende outras lojas. Desvincule essas lojas antes de excluir a conexão principal.")
+	}
+	return err
 }
 
 // ListWithExpiringTokens lists active integrations with tokens expiring before the given time.
@@ -559,7 +519,11 @@ func (r *Repository) ListWithExpiringTokens(ctx context.Context, expiresBefore t
 
 	result := make([]IntegrationRow, len(rows))
 	for i, row := range rows {
-		result[i] = *r.toIntegrationRow(row)
+		resolved, err := r.resolveIntegrationRow(ctx, row)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = *resolved
 	}
 	return result, nil
 }
