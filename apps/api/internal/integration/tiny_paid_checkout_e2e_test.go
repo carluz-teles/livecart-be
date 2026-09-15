@@ -76,9 +76,55 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 		t.Fatalf("unexpected demo account: err=%v", err)
 	}
 	guard.verified = true
+	if os.Getenv("TINY_E2E_EXISTING_PIX") == "1" && os.Getenv("TINY_E2E_EXISTING_CONTACT") == "1" {
+		t.Fatal("existing PIX and separate contact are distinct demo scenarios")
+	}
+	var checkoutDocument string
+	sourceContactID := cid
+	if os.Getenv("TINY_E2E_EXISTING_CONTACT") == "1" {
+		var checkoutContactName string
+		sourceContactID = fixture.Records["reservation_contact"].ID
+		if sourceContactID <= 0 || sourceContactID == cid {
+			t.Fatal("missing separate demo reservation contact")
+		}
+		for _, id := range []int64{sourceContactID, cid} {
+			var contact struct {
+				Name     string `json:"nome"`
+				Document string `json:"cpfCnpj"`
+			}
+			if err := tinyDemoAPI(ctx, provider, http.MethodGet, "/contatos/"+strconv.FormatInt(id, 10), nil, &contact); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(contact.Name, fixture.Run) || contact.Document != "" {
+				t.Fatal("expected owned demo contacts without documents")
+			}
+			if id == cid {
+				checkoutContactName = contact.Name
+			}
+		}
+		checkoutDocument = os.Getenv("TINY_E2E_CONTACT_DOCUMENT")
+		if len(checkoutDocument) != 11 {
+			t.Fatal("requires an explicit synthetic demo CPF")
+		}
+		matches, err := provider.SearchContacts(ctx, providers.SearchContactsParams{CpfCnpj: checkoutDocument})
+		if err != nil || len(matches) != 0 {
+			t.Fatalf("demo document already in use or lookup failed: %v", err)
+		}
+		if err := provider.UpdateContact(ctx, strconv.FormatInt(cid, 10), providers.ERPContactInput{Name: checkoutContactName, CpfCnpj: checkoutDocument}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
+			defer done()
+			if err := tinyDemoAPI(cleanup, provider, http.MethodPut, "/contatos/"+strconv.FormatInt(cid, 10), map[string]any{"nome": checkoutContactName, "cpfCnpj": ""}, nil); err != nil {
+				t.Error(err)
+			}
+		})
+		guard.reservationContactID = sourceContactID
+	}
 	existingPIX := os.Getenv("TINY_E2E_EXISTING_PIX") == "1"
 	withStock := os.Getenv("TINY_E2E_LAUNCHED_STOCK") == "1" && !existingPIX
-	reservation := providers.ERPOrder{ExternalID: fx.cartID, ContactID: strconv.FormatInt(cid, 10), Items: []providers.ERPOrderItem{{ProductID: strconv.FormatInt(pid, 10), Quantity: 1, UnitPrice: 4990}}, Observation: "LC-TINY-TEST FINALIZATION - NAO FATURAR"}
+	reservation := providers.ERPOrder{ExternalID: fx.cartID, ContactID: strconv.FormatInt(sourceContactID, 10), Items: []providers.ERPOrderItem{{ProductID: strconv.FormatInt(pid, 10), Quantity: 1, UnitPrice: 4990}}, Observation: "LC-TINY-TEST FINALIZATION - NAO FATURAR"}
 	if existingPIX {
 		reservation.TotalAmount = 6599
 		reservation.Shipping = &providers.ERPOrderShipping{Carrier: "Correios", Service: "PAC", CostCents: 1859}
@@ -164,6 +210,9 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
  shipping_cost_real_cents=2700,shipping_carrier='Correios',shipping_service_name='PAC',
  customer_name=$2,customer_email='livecart-tiny-test@example.invalid',customer_phone='11900000000',
  shipping_address='{"street":"Praca da Se","number":"42","neighborhood":"Se","city":"Sao Paulo","state":"SP","zipCode":"01001000"}' WHERE id=$3`, old.OrderID, fixture.Run+" Comprador completo", fx.cartID)
+	if checkoutDocument != "" {
+		exec(`UPDATE carts SET customer_document=$1 WHERE id=$2`, checkoutDocument, fx.cartID)
+	}
 	cardPaid, cardGross := 6599, 6849
 	if existingPIX {
 		exec(`INSERT INTO cart_payments(cart_id,amount_cents,gross_covered_cents,method,checkout_id,paid_at) VALUES($1::uuid,6599,6849,'pix','tiny-demo-pix-'||$1::text,'2026-09-12T15:00:00Z')`, fx.cartID)
@@ -248,6 +297,25 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 			t.Fatalf("local launch not recorded: %v", err)
 		}
 	}
+	if checkoutDocument != "" {
+		var op providers.TinyCheckoutOperation
+		if err := json.Unmarshal(progress, &op); err != nil {
+			t.Fatal(err)
+		}
+		if op.Order.ContactID != strconv.FormatInt(cid, 10) {
+			t.Fatal("existing document contact was not bound")
+		}
+		var sourceContact struct {
+			Document string `json:"cpfCnpj"`
+		}
+		if err := tinyDemoAPI(ctx, provider, http.MethodGet, "/contatos/"+strconv.FormatInt(sourceContactID, 10), nil, &sourceContact); err != nil {
+			t.Fatal(err)
+		}
+		if sourceContact.Document != "" {
+			t.Fatal("reservation contact was overwritten")
+		}
+		t.Logf("existing document contact=%d reused; reservation contact=%d preserved", cid, sourceContactID)
+	}
 	if report := os.Getenv("TINY_E2E_REPORT_FILE"); report != "" {
 		if err := os.WriteFile(report, progress, 0600); err != nil {
 			t.Fatal(err)
@@ -331,6 +399,7 @@ func tinyDemoAPI(ctx context.Context, p *providererp.Tiny, method, path string, 
 }
 
 type tinyDemoCheckoutTransport struct {
+	reservationContactID int64
 	stockLaunched        map[string]bool
 	base                 http.RoundTripper
 	mu                   sync.Mutex
@@ -381,7 +450,8 @@ func (g *tinyDemoCheckoutTransport) RoundTrip(r *http.Request) (*http.Response, 
 				return nil, err
 			}
 			owned := p.Anchor == "lc-cart-"+g.cartID || (strings.HasPrefix(p.Anchor, "lc-cart-paid-") && strings.Contains(p.Observation, "Carrinho "+g.cartID))
-			allowed = p.Contact == g.contactID && owned && len(p.Anchor) <= 50 && len(p.Items) == 1 && p.Items[0].Product.ID == g.productID && p.Items[0].Quantity == 1
+			allowedContact := p.Contact == g.contactID || (g.reservationContactID > 0 && p.Contact == g.reservationContactID)
+			allowed = allowedContact && owned && len(p.Anchor) <= 50 && len(p.Items) == 1 && p.Items[0].Product.ID == g.productID && p.Items[0].Quantity == 1
 		} else {
 			for id := range g.orders {
 				if path == "/pedidos/"+id || path == "/pedidos/"+id+"/itens" || path == "/pedidos/"+id+"/situacao" || path == "/pedidos/"+id+"/estornar-contas" || path == "/pedidos/"+id+"/lancar-contas" || path == "/pedidos/"+id+"/lancar-estoque" || path == "/pedidos/"+id+"/estornar-estoque" {

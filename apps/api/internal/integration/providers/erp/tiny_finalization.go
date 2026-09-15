@@ -265,6 +265,21 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 			return nil, err
 		}
 	}
+	if op.Replace && op.TargetID == "" && !op.CreateStarted {
+		contactID, err := t.resolveCheckoutContact(ctx, op.Order.ContactID, checkout.Customer)
+		if err != nil {
+			return nil, fmt.Errorf("resolving Tiny checkout customer: %w", err)
+		}
+		if contactID != op.Order.ContactID {
+			previousID := op.Order.ContactID
+			op.Order.ContactID = contactID
+			if err := save(); err != nil {
+				return nil, err
+			}
+			t.Logger.Info("tiny paid checkout existing customer resolved", zap.String("cart_id", op.CartID),
+				zap.String("operation_id", op.ID), zap.String("previous_contact_id", previousID), zap.String("contact_id", contactID))
+		}
+	}
 	if op.AccountsRequired && !op.AccountsCleared {
 		source, err := t.sourceForCheckout(ctx, op)
 		if err != nil {
