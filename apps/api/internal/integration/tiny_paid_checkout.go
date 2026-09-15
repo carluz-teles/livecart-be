@@ -243,9 +243,10 @@ func (j *tinyCheckoutJournal) Bind(ctx context.Context, op *providers.TinyChecko
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	result, err := tx.Exec(ctx, `UPDATE carts c SET external_order_id=$1,erp_order_number=NULLIF($2,'')
+	result, err := tx.Exec(ctx, `UPDATE carts c SET external_order_id=$1,erp_order_number=NULLIF($2,''),
+ erp_stock_launched=CASE WHEN $6 THEN true WHEN c.external_order_id<>$1 THEN false ELSE c.erp_stock_launched END
  FROM live_events e WHERE c.id=$3 AND e.id=c.event_id AND e.store_id=$4
- AND c.erp_order_state='mutating' AND (c.external_order_id=$5 OR c.external_order_id=$1)`, op.TargetID, op.TargetNumber, j.cartID, j.storeID, op.SourceID)
+	 AND c.erp_order_state='mutating' AND (c.external_order_id=$5 OR c.external_order_id=$1)`, op.TargetID, op.TargetNumber, j.cartID, j.storeID, op.SourceID, op.StockLaunched)
 	if err != nil {
 		return err
 	}

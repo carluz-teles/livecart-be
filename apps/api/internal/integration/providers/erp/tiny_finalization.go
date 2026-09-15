@@ -192,7 +192,7 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 		source, err := t.sourceForCheckout(ctx, op)
 		if err != nil {
 			var conflict *providers.TinyCheckoutReconciliationError
-			if errors.As(err, &conflict) && !op.CreateStarted && !op.SourceCancelled && !op.AccountsCleared && (op.TargetID == "" || op.TargetID == op.SourceID) {
+			if errors.As(err, &conflict) && !op.CreateStarted && !op.SourceCancelled && !op.AccountsCleared && !op.StockReverseStarted && !op.StockReversed && (op.TargetID == "" || op.TargetID == op.SourceID) {
 				return t.reconcileExistingCheckout(ctx, op, journal, source)
 			}
 			return nil, err
@@ -246,8 +246,8 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 				return nil, err
 			}
 		}
-		if op.Replace {
-			if err := t.UpdateOrderItems(ctx, op.SourceID, tinyCheckoutGrid(source)); err != nil && !(op.AccountsRequired && errors.Is(err, providers.ErrOrderAccountsLaunched)) {
+		if op.Replace || op.AccountsRequired || !tinyInstallmentsMatch(source.Payment.Installments, checkout.Payments) {
+			if err := t.checkCheckoutSourceLock(ctx, op, journal, source, op.AccountsRequired); err != nil {
 				return nil, err
 			}
 		}
@@ -272,7 +272,7 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 			if err := t.requireUnreceivedAccounts(ctx, accounts); err != nil {
 				return nil, err
 			}
-			if err := t.UpdateOrderItems(ctx, op.SourceID, tinyCheckoutGrid(source)); err != nil && !errors.Is(err, providers.ErrOrderAccountsLaunched) {
+			if err := t.checkCheckoutSourceLock(ctx, op, journal, source, true); err != nil {
 				return nil, err
 			}
 			if err := t.checkoutRequest(ctx, http.MethodPost, "/pedidos/"+op.SourceID+"/estornar-contas", nil, nil); err != nil {
@@ -308,9 +308,8 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 			if err != nil {
 				return nil, err
 			}
-			// Same-grid PUT is the supported lock check. Unlike the legacy grid
-			// flow, this path never reverses stock to bypass a merchant launch.
-			if err := t.UpdateOrderItems(ctx, op.SourceID, tinyCheckoutGrid(source)); err != nil {
+			// Preserve the source's stock until the replacement is verified.
+			if err := t.checkCheckoutSourceLock(ctx, op, journal, source, false); err != nil {
 				return nil, err
 			}
 			if err := t.UpdateContact(ctx, op.Order.ContactID, checkout.Customer); err != nil {
@@ -361,7 +360,7 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 			if len(accounts) != 0 {
 				return nil, fmt.Errorf("tiny: contas lançadas durante a finalização; reserva original preservada")
 			}
-			if err := t.UpdateOrderItems(ctx, op.SourceID, tinyCheckoutGrid(source)); err != nil {
+			if err := t.unlockPaidCheckoutStock(ctx, op, journal, source); err != nil {
 				return nil, err
 			}
 			if err := t.SetOrderSituacao(ctx, op.SourceID, providers.SituacaoCancelada); err != nil {
@@ -377,6 +376,15 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 		}
 		op.SourceCancelled = true
 		if err := save(); err != nil {
+			return nil, err
+		}
+	}
+	if !op.Replace && op.SourceStockLaunched && !op.StockReversed {
+		source, err := t.sourceForCheckout(ctx, op)
+		if err != nil {
+			return nil, err
+		}
+		if err := t.unlockPaidCheckoutStock(ctx, op, journal, source); err != nil {
 			return nil, err
 		}
 	}
@@ -416,6 +424,9 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 	}
 	if status != providers.SituacaoAprovada {
 		return nil, fmt.Errorf("tiny: aprovação do pedido final não confirmada")
+	}
+	if err := t.restorePaidCheckoutStock(ctx, op, journal); err != nil {
+		return nil, err
 	}
 	op.TargetStatus = providers.ERPOrderStatusAprovado
 	if err := journal.Bind(ctx, op); err != nil {

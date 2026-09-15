@@ -76,6 +76,7 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 		t.Fatalf("unexpected demo account: err=%v", err)
 	}
 	guard.verified = true
+	withStock := os.Getenv("TINY_E2E_LAUNCHED_STOCK") == "1"
 	old, err := provider.CreateOrder(ctx, providers.ERPOrder{ExternalID: fx.cartID, ContactID: strconv.FormatInt(cid, 10), Items: []providers.ERPOrderItem{{ProductID: strconv.FormatInt(pid, 10), Quantity: 1, UnitPrice: 4990}}, Observation: "LC-TINY-TEST FINALIZATION - NAO FATURAR"})
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +128,14 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 					continue
 				}
 			}
+			// Only undo launches observed by this test transport. Never send a
+			// speculative reversal to a reservation or an unrelated demo order.
+			if guard.stockLaunched[id] {
+				if err := provider.ReverseOrderStock(cleanup, id); err != nil {
+					t.Error(err)
+					continue
+				}
+			}
 			if order.Status != 2 {
 				if err := provider.SetOrderSituacao(cleanup, id, 2); err != nil {
 					t.Error(err)
@@ -164,6 +173,11 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 	if err := tinyDemoAPI(ctx, provider, http.MethodPost, "/pedidos/"+old.OrderID+"/lancar-contas", nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	if withStock {
+		if err := tinyDemoAPI(ctx, provider, http.MethodPost, "/pedidos/"+old.OrderID+"/lancar-estoque", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
 	productionRepo := tinyCheckoutProductionRepository(t)
 	svc := &Service{repo: productionRepo, logger: zap.NewNop()}
 	flow := erp.NewService(erpRepoAdapter{productionRepo}, &tinyDemoCollaborator{Service: svc, provider: provider}, zap.NewNop())
@@ -177,6 +191,19 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 	var progress []byte
 	if err := testPool.QueryRow(ctx, `SELECT progress FROM tiny_checkout_operations WHERE cart_id=$1 AND completed`, fx.cartID).Scan(&progress); err != nil {
 		t.Fatal(err)
+	}
+	if withStock {
+		var op providers.TinyCheckoutOperation
+		if err := json.Unmarshal(progress, &op); err != nil {
+			t.Fatal(err)
+		}
+		if !op.StockReversed || !op.StockLaunched || guard.stockLaunched[old.OrderID] || !guard.stockLaunched[target] {
+			t.Fatal("source launch was not restored on the final order")
+		}
+		var launched bool
+		if err := testPool.QueryRow(ctx, `SELECT erp_stock_launched FROM carts WHERE id=$1`, fx.cartID).Scan(&launched); err != nil || !launched {
+			t.Fatalf("local launch not recorded: %v", err)
+		}
 	}
 	if report := os.Getenv("TINY_E2E_REPORT_FILE"); report != "" {
 		if err := os.WriteFile(report, progress, 0600); err != nil {
@@ -194,6 +221,9 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 		t.Fatalf("final approval=%d err=%v", situation, err)
 	}
 	t.Logf("demo final order=%s confirmed; original=%s cancelled; replay created=0; accounts rebuilt", target, old.OrderID)
+	if withStock {
+		t.Log("launched source stock reversed and restored on final order")
+	}
 }
 
 func tinyDemoAPI(ctx context.Context, p *providererp.Tiny, method, path string, payload, target any) error {
@@ -227,6 +257,7 @@ func tinyDemoAPI(ctx context.Context, p *providererp.Tiny, method, path string, 
 }
 
 type tinyDemoCheckoutTransport struct {
+	stockLaunched        map[string]bool
 	base                 http.RoundTripper
 	mu                   sync.Mutex
 	next                 time.Time
@@ -274,7 +305,7 @@ func (g *tinyDemoCheckoutTransport) RoundTrip(r *http.Request) (*http.Response, 
 			allowed = p.Contact == g.contactID && owned && len(p.Anchor) <= 50 && len(p.Items) == 1 && p.Items[0].Product.ID == g.productID && p.Items[0].Quantity == 1
 		} else {
 			for id := range g.orders {
-				if path == "/pedidos/"+id || path == "/pedidos/"+id+"/itens" || path == "/pedidos/"+id+"/situacao" || path == "/pedidos/"+id+"/estornar-contas" || path == "/pedidos/"+id+"/lancar-contas" {
+				if path == "/pedidos/"+id || path == "/pedidos/"+id+"/itens" || path == "/pedidos/"+id+"/situacao" || path == "/pedidos/"+id+"/estornar-contas" || path == "/pedidos/"+id+"/lancar-contas" || path == "/pedidos/"+id+"/lancar-estoque" || path == "/pedidos/"+id+"/estornar-estoque" {
 					allowed = true
 				}
 			}
@@ -299,6 +330,19 @@ func (g *tinyDemoCheckoutTransport) RoundTrip(r *http.Request) (*http.Response, 
 	}
 	if g.trace != nil {
 		g.trace(r.Method, path, resp.StatusCode)
+	}
+	if r.Method == http.MethodPost && resp.StatusCode == http.StatusNoContent {
+		for id := range g.orders {
+			if g.stockLaunched == nil {
+				g.stockLaunched = map[string]bool{}
+			}
+			if path == "/pedidos/"+id+"/lancar-estoque" {
+				g.stockLaunched[id] = true
+			}
+			if path == "/pedidos/"+id+"/estornar-estoque" {
+				g.stockLaunched[id] = false
+			}
+		}
 	}
 	if path == "/pedidos" && r.Method == http.MethodPost && resp.StatusCode == 201 {
 		raw, err := io.ReadAll(resp.Body)
