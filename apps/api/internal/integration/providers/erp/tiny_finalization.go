@@ -268,6 +268,10 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 	if op.Replace && op.TargetID == "" && !op.CreateStarted {
 		contactID, err := t.resolveCheckoutContact(ctx, op.Order.ContactID, checkout.Customer)
 		if err != nil {
+			var conflict *tinyCheckoutContactConflict
+			if errors.As(err, &conflict) {
+				return nil, &providers.TinyCheckoutReconciliationError{OrderID: op.SourceID, Fields: []string{conflict.reason}}
+			}
 			return nil, fmt.Errorf("resolving Tiny checkout customer: %w", err)
 		}
 		if contactID != op.Order.ContactID {
@@ -333,7 +337,11 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 			if err := t.checkCheckoutSourceLock(ctx, op, journal, source, false); err != nil {
 				return nil, err
 			}
-			if err := t.UpdateContact(ctx, op.Order.ContactID, checkout.Customer); err != nil {
+			if err := t.updateCheckoutContact(ctx, op.Order.ContactID, checkout.Customer); err != nil {
+				var conflict *tinyCheckoutContactConflict
+				if errors.As(err, &conflict) {
+					return nil, &providers.TinyCheckoutReconciliationError{OrderID: op.SourceID, Fields: []string{conflict.reason}}
+				}
 				return nil, fmt.Errorf("updating Tiny checkout customer: %w", err)
 			}
 			op.CreateStarted = true
@@ -363,12 +371,29 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 			return nil, err
 		}
 		if checkout.Shipping != nil && !tinyCheckoutShippingMatches(target, op.ExpectedShippingID) {
-			return nil, fmt.Errorf("tiny: forma de envio divergente no pedido substituto; reserva original preservada")
+			return nil, &providers.TinyCheckoutReconciliationError{OrderID: op.TargetID, Status: target.Status, InvoiceID: target.InvoiceID, Fields: []string{"forma de envio do pedido substituto; reserva original preservada"}}
 		}
 		if target.InvoiceID != 0 || target.Status != 0 || target.Anchor != tinyCartMarker(op.Order.ExternalID) || len(tinyCheckoutDifferences(target, checkout)) != 0 || !tinyCheckoutMethodsMatch(target, checkout.Payments) || !tinyCheckoutGridMatches(target, op.Order.Items) {
-			return nil, fmt.Errorf("tiny: pedido substituto divergente; campos=%v status=%d nota=%t vínculo=%t formas=%t itens=%t; reserva original preservada", tinyCheckoutDifferences(target, checkout), target.Status, target.InvoiceID != 0, target.Anchor == tinyCartMarker(op.Order.ExternalID), tinyCheckoutMethodsMatch(target, checkout.Payments), tinyCheckoutGridMatches(target, op.Order.Items))
+			fields := tinyCheckoutDifferences(target, checkout)
+			if target.InvoiceID != 0 || target.Status != 0 {
+				fields = append(fields, "situação/nota fiscal do pedido substituto")
+			}
+			if target.Anchor != tinyCartMarker(op.Order.ExternalID) {
+				fields = append(fields, "vínculo do pedido substituto")
+			}
+			if !tinyCheckoutMethodsMatch(target, checkout.Payments) {
+				fields = append(fields, "formas de pagamento")
+			}
+			if !tinyCheckoutGridMatches(target, op.Order.Items) {
+				fields = append(fields, "itens do pedido substituto")
+			}
+			return nil, &providers.TinyCheckoutReconciliationError{OrderID: op.TargetID, Status: target.Status, InvoiceID: target.InvoiceID, Fields: fields}
 		}
 		op.TargetNumber = target.Number.String()
+		if checkout.Address != nil && target.Address == nil {
+			t.Logger.Info("tiny checkout delivery address verified from customer", zap.String("cart_id", op.CartID),
+				zap.String("operation_id", op.ID), zap.String("target_order_id", op.TargetID))
+		}
 		source, err := t.sourceForCheckout(ctx, op)
 		if err != nil {
 			return nil, err

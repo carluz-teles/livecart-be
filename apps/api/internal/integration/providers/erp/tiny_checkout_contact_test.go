@@ -3,6 +3,7 @@ package erp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,7 +39,7 @@ func TestTinyCheckoutContactResolution(t *testing.T) {
 		{name: "missing document", document: "52998224725", items: []map[string]any{{"id": 9, "situacao": "B"}}, wantError: "divergente"},
 		{name: "inactive contact", document: "52998224725", items: []map[string]any{{"id": 9, "cpfCnpj": "529.982.247-25", "situacao": "I"}}, wantError: "inativo"},
 		{name: "deleted contact", document: "52998224725", items: []map[string]any{{"id": 9, "cpfCnpj": "529.982.247-25", "situacao": "E"}}, wantError: "excluído"},
-		{name: "multiple identities", document: "52998224725", items: []map[string]any{{"id": 8, "cpfCnpj": "529.982.247-25", "situacao": "B"}, {"id": 9, "cpfCnpj": "529.982.247-25", "situacao": "A"}}, wantError: "mais de um"},
+		{name: "multiple identities", document: "52998224725", items: []map[string]any{{"id": 10, "cpfCnpj": "529.982.247-25", "situacao": "B"}, {"id": 9, "cpfCnpj": "529.982.247-25", "situacao": "A"}}, wantError: "mais de um"},
 		{name: "cannot overwrite another buyer", document: "52998224725", items: []map[string]any{}, sourceDocument: "111.444.777-35", wantError: "cadastro original preservado"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -156,5 +157,102 @@ func TestTinyFinalizationContactFailurePreservesSource(t *testing.T) {
 				t.Fatal("resolved contact not durable")
 			}
 		})
+	}
+}
+
+func TestTinyCheckoutContactIgnoresDeletedAndReusesEquivalentActive(t *testing.T) {
+	provider, fake, op := checkoutFinalizationFixture(t)
+	customer := providers.ERPContactInput{Name: "Compradóra Teste", CpfCnpj: "52998224725", Email: "buyer@example.invalid", Phone: "11900000000"}
+	fake.contacts = map[string]map[string]any{
+		"8":  {"id": 8, "nome": "instagram_reserva", "cpfCnpj": "", "situacao": "B"},
+		"9":  {"id": 9, "nome": "Compradora Teste", "cpfCnpj": "529.982.247-25", "situacao": "A", "email": customer.Email, "celular": customer.Phone},
+		"10": {"id": 10, "nome": "Compradora Teste", "cpfCnpj": "529.982.247-25", "situacao": "A", "email": customer.Email, "celular": customer.Phone},
+		"11": {"id": 11, "nome": "Compradora Teste", "cpfCnpj": "529.982.247-25", "situacao": "E"},
+	}
+	fake.orders["1"].Customer.ID = 8
+	op.Order.Checkout.Customer = customer
+	fake.contactSearchItems = []map[string]any{fake.contacts["10"], fake.contacts["11"], fake.contacts["9"]}
+	journal := &checkoutTestJournal{}
+	if _, err := provider.FinalizePaidCheckout(t.Context(), op, journal); err != nil {
+		t.Fatal(err)
+	}
+	if fake.orders["2"].Customer.ID != 9 || fake.posts != 1 || !op.Completed {
+		t.Fatal("equivalent active contact not reused")
+	}
+	if len(fake.contactUpdates) != 1 || fake.contactUpdates[0] != "9" {
+		t.Fatal("wrong contact updated")
+	}
+	for _, id := range []string{"10", "11"} {
+		if fake.contacts[id]["nome"] != "Compradora Teste" {
+			t.Fatal("another contact was modified")
+		}
+	}
+	if _, err := provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal); err != nil {
+		t.Fatal(err)
+	}
+	if fake.posts != 1 || len(fake.contactUpdates) != 1 {
+		t.Fatal("completed retry duplicated writes")
+	}
+}
+
+func TestTinyCheckoutContactDuplicateSelection(t *testing.T) {
+	for _, scenario := range []string{"deleted first", "current binding", "reordered candidates", "distinct buyers", "current changed after lookup", "only deleted"} {
+		t.Run(scenario, func(t *testing.T) {
+			provider, fake, _ := checkoutFinalizationFixture(t)
+			customer := providers.ERPContactInput{Name: "Compradora Teste", CpfCnpj: "52998224725", Email: "buyer@example.invalid", Phone: "11900000000"}
+			fake.contacts = map[string]map[string]any{
+				"8":  {"id": 8, "nome": "reserva", "situacao": "B"},
+				"9":  {"id": 9, "nome": customer.Name, "cpfCnpj": "529.982.247-25", "situacao": "B", "email": customer.Email, "celular": customer.Phone},
+				"10": {"id": 10, "nome": customer.Name, "cpfCnpj": "529.982.247-25", "situacao": "A", "email": customer.Email, "telefone": customer.Phone},
+				"11": {"id": 11, "cpfCnpj": "529.982.247-25", "situacao": "E"},
+			}
+			fake.contactSearchItems = []map[string]any{fake.contacts["11"], fake.contacts["9"], fake.contacts["10"]}
+			current, wanted := "8", "9"
+			switch scenario {
+			case "current binding":
+				current, wanted = "10", "10"
+			case "reordered candidates":
+				fake.contactSearchItems = []map[string]any{fake.contacts["10"], fake.contacts["9"], fake.contacts["11"]}
+			case "distinct buyers":
+				fake.contacts["9"]["email"] = "different@example.invalid"
+				fake.contacts["10"]["telefone"] = "11888888888"
+			case "current changed after lookup":
+				stale := map[string]any{}
+				for k, v := range fake.contacts["9"] {
+					stale[k] = v
+				}
+				fake.contactSearchItems = []map[string]any{stale, fake.contacts["10"]}
+				fake.contacts["9"]["email"] = "changed@example.invalid"
+			case "only deleted":
+				fake.contactSearchItems = []map[string]any{fake.contacts["11"]}
+			}
+			got, err := provider.resolveCheckoutContact(t.Context(), current, customer)
+			conflictExpected := scenario == "distinct buyers" || scenario == "current changed after lookup" || scenario == "only deleted"
+			if conflictExpected {
+				var conflict *tinyCheckoutContactConflict
+				if !errors.As(err, &conflict) {
+					t.Fatalf("expected typed conflict, got %v", err)
+				}
+			} else if err != nil || got != wanted {
+				t.Fatalf("selected %s, wanted %s, error=%v", got, wanted, err)
+			}
+			if fake.writes != 0 {
+				t.Fatal("selection wrote to Tiny")
+			}
+		})
+	}
+}
+
+func TestTinyFinalizationContactConflictIsReconciliation(t *testing.T) {
+	provider, fake, op := checkoutFinalizationFixture(t)
+	op.Order.Checkout.Customer.CpfCnpj = "52998224725"
+	fake.contactSearchItems = []map[string]any{{"id": 9, "cpfCnpj": "529.982.247-25", "situacao": "E"}}
+	_, err := provider.FinalizePaidCheckout(t.Context(), op, &checkoutTestJournal{})
+	var conflict *providers.TinyCheckoutReconciliationError
+	if !errors.As(err, &conflict) || conflict.OrderID != "1" {
+		t.Fatalf("expected user-facing reconciliation, got %v", err)
+	}
+	if fake.posts != 0 || fake.cancels != 0 || len(fake.contactUpdates) != 0 {
+		t.Fatal("conflict modified the reservation")
 	}
 }

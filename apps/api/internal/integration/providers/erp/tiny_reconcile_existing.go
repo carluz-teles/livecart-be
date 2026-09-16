@@ -137,13 +137,7 @@ func tinyExistingCheckoutReceivablesMatch(accounts []tinyReceivable, desired []p
 
 func existingTinyCheckoutDifferences(source *tinyCheckoutOrder, op *providers.TinyCheckoutOperation, shippingID int64) []string {
 	checkout := *op.Order.Checkout
-	// A separate delivery address is optional in Tiny. Use the customer's
-	// address only when it is absent, never to hide an explicit partial or
-	// different delivery address. Keep this fallback out of the write path.
 	commercial := *source
-	if commercial.Address == nil {
-		commercial.Address = source.Customer.Address
-	}
 	compensatedRounding := tinyCheckoutHasCompensatedRounding(source, checkout)
 	if compensatedRounding {
 		commercial.Discount = float64(checkout.DiscountCents) / 100
