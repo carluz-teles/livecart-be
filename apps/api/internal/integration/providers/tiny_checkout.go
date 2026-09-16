@@ -14,9 +14,13 @@ type TinyCheckoutReconciliationError struct {
 	Status    int
 	InvoiceID int64
 	Fields    []string
+	Missing   bool
 }
 
 func (e *TinyCheckoutReconciliationError) Error() string {
+	if e.Missing {
+		return fmt.Sprintf("pedido Tiny %s não encontrado na conta conectada; confira se a venda foi excluída ou substituída", e.OrderID)
+	}
 	status, _ := ERPOrderStatusFromSituacao(e.Status)
 	message := fmt.Sprintf("pedido Tiny %s (%s) exige conciliação", e.OrderID, status)
 	if len(e.Fields) > 0 {

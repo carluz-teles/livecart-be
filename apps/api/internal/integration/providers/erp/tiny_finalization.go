@@ -192,7 +192,7 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 		source, err := t.sourceForCheckout(ctx, op)
 		if err != nil {
 			var conflict *providers.TinyCheckoutReconciliationError
-			if errors.As(err, &conflict) && !op.CreateStarted && !op.SourceCancelled && !op.AccountsCleared && !op.StockReverseStarted && !op.StockReversed && (op.TargetID == "" || op.TargetID == op.SourceID) {
+			if source != nil && errors.As(err, &conflict) && tinyCheckoutCanReuseSource(op) {
 				return t.reconcileExistingCheckout(ctx, op, journal, source)
 			}
 			return nil, err
@@ -216,6 +216,12 @@ func (t *Tiny) FinalizePaidCheckout(ctx context.Context, op *providers.TinyCheck
 				return nil, fmt.Errorf("tiny: forma de envio não configurada para o checkout")
 			}
 			op.ExpectedShippingID = id
+		}
+		// A merchant may have completed the existing reservation already.
+		// Reuse its commercial data and financial entries before considering
+		// replacement, reversal or an item PUT that stock launch would block.
+		if tinyCheckoutCanReuseSource(op) && len(accounts) > 0 && tinyExistingCheckoutReceivablesMatch(accounts, checkout.Payments) && len(existingTinyCheckoutDifferences(source, op, op.ExpectedShippingID)) == 0 {
+			return t.completeExistingCheckout(ctx, op, journal, source, op.ExpectedShippingID, accounts)
 		}
 		op.Replace = len(tinyCheckoutDifferences(source, checkout)) > 0 || !tinyCheckoutMethodsMatch(source, checkout.Payments) || !tinyCheckoutGridMatches(source, op.Order.Items) || (checkout.Shipping != nil && !tinyCheckoutShippingMatches(source, op.ExpectedShippingID))
 		if op.Replace {
