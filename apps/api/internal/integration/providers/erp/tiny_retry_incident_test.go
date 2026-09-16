@@ -107,7 +107,8 @@ func TestTinyRetryReportsMerchantAdjustmentsWithoutERPWrite(t *testing.T) {
 	}
 }
 
-func TestTinyRetryReportsInstallmentsAndReceivablesTogether(t *testing.T) {
+func manualInvoicedTinyFixture(t *testing.T) (*Tiny, *checkoutTestTiny, *providers.TinyCheckoutOperation) {
+	t.Helper()
 	provider, fake, op := consistentFinalizedTinyOrder(t)
 	source := fake.orders["1"]
 	source.Total, source.Freight, source.Discount = 271.98, 26.08, 0
@@ -126,20 +127,12 @@ func TestTinyRetryReportsInstallmentsAndReceivablesTogether(t *testing.T) {
 		}
 		op.Order.Checkout.Payments = append(op.Order.Checkout.Payments, providers.ERPInstallment{AmountCents: amount, DueDate: due, Method: "credit_card"})
 	}
-	// Anonymous reproduction of the API's distinct card schedule and single
-	// receivable. A matching total alone must not hide either discrepancy.
+	// Anonymized reproduction of the merchant's five card installments and
+	// single receivable, with the same total and a different financial calendar.
 	err := json.Unmarshal([]byte(`{"parcelas":[{"valor":54.38,"data":"2026-10-13","formaRecebimento":{"nome":"Cartão de crédito"}},{"valor":54.40,"data":"2026-11-13","formaRecebimento":{"nome":"Cartão de crédito"}},{"valor":54.40,"data":"2026-12-14","formaRecebimento":{"nome":"Cartão de crédito"}},{"valor":54.40,"data":"2027-01-14","formaRecebimento":{"nome":"Cartão de crédito"}},{"valor":54.40,"data":"2027-02-14","formaRecebimento":{"nome":"Cartão de crédito"}}]}`), &source.Payment)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", Value: 271.98, Balance: 271.98, DueDate: "2026-09-28"}}
-	journal := &checkoutTestJournal{}
-	_, err = provider.FinalizePaidCheckout(t.Context(), op, journal)
-	var conflict *providers.TinyCheckoutReconciliationError
-	if !errors.As(err, &conflict) || !slices.Equal(conflict.Fields, []string{"parcelas e formas de pagamento", "contas a receber"}) {
-		t.Fatalf("financial discrepancies were hidden: %v", err)
-	}
-	if fake.writes != 0 || journal.bound != "" {
-		t.Fatal("financial discrepancy was changed or marked reconciled")
-	}
+	return provider, fake, op
 }

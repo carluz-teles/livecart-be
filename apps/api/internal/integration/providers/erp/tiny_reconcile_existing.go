@@ -50,7 +50,12 @@ func (t *Tiny) completeExistingCheckout(ctx context.Context, op *providers.TinyC
 	conflict.Fields = existingTinyCheckoutDifferences(source, op, shippingID)
 	// Received titles are valid evidence: never reverse them. Missing or
 	// divergent titles cannot prove the financial synchronization succeeded.
-	if !tinyExistingCheckoutReceivablesMatch(accounts, checkout.Payments) {
+	matchAccounts := tinyExistingCheckoutReceivablesMatch
+	preserveSchedule := tinyPreservesInvoicedSchedule(source)
+	if preserveSchedule {
+		matchAccounts = tinyInvoicedReceivablesMatch
+	}
+	if !matchAccounts(accounts, checkout.Payments) {
 		conflict.Fields = append(conflict.Fields, "contas a receber")
 	}
 	if len(conflict.Fields) > 0 {
@@ -80,11 +85,13 @@ func (t *Tiny) completeExistingCheckout(ctx context.Context, op *providers.TinyC
 			conflict.Fields = []string{"aprovação ou dados do pedido alterados durante a conferência"}
 			return nil, conflict
 		}
+	}
+	if preserveSchedule || approvedExisting {
 		accounts, err = t.checkoutReceivables(ctx, op.SourceID)
 		if err != nil {
 			return nil, err
 		}
-		if !tinyExistingCheckoutReceivablesMatch(accounts, checkout.Payments) {
+		if !matchAccounts(accounts, checkout.Payments) {
 			conflict.Fields = []string{"contas a receber alteradas durante a conferência"}
 			return nil, conflict
 		}
@@ -93,6 +100,10 @@ func (t *Tiny) completeExistingCheckout(ctx context.Context, op *providers.TinyC
 	if !known || status == providers.ERPOrderStatusCancelado || status == providers.ERPOrderStatusDadosIncompletos {
 		return nil, conflict
 	}
+	op.PreservedFinancialSchedule = preserveSchedule &&
+		(!tinyExistingInstallmentsMatch(verified.Payment.Installments, checkout.Payments) || !tinyReceivablesMatch(accounts, checkout.Payments))
+	commercial := tinyInvoicedCommercialSnapshot(verified, checkout)
+	op.PreservedDeliveryReference = commercial.Address != verified.Address
 	op.TargetID, op.TargetNumber, op.TargetStatus = op.SourceID, verified.Number.String(), status
 	op.Replace = false
 	if err := journal.Bind(ctx, op); err != nil {
@@ -104,7 +115,10 @@ func (t *Tiny) completeExistingCheckout(ctx context.Context, op *providers.TinyC
 		zap.Bool("has_invoice", verified.InvoiceID != 0),
 		zap.Bool("approved_existing_order", approvedExisting),
 		zap.Bool("receivable_dates_preserved", !tinyReceivablesMatch(accounts, checkout.Payments)),
-		zap.Bool("rounding_adjustment_preserved", tinyCheckoutHasCompensatedRounding(source, checkout)))
+		zap.Bool("rounding_adjustment_preserved", tinyCheckoutHasCompensatedRounding(source, checkout)),
+		zap.Bool("preserved_financial_schedule", op.PreservedFinancialSchedule),
+		zap.Bool("preserved_delivery_reference", op.PreservedDeliveryReference),
+		zap.Int("installment_count", len(verified.Payment.Installments)), zap.Int("receivable_count", len(accounts)))
 	return &OrderResult{OrderID: op.TargetID, OrderNumber: op.TargetNumber}, nil
 }
 
@@ -137,7 +151,7 @@ func tinyExistingCheckoutReceivablesMatch(accounts []tinyReceivable, desired []p
 
 func existingTinyCheckoutDifferences(source *tinyCheckoutOrder, op *providers.TinyCheckoutOperation, shippingID int64) []string {
 	checkout := *op.Order.Checkout
-	commercial := *source
+	commercial := tinyInvoicedCommercialSnapshot(source, checkout)
 	compensatedRounding := tinyCheckoutHasCompensatedRounding(source, checkout)
 	if compensatedRounding {
 		commercial.Discount = float64(checkout.DiscountCents) / 100
@@ -149,11 +163,11 @@ func existingTinyCheckoutDifferences(source *tinyCheckoutOrder, op *providers.Ti
 	if !tinyCheckoutGridMatches(source, op.Order.Items) {
 		fields = append(fields, "itens")
 	}
-	// Merchant-entered payment notes may differ; amount, due date and method
-	// must still agree on each installment, including duplicate amounts.
-	if !tinyInstallmentsMatchWith(source.Payment.Installments, checkout.Payments, func(existing tinyCheckoutInstallment, wanted providers.ERPInstallment) bool {
-		return matchesFormaRecebimento(wanted.Method, existing.Method.Name)
-	}) {
+	matchInstallments := tinyExistingInstallmentsMatch
+	if tinyPreservesInvoicedSchedule(source) {
+		matchInstallments = tinyInvoicedInstallmentsMatch
+	}
+	if !matchInstallments(source.Payment.Installments, checkout.Payments) {
 		fields = append(fields, "parcelas e formas de pagamento")
 	}
 	if checkout.Shipping != nil && !tinyExistingCheckoutShippingMatches(source, checkout.Shipping.Carrier, shippingID) {
@@ -176,6 +190,12 @@ func tinyCheckoutHasCompensatedRounding(source *tinyCheckoutOrder, checkout prov
 		paid += payment.AmountCents
 	}
 	return len(checkout.Payments) > 0 && int64(math.Round(source.Total*100)) == paid
+}
+
+func tinyExistingInstallmentsMatch(current []tinyCheckoutInstallment, desired []providers.ERPInstallment) bool {
+	return tinyInstallmentsMatchWith(current, desired, func(existing tinyCheckoutInstallment, wanted providers.ERPInstallment) bool {
+		return matchesFormaRecebimento(wanted.Method, existing.Method.Name)
+	})
 }
 
 func tinyExistingCheckoutShippingMatches(order *tinyCheckoutOrder, carrier string, expectedID int64) bool {

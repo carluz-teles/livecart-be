@@ -64,6 +64,8 @@ func (j *checkoutTestJournal) resume(t *testing.T) *providers.TinyCheckoutOperat
 }
 
 type checkoutTestTiny struct {
+	accountReads                                                                            int
+	changeAccountsOnReread                                                                  bool
 	contacts                                                                                map[string]map[string]any
 	contactUpdates                                                                          []string
 	contactSearchStatus                                                                     int
@@ -153,6 +155,11 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 		return
 	}
 	if r.URL.Path == "/contas-receber" {
+		f.accountReads++
+		if f.changeAccountsOnReread && f.accountReads > 1 {
+			write(map[string]any{"itens": []tinyReceivable{}})
+			return
+		}
 		if f.readAccountsFailure {
 			w.WriteHeader(503)
 			return
