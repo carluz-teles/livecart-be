@@ -60,7 +60,7 @@ func TestTinyFinalizedReconciliationKeepsRealDifferencesPending(t *testing.T) {
 			case "customer":
 				source.Customer.Name = "Outro comprador"
 			case "installments":
-				source.Payment.Installments[0].Date = "2026-10-14"
+				source.Payment.Installments = nil
 			case "payment method":
 				source.Payment.Installments[0].Method.Name = "Dinheiro"
 			case "accounts":

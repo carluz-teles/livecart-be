@@ -34,28 +34,30 @@ type TinyPaidCheckoutFinalizer interface {
 // TinyCheckoutOperation is a durable checkpoint, saved BEFORE non-idempotent calls.
 // It contains only the business request and progress; never credentials/HTTP logs.
 type TinyCheckoutOperation struct {
-	ID                  string
-	CartID              string
-	SourceID            string
-	SourceAnchor        string
-	TargetID            string
-	TargetNumber        string
-	TargetStatus        ERPOrderStatus
-	Order               ERPOrder
-	StartedAt           time.Time
-	Prepared            bool
-	Replace             bool
-	CreateStarted       bool
-	ExpectedShippingID  int64
-	AccountsRequired    bool
-	AccountsCleared     bool
-	SourceCancelled     bool
-	SourceStockLaunched bool
-	StockReverseStarted bool
-	StockReversed       bool
-	StockLaunchStarted  bool
-	StockLaunched       bool
-	Completed           bool
+	ID                         string
+	CartID                     string
+	SourceID                   string
+	SourceAnchor               string
+	TargetID                   string
+	TargetNumber               string
+	TargetStatus               ERPOrderStatus
+	Order                      ERPOrder
+	StartedAt                  time.Time
+	Prepared                   bool
+	Replace                    bool
+	CreateStarted              bool
+	ExpectedShippingID         int64
+	AccountsRequired           bool
+	AccountsCleared            bool
+	SourceCancelled            bool
+	SourceStockLaunched        bool
+	StockReverseStarted        bool
+	StockReversed              bool
+	StockLaunchStarted         bool
+	StockLaunched              bool
+	Completed                  bool
+	PreservedFinancialSchedule bool
+	PreservedDeliveryReference bool
 }
 
 type TinyCheckoutJournal interface {
