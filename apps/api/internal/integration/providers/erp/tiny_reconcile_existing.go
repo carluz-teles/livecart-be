@@ -63,14 +63,7 @@ func (t *Tiny) reconcileExistingCheckout(ctx context.Context, op *providers.Tiny
 
 func existingTinyCheckoutDifferences(source *tinyCheckoutOrder, op *providers.TinyCheckoutOperation, shippingID int64) []string {
 	checkout := *op.Order.Checkout
-	// A separate delivery address is optional in Tiny. Use the customer's
-	// address only when it is absent, never to hide an explicit partial or
-	// different delivery address. Keep this fallback out of the write path.
-	commercial := *source
-	if commercial.Address == nil {
-		commercial.Address = source.Customer.Address
-	}
-	fields := tinyCheckoutDifferences(&commercial, checkout)
+	fields := tinyCheckoutDifferences(source, checkout)
 	if !tinyCheckoutGridMatches(source, op.Order.Items) {
 		fields = append(fields, "itens")
 	}

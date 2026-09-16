@@ -76,18 +76,24 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 		t.Fatalf("unexpected demo account: err=%v", err)
 	}
 	guard.verified = true
+	withCustomerDelivery := os.Getenv("TINY_E2E_CUSTOMER_DELIVERY") == "1"
+	if withCustomerDelivery && os.Getenv("TINY_E2E_EXISTING_CONTACT") != "1" {
+		t.Fatal("customer delivery scenario requires the separate demo checkout contact")
+	}
 	var checkoutDocument string
 	sourceContactID := cid
 	if os.Getenv("TINY_E2E_EXISTING_CONTACT") == "1" {
 		var checkoutContactName string
+		var originalAddress map[string]any
 		sourceContactID = fixture.Records["reservation_contact"].ID
 		if sourceContactID <= 0 || sourceContactID == cid {
 			t.Fatal("missing separate demo reservation contact")
 		}
 		for _, id := range []int64{sourceContactID, cid} {
 			var contact struct {
-				Name     string `json:"nome"`
-				Document string `json:"cpfCnpj"`
+				Name     string         `json:"nome"`
+				Document string         `json:"cpfCnpj"`
+				Address  map[string]any `json:"endereco"`
 			}
 			if err := tinyDemoAPI(ctx, provider, http.MethodGet, "/contatos/"+strconv.FormatInt(id, 10), nil, &contact); err != nil {
 				t.Fatal(err)
@@ -97,6 +103,10 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 			}
 			if id == cid {
 				checkoutContactName = contact.Name
+				originalAddress = contact.Address
+				if originalAddress == nil {
+					originalAddress = map[string]any{"endereco": "", "numero": "", "complemento": "", "bairro": "", "municipio": "", "uf": "", "cep": "", "pais": ""}
+				}
 			}
 		}
 		checkoutDocument = os.Getenv("TINY_E2E_CONTACT_DOCUMENT")
@@ -113,10 +123,20 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 		t.Cleanup(func() {
 			cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
 			defer done()
-			if err := tinyDemoAPI(cleanup, provider, http.MethodPut, "/contatos/"+strconv.FormatInt(cid, 10), map[string]any{"nome": checkoutContactName, "cpfCnpj": ""}, nil); err != nil {
+			payload := map[string]any{"nome": checkoutContactName, "cpfCnpj": ""}
+			if withCustomerDelivery {
+				payload["endereco"] = originalAddress
+			}
+			if err := tinyDemoAPI(cleanup, provider, http.MethodPut, "/contatos/"+strconv.FormatInt(cid, 10), payload, nil); err != nil {
 				t.Error(err)
 			}
 		})
+		if withCustomerDelivery {
+			address := map[string]any{"endereco": "Praca da Se", "numero": "42", "complemento": "", "bairro": "Se", "municipio": "Sao Paulo", "uf": "SP", "cep": "01001000", "pais": "Brasil"}
+			if err := tinyDemoAPI(ctx, provider, http.MethodPut, "/contatos/"+strconv.FormatInt(cid, 10), map[string]any{"nome": checkoutContactName, "endereco": address}, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
 		guard.reservationContactID = sourceContactID
 	}
 	withStock := os.Getenv("TINY_E2E_LAUNCHED_STOCK") == "1"
@@ -269,6 +289,18 @@ func TestE2ETinyFinalizationDatabase(t *testing.T) {
 			t.Fatal("reservation contact was overwritten")
 		}
 		t.Logf("existing document contact=%d reused; reservation contact=%d preserved", cid, sourceContactID)
+	}
+	if withCustomerDelivery {
+		var actual struct {
+			Address *json.RawMessage `json:"enderecoEntrega"`
+		}
+		if err := tinyDemoAPI(ctx, provider, http.MethodGet, "/pedidos/"+target, nil, &actual); err != nil {
+			t.Fatal(err)
+		}
+		if actual.Address != nil {
+			t.Fatal("Tiny did not return the expected customer-address representation")
+		}
+		t.Log("Tiny returned null separate delivery address; matching customer address verified")
 	}
 	if report := os.Getenv("TINY_E2E_REPORT_FILE"); report != "" {
 		if err := os.WriteFile(report, progress, 0600); err != nil {

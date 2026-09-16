@@ -63,8 +63,8 @@ func TestTinyExistingCheckoutRecognizesCustomerAddressAndCarrierRegistration(t *
 				t.Fatalf("reconciliation wrote to Tiny %d times", fake.writes)
 			}
 			if scenario == "customer address" {
-				if source.Address != nil || !slices.Contains(tinyCheckoutDifferences(source, *op.Order.Checkout), "endereço de entrega") {
-					t.Fatal("read-only fallback changed the source or weakened replacement verification")
+				if source.Address != nil || slices.Contains(tinyCheckoutDifferences(source, *op.Order.Checkout), "endereço de entrega") {
+					t.Fatal("effective delivery address must be recognized without mutating the response")
 				}
 				if tinyCheckoutShippingMatches(source, 11) {
 					t.Fatal("replacement verification must still enforce the requested shipping ID")

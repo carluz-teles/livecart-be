@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.uber.org/zap"
 	"livecart/apps/api/internal/integration/providers"
 )
 
@@ -16,6 +17,26 @@ type tinyCheckoutContact struct {
 	ID       int64  `json:"id"`
 	Document string `json:"cpfCnpj"`
 	Status   string `json:"situacao"`
+	Name     string `json:"nome"`
+	Email    string `json:"email"`
+	Phone    string `json:"telefone"`
+	Mobile   string `json:"celular"`
+}
+
+type tinyCheckoutContactConflict struct{ reason string }
+
+func (e *tinyCheckoutContactConflict) Error() string { return "tiny: " + e.reason }
+
+func (c tinyCheckoutContact) active() bool { return c.Status == "A" || c.Status == "B" }
+
+// A duplicated document alone cannot choose between distinct registrations.
+// Corroborate it with the checkout's name, email AND phone before breaking a tie.
+func (c tinyCheckoutContact) matchesBuyer(customer providers.ERPContactInput) bool {
+	phone := digitsOnlyTiny(customer.Phone)
+	return strings.TrimSpace(customer.Name) != "" && strings.TrimSpace(customer.Email) != "" && phone != "" &&
+		sameTinyCheckoutText(stripAccents(c.Name), stripAccents(customer.Name)) &&
+		strings.EqualFold(strings.TrimSpace(c.Email), strings.TrimSpace(customer.Email)) &&
+		(phone == digitsOnlyTiny(c.Phone) || phone == digitsOnlyTiny(c.Mobile))
 }
 
 // The reservation may belong to an Instagram placeholder, while the checkout
@@ -33,22 +54,43 @@ func (t *Tiny) resolveCheckoutContact(ctx context.Context, currentID string, cus
 	if err != nil {
 		return "", err
 	}
-	selected := ""
+	active := map[string]tinyCheckoutContact{}
 	for _, contact := range contacts {
+		// Deleted/inactive registrations can still be returned by the CPF
+		// search. They are not candidates, and do not invalidate active ones.
+		if contact.Status == "E" || contact.Status == "I" {
+			continue
+		}
 		if contact.ID <= 0 || digitsOnlyTiny(contact.Document) != document {
 			return "", fmt.Errorf("tiny: busca de contatos retornou documento ou identificação divergente")
 		}
-		if contact.Status != "A" && contact.Status != "B" {
-			return "", fmt.Errorf("tiny: contato do comprador está inativo ou excluído; confira o cadastro no ERP")
+		if !contact.active() {
+			return "", &tinyCheckoutContactConflict{reason: "situação do contato não reconhecida; confira o cadastro no ERP"}
 		}
 		candidate := strconv.FormatInt(contact.ID, 10)
-		if selected != "" && selected != candidate {
-			return "", fmt.Errorf("tiny: mais de um contato com o documento do comprador; confira os cadastros no ERP")
-		}
-		selected = candidate
+		active[candidate] = contact
 	}
-	if selected == "" {
-		selected = currentID
+	selected := currentID
+	corroborate := false
+	if _, found := active[currentID]; !found && len(active) > 0 {
+		var selectedID int64
+		for _, contact := range active {
+			if len(active) > 1 && !contact.matchesBuyer(customer) {
+				continue
+			}
+			// Use the lowest matching ID as a stable tie-breaker. Once selected,
+			// the saved binding takes precedence on subsequent retries.
+			if selectedID == 0 || contact.ID < selectedID {
+				selectedID = contact.ID
+			}
+		}
+		if selectedID == 0 {
+			return "", &tinyCheckoutContactConflict{reason: "mais de um contato ativo com o documento; nome, email e telefone não permitem confirmar o comprador"}
+		}
+		selected = strconv.FormatInt(selectedID, 10)
+		corroborate = len(active) > 1
+	} else if len(active) == 0 && len(contacts) > 0 {
+		return "", &tinyCheckoutContactConflict{reason: "contato do comprador está inativo ou excluído; confira o cadastro no ERP"}
 	}
 	// Re-read even a search match: never replace a different person's document
 	// based only on a stale order snapshot or a cached Instagram/contact mapping.
@@ -56,18 +98,55 @@ func (t *Tiny) resolveCheckoutContact(ctx context.Context, currentID string, cus
 	if err != nil || id <= 0 {
 		return "", fmt.Errorf("tiny: contato de checkout sem identificação verificável")
 	}
-	var contact tinyCheckoutContact
-	if err := t.checkoutRequest(ctx, http.MethodGet, "/contatos/"+selected, nil, &contact); err != nil {
+	contact, err := t.readCheckoutContact(ctx, selected)
+	if err != nil {
 		return "", fmt.Errorf("verifying Tiny checkout contact: %w", err)
 	}
-	if contact.ID != id || (contact.Status != "A" && contact.Status != "B") {
-		return "", fmt.Errorf("tiny: contato de checkout inexistente, inativo ou divergente")
+	if contact.ID != id || !contact.active() {
+		return "", &tinyCheckoutContactConflict{reason: "contato de checkout inexistente, inativo ou divergente"}
 	}
 	actualDocument := digitsOnlyTiny(contact.Document)
 	if (actualDocument != "" && actualDocument != document) || (len(contacts) > 0 && actualDocument != document) {
-		return "", fmt.Errorf("tiny: documento do contato diverge do comprador; cadastro original preservado")
+		return "", &tinyCheckoutContactConflict{reason: "documento do contato diverge do comprador; cadastro original preservado"}
+	}
+	if corroborate && !contact.matchesBuyer(customer) {
+		return "", &tinyCheckoutContactConflict{reason: "cadastro do comprador alterado durante a conferência"}
+	}
+	if len(contacts) > 1 {
+		t.Logger.Info("tiny checkout contact candidates resolved", zap.String("contact_id", selected),
+			zap.Int("candidates", len(contacts)), zap.Int("active_candidates", len(active)), zap.Bool("buyer_details_verified", corroborate))
 	}
 	return selected, nil
+}
+
+func (t *Tiny) readCheckoutContact(ctx context.Context, id string) (*tinyCheckoutContact, error) {
+	var contact tinyCheckoutContact
+	if err := t.checkoutRequest(ctx, http.MethodGet, "/contatos/"+id, nil, &contact); err != nil {
+		return nil, err
+	}
+	return &contact, nil
+}
+
+func (t *Tiny) updateCheckoutContact(ctx context.Context, id string, customer providers.ERPContactInput) error {
+	if document := digitsOnlyTiny(customer.CpfCnpj); document != "" {
+		contact, err := t.readCheckoutContact(ctx, id)
+		if err != nil {
+			return err
+		}
+		if strconv.FormatInt(contact.ID, 10) != id || !contact.active() {
+			return &tinyCheckoutContactConflict{reason: "contato de checkout inexistente, inativo ou divergente"}
+		}
+		actual := digitsOnlyTiny(contact.Document)
+		if actual != "" && actual != document {
+			return &tinyCheckoutContactConflict{reason: "documento do contato diverge do comprador; cadastro original preservado"}
+		}
+		if actual == document {
+			// Do not resubmit an unchanged document: legacy Tiny registrations
+			// may share it and trigger duplicate validation on a redundant PUT.
+			customer.CpfCnpj = ""
+		}
+	}
+	return t.UpdateContact(ctx, id, customer)
 }
 
 func (t *Tiny) findCheckoutContacts(ctx context.Context, document string) ([]tinyCheckoutContact, error) {

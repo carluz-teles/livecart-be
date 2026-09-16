@@ -145,10 +145,16 @@ func tinyCheckoutDifferences(order *tinyCheckoutOrder, checkout providers.ERPOrd
 		fields = append(fields, "email do cliente")
 	}
 	if a := checkout.Address; a != nil {
-		if order.Address == nil || !sameTinyCheckoutText(order.Address.Street, a.Street) || !sameTinyCheckoutText(order.Address.Number, a.Number) ||
-			!sameTinyCheckoutText(order.Address.Complement, a.Complement) || !sameTinyCheckoutText(order.Address.Neighborhood, a.Neighborhood) ||
-			!sameTinyCheckoutText(order.Address.City, a.City) || !sameTinyCheckoutText(order.Address.State, a.State) ||
-			digitsOnlyTiny(order.Address.Zip) != digitsOnlyTiny(a.ZipCode) {
+		// Tiny omits a separate delivery address when it uses the customer's
+		// address. An explicit (even partial) delivery address takes precedence.
+		actual := order.Address
+		if actual == nil {
+			actual = order.Customer.Address
+		}
+		if actual == nil || !sameTinyCheckoutText(actual.Street, a.Street) || !sameTinyCheckoutText(actual.Number, a.Number) ||
+			!sameTinyCheckoutText(actual.Complement, a.Complement) || !sameTinyCheckoutText(actual.Neighborhood, a.Neighborhood) ||
+			!sameTinyCheckoutText(actual.City, a.City) || !sameTinyCheckoutText(actual.State, a.State) ||
+			digitsOnlyTiny(actual.Zip) != digitsOnlyTiny(a.ZipCode) {
 			fields = append(fields, "endereço de entrega")
 		}
 	}
