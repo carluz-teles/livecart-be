@@ -113,3 +113,37 @@ func TestTinyPaidCheckoutRequiresVerifiedCommercialSnapshot(t *testing.T) {
 		})
 	}
 }
+
+func TestTinyCheckoutDeliveryAddressPrecedence(t *testing.T) {
+	address := &tinyCheckoutAddress{Street: "Rua Teste", Number: "42", Complement: "Casa", Neighborhood: "Centro", City: "Sao Paulo", State: "SP", Zip: "01001-000"}
+	for _, scenario := range []string{"same billing", "explicit matching", "explicit partial", "missing both", "different billing", "different number", "different complement", "different postcode"} {
+		t.Run(scenario, func(t *testing.T) {
+			copyAddress := *address
+			order := &tinyCheckoutOrder{Total: 10}
+			order.Customer.Address = &copyAddress
+			checkout := providers.ERPOrderCheckout{Address: &providers.ERPShippingAddress{Street: "Rua Teste", Number: "42", Complement: "Casa", Neighborhood: "Centro", City: "Sao Paulo", State: "SP", ZipCode: "01001000"}, Payments: []providers.ERPInstallment{{AmountCents: 1000}}}
+			switch scenario {
+			case "explicit matching":
+				order.Address = address
+				order.Customer.Address = &tinyCheckoutAddress{Street: "Outro"}
+			case "explicit partial":
+				order.Address = &tinyCheckoutAddress{Street: "Rua Teste"}
+			case "missing both":
+				order.Customer.Address = nil
+			case "different billing":
+				copyAddress.Street = "Outro endereço"
+			case "different number":
+				copyAddress.Number = "43"
+			case "different complement":
+				copyAddress.Complement = "Apartamento"
+			case "different postcode":
+				copyAddress.Zip = "01001-001"
+			}
+			differences := tinyCheckoutDifferences(order, checkout)
+			wantMatch := scenario == "same billing" || scenario == "explicit matching"
+			if (len(differences) == 0) != wantMatch {
+				t.Fatalf("unexpected address result: %v", differences)
+			}
+		})
+	}
+}

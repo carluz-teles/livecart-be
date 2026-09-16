@@ -600,3 +600,59 @@ func TestTinyReceivableMismatchCannotReportSuccessfulCheckout(t *testing.T) {
 		t.Fatal("stale financial title ignored")
 	}
 }
+
+func TestTinyFinalizationResumesReplacementUsingCustomerDeliveryAddress(t *testing.T) {
+	for _, explicitMismatch := range []bool{false, true} {
+		name := "missing separate address uses matching customer address"
+		if explicitMismatch {
+			name = "explicit delivery mismatch is preserved"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider, fake, op := checkoutFinalizationFixture(t)
+			journal := &checkoutTestJournal{}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), op, journal); err != nil {
+				t.Fatal(err)
+			}
+			// Reproduce the saved operation after a replacement was created but its
+			// address verification stopped before any source cancellation/reversal.
+			op.Completed, op.SourceCancelled = false, false
+			op.SourceStockLaunched = true
+			op.StockReversed, op.StockLaunched = false, false
+			fake.stockLocked = true
+			fake.orders["1"].Status = 0
+			op.Order.Checkout.Address = &providers.ERPShippingAddress{Street: "Rua de Testes", Number: "42", Neighborhood: "Centro", City: "Sao Paulo", State: "SP", ZipCode: "01001000"}
+			target := fake.orders["2"]
+			target.Customer.Address = &tinyCheckoutAddress{Street: "Rua de Testes", Number: "42", Neighborhood: "Centro", City: "Sao Paulo", State: "SP", Zip: "01001-000"}
+			target.Status = 0
+			target.Address = nil
+			if explicitMismatch {
+				target.Address = &tinyCheckoutAddress{Street: "Outro destino"}
+			}
+			priorPosts, priorCancels := fake.posts, fake.cancels
+			if err := journal.Save(t.Context(), op); err != nil {
+				t.Fatal(err)
+			}
+			op = journal.resume(t)
+			_, err := provider.FinalizePaidCheckout(t.Context(), op, journal)
+			if explicitMismatch {
+				var conflict *providers.TinyCheckoutReconciliationError
+				if !errors.As(err, &conflict) || conflict.OrderID != "2" || fake.cancels != priorCancels || fake.posts != priorPosts || fake.stockReversals != 0 {
+					t.Fatalf("different delivery destination was approved: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !op.Completed || fake.posts != priorPosts || fake.cancels != priorCancels+1 || fake.stockReversals != 1 || fake.stockLaunches != 1 {
+				t.Fatal("saved replacement was not reused")
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal); err != nil {
+				t.Fatal(err)
+			}
+			if fake.posts != priorPosts || fake.cancels != priorCancels+1 || fake.stockReversals != 1 || fake.stockLaunches != 1 {
+				t.Fatal("completed retry repeated replacement or stock movements")
+			}
+		})
+	}
+}
