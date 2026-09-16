@@ -130,6 +130,15 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 	if err != nil {
 		return nil, fmt.Errorf("reading order items for reflection: %w", err)
 	}
+	// A successful GET can confirm a previously uncertain Tiny write. Without
+	// this acknowledgement, an identical line is skipped below forever while
+	// its pending marker keeps the order in the attention queue. The repository
+	// compares current quantity AND price, protecting additions made during GET.
+	if ack, ok := s.repo.(ERPGridAcknowledger); ok && erpProvider.Name() == providers.ProviderTiny {
+		if err := ack.ConfirmERPGrid(ctx, cartID, unambiguousReflectionGrid(doPedido)); err != nil {
+			return nil, fmt.Errorf("confirming Tiny order items read from ERP: %w", err)
+		}
+	}
 
 	doCarrinho, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
 	if err != nil {
@@ -225,3 +234,19 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 }
 
 var _ = providers.ERPOrderItem{}
+
+// ConfirmERPGrid acknowledges one total per product. A merchant may split a
+// product into multiple ERP lines; none of those lines alone proves that total.
+func unambiguousReflectionGrid(grid []providers.ERPOrderItem) []providers.ERPOrderItem {
+	counts := make(map[string]int, len(grid))
+	for _, item := range grid {
+		counts[item.ProductID]++
+	}
+	unique := make([]providers.ERPOrderItem, 0, len(grid))
+	for _, item := range grid {
+		if item.ProductID != "" && counts[item.ProductID] == 1 {
+			unique = append(unique, item)
+		}
+	}
+	return unique
+}
