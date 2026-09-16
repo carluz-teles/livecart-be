@@ -170,3 +170,57 @@ func TestTinyCorrectedPIXStillBlocksAnIncorrectTotal(t *testing.T) {
 		t.Fatalf("incorrect paid total accepted: %v", err)
 	}
 }
+
+func TestTinyInvoicedCompensatedRoundingReconcilesWithoutERPWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name                               string
+		products, freight, discount, total float64
+		discountCents                      int64
+	}{
+		{"order 1492", 55.90, 15.16, 2.795, 68.27, 279},
+		{"order 1487", 544.70, 30.57, 27.235000000000003, 548.04, 2723},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, fake, op := consistentFinalizedTinyOrder(t)
+			source := fake.orders["1"]
+			source.Freight, source.Discount, source.OtherExpenses, source.Total = tc.freight, tc.discount, 0.01, tc.total
+			source.Items[0].UnitPrice = tc.products
+			op.Order.Items[0].UnitPrice = int64(tc.products*100 + 0.5)
+			op.Order.Checkout.FreightCents, op.Order.Checkout.DiscountCents = int64(tc.freight*100+0.5), tc.discountCents
+			op.Order.Checkout.Payments[0].AmountCents = int64(tc.total*100 + 0.5)
+			op.Order.TotalAmount = op.Order.Checkout.Payments[0].AmountCents
+			op.Order.Checkout.Payments[0].DueDate = time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+			source.Payment.Installments[0].Value, source.Payment.Installments[0].Date = tc.total, "2026-09-12"
+			fake.accounts["1"] = []tinyReceivable{{ID: 50, Status: "aberto", Value: tc.total, Balance: tc.total, DueDate: "2026-09-14"}}
+			beforeOrder, err := json.Marshal(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeAccounts := slices.Clone(fake.accounts["1"])
+			journal := &checkoutTestJournal{bindFailures: 1}
+			if err := journal.Save(t.Context(), op); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), op, journal); err == nil {
+				t.Fatal("expected interrupted local bind")
+			}
+			op = journal.resume(t)
+			if _, err := provider.FinalizePaidCheckout(t.Context(), op, journal); err != nil {
+				t.Fatal(err)
+			}
+			if !op.Completed || journal.bound != "1" || op.TargetStatus != providers.ERPOrderStatusFaturado || !op.PreservedFinancialSchedule {
+				t.Fatal("existing invoiced sale was not reconciled")
+			}
+			if _, err := provider.FinalizePaidCheckout(t.Context(), journal.resume(t), journal); err != nil {
+				t.Fatal(err)
+			}
+			afterOrder, err := json.Marshal(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fake.writes != 0 || string(beforeOrder) != string(afterOrder) || !reflect.DeepEqual(beforeAccounts, fake.accounts["1"]) {
+				t.Fatal("invoice, order, accounts or stock were modified")
+			}
+		})
+	}
+}
