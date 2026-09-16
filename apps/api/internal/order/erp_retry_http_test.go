@@ -41,6 +41,7 @@ func TestERPFinalisationRetryHTTPDistinguishesConflictFromFailure(t *testing.T) 
 	}{
 		{"commercial conflict", fmt.Errorf("finalizing: %w", &providers.TinyCheckoutReconciliationError{OrderID: "1", Status: 1, InvoiceID: 99, Fields: []string{"frete"}}), 422, "ERP_RETRY_INVALID_STATE", "frete"},
 		{"merchant expense on open sale", fmt.Errorf("finalizing: %w", &providers.TinyCheckoutReconciliationError{OrderID: "2", Status: 0, Fields: []string{"despesas adicionais do pedido"}}), 422, "ERP_RETRY_INVALID_STATE", "despesas adicionais do pedido"},
+		{"missing Tiny sale", fmt.Errorf("finalizing: %w", &providers.TinyCheckoutReconciliationError{OrderID: "3", Missing: true}), 422, "ERP_RETRY_INVALID_STATE", "não encontrado na conta conectada"},
 		{"technical error", errors.New("database private diagnostics"), 500, "", ""},
 		{"reconciled", nil, 200, "", ""},
 	} {
