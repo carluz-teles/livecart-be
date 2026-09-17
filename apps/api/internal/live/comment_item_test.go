@@ -54,6 +54,38 @@ func TestApplyCommentItem_ConcurrentRedelivery(t *testing.T) {
 	}
 }
 
+func TestApplyCommentItemReplayReflectsERPReconciliation(t *testing.T) {
+	svc, input := commentItemFixture(t, 10)
+	id := "reconcile-" + input.ProductID
+	first, err := svc.ApplyCommentItem(t.Context(), input, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(t.Context(), `UPDATE carts SET erp_order_status='faturado'
+		WHERE id=$1`, first.CartID); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := svc.ApplyCommentItem(t.Context(), input, id)
+	if err != nil || !replay.ERPBlocked || replay.ERPConfirmed || !replay.AlreadyApplied {
+		t.Fatalf("pending closed order: %+v %v", replay, err)
+	}
+	if _, err := testPool.Exec(t.Context(), `UPDATE cart_items SET erp_pending_since=NULL,
+		erp_confirmed_quantity=quantity WHERE cart_id=$1`, first.CartID); err != nil {
+		t.Fatal(err)
+	}
+	replay, err = svc.ApplyCommentItem(t.Context(), input, id)
+	if err != nil || !replay.ERPConfirmed || replay.CartID != first.CartID {
+		t.Fatalf("confirmed replay: %+v %v", replay, err)
+	}
+	var stock int
+	if err := testPool.QueryRow(t.Context(), `SELECT stock FROM products WHERE id=$1`, input.ProductID).Scan(&stock); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 8 || itemCount(t, first.CartID) != 1 {
+		t.Fatal("replay changed stock or cart items")
+	}
+}
+
 func TestApplyCommentItem_StockAndWaitlistCommitTogether(t *testing.T) {
 	svc, input := commentItemFixture(t, 1)
 	id := fmt.Sprintf("partial-%d", time.Now().UnixNano())

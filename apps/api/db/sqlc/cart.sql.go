@@ -1187,6 +1187,7 @@ SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_
 WHERE event_id = $1 AND platform_user_id = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 LIMIT 1
 `
@@ -1289,6 +1290,7 @@ SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_
 WHERE event_id = $1 AND platform_user_id = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 LIMIT 1
 FOR UPDATE
@@ -1955,6 +1957,7 @@ WHERE store_id = $1 AND platform_handle = $2
   AND never_expires
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 LIMIT 1
 FOR UPDATE
@@ -1993,10 +1996,8 @@ type GetEternalCartByStoreAndHandleForUpdateParams struct {
 // novas caíram dentro de um carrinho quitado — que respondia "já está pago" e
 // não tinha como cobrar os R$ 1.369,30.
 //
-// O filtro por situação do ERP saiu junto, e não por descuido: com pago fora,
-// um carrinho aberto não chega a estar faturado pelo caminho normal. Mantê-lo
-// só criaria de novo o descompasso com o índice — o caso "faturado sem
-// pagamento" devolveria ErrNoRows e o INSERT bateria na unique.
+// Pagamento local pendente não reabre um documento fiscal emitido no ERP.
+// O predicado erp_order_accepts_items também compõe os dois índices únicos.
 func (q *Queries) GetEternalCartByStoreAndHandleForUpdate(ctx context.Context, arg GetEternalCartByStoreAndHandleForUpdateParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getEternalCartByStoreAndHandleForUpdate, arg.StoreID, arg.PlatformHandle)
 	var i Cart
@@ -2191,6 +2192,7 @@ LEFT JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $3
 WHERE c.event_id = $1 AND c.platform_user_id = $2
   AND c.status IN ('pending', 'active', 'checkout')
   AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+  AND erp_order_accepts_items(c.erp_order_status)
 ORDER BY c.created_at DESC
 LIMIT 1
 `
@@ -3534,9 +3536,7 @@ SELECT id, status, created_at, erp_order_state, external_order_id FROM carts
 WHERE store_id = $1 AND platform_handle = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
-  AND (erp_order_status IS NULL OR erp_order_status NOT IN (
-        'preparando_envio', 'faturado', 'pronto_envio', 'enviado', 'entregue',
-        'nao_entregue', 'cancelado'))
+  AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 FOR UPDATE
 `

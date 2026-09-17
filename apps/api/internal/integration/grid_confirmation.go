@@ -49,6 +49,8 @@ func (r *Repository) ConfirmERPGrid(ctx context.Context, cartID string, grid []p
 func (s *Service) RecoverPendingERPItems(ctx context.Context) {
 	rows, err := s.repo.pool.Query(ctx, `WITH candidates AS (
         SELECT c.id FROM carts c WHERE c.status NOT IN ('cancelled','expired')
+        AND erp_order_accepts_items(c.erp_order_status)
+        AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=c.joined_to_cart_id AND NOT erp_order_accepts_items(host.erp_order_status))
         AND NOT EXISTS (SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=c.id AND w.revision>w.synced_revision)
         AND (c.erp_items_retry_at IS NULL OR c.erp_items_retry_at<now())
         AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id=c.id

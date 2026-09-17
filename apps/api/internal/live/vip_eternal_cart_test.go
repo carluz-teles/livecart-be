@@ -298,41 +298,6 @@ func TestVipCartNovoDepoisDoPagamentoContinuaEterno(t *testing.T) {
 	}
 }
 
-// A SITUAÇÃO DO ERP NÃO DECIDE MAIS NADA AQUI.
-//
-// A porta antiga era o faturamento, e por isso a consulta filtrava por
-// erp_order_status. Com o pagamento no comando, aquele filtro saiu — e tinha de
-// sair: `carts_one_eternal_per_store_buyer` não o conhece, então uma consulta
-// que filtrasse a mais devolveria ErrNoRows para uma linha que o índice ainda
-// considera viva, e o INSERT seguinte violaria a unique.
-//
-// Este teste guarda essa equivalência: com o carrinho ABERTO, nenhuma situação
-// do ERP separa. Se alguém reintroduzir o filtro, ele cai.
-func TestSituacaoDoERPNaoSeparaCarrinhoAberto(t *testing.T) {
-	requireDB(t)
-	for _, situacao := range []string{
-		"aberto", "aprovado", "dados_incompletos", "preparando_envio",
-		"faturado", "pronto_envio", "enviado", "entregue", "nao_entregue",
-	} {
-		t.Run(situacao, func(t *testing.T) {
-			storeID := seedStore(t)
-			ev1 := seedEventInStore(t, storeID)
-			ev2 := seedEventInStore(t, storeID)
-			comprador := fmt.Sprintf("@c%s%d", situacao, time.Now().UnixNano())
-
-			primeiro, _ := getOrCreateVip(t, storeID, ev1, comprador)
-			marcarSituacaoERP(t, primeiro.ID, situacao) // sem pagar
-
-			segundo, _ := getOrCreateVip(t, storeID, ev2, comprador)
-			if segundo.ID != primeiro.ID {
-				t.Errorf("situação %q separou um carrinho ABERTO — quem separa é o "+
-					"pagamento, e o filtro por situação descasa esta consulta do índice",
-					situacao)
-			}
-		})
-	}
-}
-
 // Estornado é o oposto do pago: não há venda a que somar, e o carrinho novo
 // nasce limpo.
 func TestVipCartEstornadoNaoRecebeMaisCompra(t *testing.T) {

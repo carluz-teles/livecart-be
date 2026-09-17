@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"livecart/apps/api/internal/erp"
 )
 
 var ErrCommentBusy = errors.New("comment processing is already in progress")
+var ErrCommentERPBlocked = errors.New("comment requires ERP reconciliation: order closed for new items")
 var ErrCommentERPPending = errors.New("comment is waiting for ERP confirmation")
 
 // CommentWorkRepository keeps retries independent of the delivery queue's retry
@@ -105,6 +107,9 @@ func (s *Service) RecoverPendingComments(ctx context.Context) {
 		switch {
 		case errors.Is(err, ErrCommentBusy):
 			busy++
+		case errors.Is(err, ErrCommentERPBlocked):
+			deferred++
+			s.logger.Info("comment awaits ERP reconciliation", zap.String("comment_id", input.CommentID))
 		case err != nil:
 			deferred++
 			s.logger.Warn("comment remains pending", zap.String("comment_id", input.CommentID), zap.Error(err))
@@ -170,6 +175,8 @@ type CommentItemResult struct {
 	Quantity           int
 	WaitlistedQuantity int
 	AlreadyApplied     bool
+	ERPConfirmed       bool
+	ERPBlocked         bool
 	SkipReason         string
 }
 
@@ -205,7 +212,8 @@ func (s *Service) applyPersistentCommentItem(ctx context.Context, writer comment
 	}
 	available := result.Quantity - result.WaitlistedQuantity
 	pending := false
-	if available > 0 && s.stockReserver != nil {
+	blocked := available > 0 && result.ERPBlocked && !result.ERPConfirmed
+	if available > 0 && s.stockReserver != nil && !result.ERPConfirmed && !blocked {
 		if !result.AlreadyApplied {
 			if err := s.stockReserver.NoteReserved(ctx, ReserveParams{Op: stockOpCartAdd,
 				ProductID: product.ID, Quantity: available, CartID: result.CartID, EventID: event.ID}); err != nil {
@@ -215,11 +223,12 @@ func (s *Service) applyPersistentCommentItem(ctx context.Context, writer comment
 		if err := s.stockReserver.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID,
 			product.ID, available, product.Price, input.Username); err != nil {
 			pending = true
-			s.logger.Warn("comment ERP synchronization remains pending", zap.String("cart_id", result.CartID), zap.Error(err))
+			blocked = errors.Is(err, erp.ErrPedidoFaturado)
+			s.logger.Warn("comment ERP synchronization remains pending", zap.String("cart_id", result.CartID), zap.String("comment_id", input.CommentID), zap.String("product_id", product.ID), zap.Bool("requires_reconciliation", blocked), zap.Error(err))
 		} else if err := s.ingestRepo.ConfirmarItemNoERP(ctx, result.CartID, product.ID); err != nil {
 			return nil, err
 		}
 	}
 	return &resultadoDoItem{carrinho: result.AddToCartOutput, produto: product,
-		pedida: result.Quantity, naFila: result.WaitlistedQuantity, erpPendente: pending, replayed: result.AlreadyApplied}, nil
+		pedida: result.Quantity, naFila: result.WaitlistedQuantity, erpPendente: pending || blocked, erpBloqueado: blocked, replayed: result.AlreadyApplied}, nil
 }

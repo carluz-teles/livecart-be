@@ -87,6 +87,10 @@ func TestCommentWork_RetrySurvivesLeaseAndFailure(t *testing.T) {
 	if err := testRepo.FinishCommentWork(ctx, id, owner, context.DeadlineExceeded); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := testRepo.BeginCommentWork(ctx, id, []byte(`{}`)); !errors.Is(err, live.ErrCommentBusy) {
+		t.Fatalf("redelivery bypassed backoff: %v", err)
+	}
+	makeCommentRetryDue(t, id)
 	owner, done, err = testRepo.BeginCommentWork(ctx, id, []byte(`{}`))
 	if err != nil || done {
 		t.Fatalf("retry claim: %v %v", done, err)
@@ -242,10 +246,12 @@ func TestCommentWork_FullPipelineRetriesAfterERPFailureAndSessionEnd(t *testing.
 		t.Fatal(err)
 	}
 	erp.fail = false
+	makeCommentRetryDue(t, input.CommentID)
 	if err := svc.ProcessInstagramComment(ctx, input); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("notification failure should remain recoverable: %v", err)
 	}
 	messenger.fail = false
+	makeCommentRetryDue(t, input.CommentID)
 	if err := svc.ProcessInstagramComment(ctx, input); err != nil {
 		t.Fatal(err)
 	}
@@ -253,6 +259,7 @@ func TestCommentWork_FullPipelineRetriesAfterERPFailureAndSessionEnd(t *testing.
 	if _, err := testPool.Exec(ctx, `UPDATE live_comment_work SET completed_at=NULL WHERE platform_comment_id=$1`, input.CommentID); err != nil {
 		t.Fatal(err)
 	}
+	makeCommentRetryDue(t, input.CommentID)
 	if err := svc.ProcessInstagramComment(ctx, input); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +268,7 @@ func TestCommentWork_FullPipelineRetriesAfterERPFailureAndSessionEnd(t *testing.
 	if err := testPool.QueryRow(ctx, `SELECT p.stock,(SELECT SUM(quantity) FROM cart_items WHERE product_id=p.id),(SELECT COUNT(*) FROM cart_item_events WHERE platform_comment_id=$2),(SELECT total_comments FROM live_sessions WHERE id=$3),(SELECT completed_at IS NOT NULL FROM live_comment_work WHERE platform_comment_id=$2) FROM products p WHERE p.id=$1`, productID, input.CommentID, sessionID).Scan(&stock, &quantity, &checkpoints, &comments, &done); err != nil {
 		t.Fatal(err)
 	}
-	if stock != 8 || quantity != 2 || checkpoints != 1 || comments != 1 || !done || erp.calls != 4 || messenger.calls != 3 {
+	if stock != 8 || quantity != 2 || checkpoints != 1 || comments != 1 || !done || erp.calls != 2 || messenger.calls != 3 {
 		t.Fatalf("stock=%d quantity=%d checkpoints=%d comments=%d done=%v ERP=%d", stock, quantity, checkpoints, comments, done, erp.calls)
 	}
 	var sent int
@@ -270,5 +277,61 @@ func TestCommentWork_FullPipelineRetriesAfterERPFailureAndSessionEnd(t *testing.
 	}
 	if sent != 1 {
 		t.Fatalf("successful buyer messages=%d", sent)
+	}
+}
+
+func makeCommentRetryDue(t *testing.T, id string) {
+	t.Helper()
+	if _, err := testPool.Exec(t.Context(), `UPDATE live_comment_work SET next_attempt_at=now()
+		WHERE platform_comment_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCommentWorkClosedOrderWaitsForReconciliation(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 2, 0)
+	id := "blocked-" + fx.cartID
+	owner, _, err := testRepo.BeginCommentWork(t.Context(), id, []byte(`{"CommentID":"blocked"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(t.Context(), `UPDATE carts SET payment_status='pending',
+		erp_order_status='faturado' WHERE id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(t.Context(), `UPDATE cart_items SET erp_pending_since=now(),
+		erp_confirmed_quantity=0 WHERE cart_id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(t.Context(), `INSERT INTO cart_item_events
+		(platform_comment_id,product_id,cart_id,quantity,waitlisted_quantity,is_new_cart,unit_price)
+		VALUES($1,$2,$3,2,0,false,1000)`, id, fx.productID, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
+	if err := testRepo.FinishCommentWork(t.Context(), id, owner, live.ErrCommentERPBlocked); err != nil {
+		t.Fatal(err)
+	}
+	makeCommentRetryDue(t, id)
+	if _, _, err := testRepo.BeginCommentWork(t.Context(), id, []byte(`{}`)); !errors.Is(err, live.ErrCommentBusy) {
+		t.Fatalf("closed invoice was retried: %v", err)
+	}
+	var pending bool
+	var qty int
+	if err := testPool.QueryRow(t.Context(), `SELECT w.completed_at IS NULL,ci.quantity
+		FROM live_comment_work w JOIN cart_items ci ON ci.cart_id=$2 AND ci.product_id=$3
+		WHERE w.platform_comment_id=$1`, id, fx.cartID, fx.productID).Scan(&pending, &qty); err != nil {
+		t.Fatal(err)
+	}
+	if !pending || qty != 2 {
+		t.Fatalf("blocked work/items were discarded: pending=%v quantity=%d", pending, qty)
+	}
+	// A later reconciliation releases the comment without reopening the invoice.
+	if _, err := testPool.Exec(t.Context(), `UPDATE cart_items SET erp_pending_since=NULL,
+		erp_confirmed_quantity=quantity WHERE cart_id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
+	if owner, done, err := testRepo.BeginCommentWork(t.Context(), id, []byte(`{}`)); err != nil || done || owner == "" {
+		t.Fatalf("reconciled comment did not resume: owner=%q done=%v err=%v", owner, done, err)
 	}
 }
