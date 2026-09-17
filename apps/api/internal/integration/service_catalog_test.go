@@ -53,7 +53,7 @@ func TestProcessProductSyncBackfillsIdentifiersWhenStockCalculationFails(t *test
 		TinyConstructor: func(providers.TinyConfig) (providers.ERPProvider, error) {
 			return catalogSyncProvider{product: providers.ERPProduct{
 				ID: externalID, Name: "Galho", SKU: "47169001", GTIN: "7893979655073",
-				Price: 7990, Stock: 50, Active: true,
+				Price: 7990, Stock: 50, StockKnown: true, Active: true,
 			}}, nil
 		},
 	})

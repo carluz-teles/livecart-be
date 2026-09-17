@@ -800,7 +800,7 @@ func (q *Queries) ListIntegrationsWithExpiringTokens(ctx context.Context, tokenE
 }
 
 const listTinyIntegrationsWithStaleStockWebhook = `-- name: ListTinyIntegrationsWithStaleStockWebhook :many
-SELECT i.id, i.store_id, MAX(we.created_at)::timestamptz AS last_stock_event_at
+SELECT i.id, i.store_id, GREATEST(MAX(we.created_at), (i.metadata->>'stockWebhookLastPingAt')::timestamptz)::timestamptz AS last_stock_event_at
 FROM integrations i
 LEFT JOIN webhook_events we
        ON we.integration_id = i.id AND we.event_type = 'estoque'
@@ -809,7 +809,7 @@ WHERE i.type = 'erp' AND i.provider = 'tiny' AND i.status = 'active'
   AND COALESCE((i.metadata->>'stock_webhook_alerted_at')::timestamptz, 'epoch'::timestamptz)
       < now() - interval '24 hours'
 GROUP BY i.id, i.store_id
-HAVING COALESCE(MAX(we.created_at), 'epoch'::timestamptz)
+HAVING COALESCE(GREATEST(MAX(we.created_at), (i.metadata->>'stockWebhookLastPingAt')::timestamptz), 'epoch'::timestamptz)
        < now() - make_interval(hours => $1::int)
 `
 

@@ -235,6 +235,7 @@ const (
 	SourceStripe         Source = "stripe"
 	SourceClerk          Source = "clerk"
 	SourceBling          Source = "bling"
+	SourceTiny           Source = "tiny"
 	// SourceInternal marks events emitted by internal domain transitions and
 	// background workers (e.g. cart expiry) rather than an inbound webhook.
 	SourceInternal Source = "internal"
