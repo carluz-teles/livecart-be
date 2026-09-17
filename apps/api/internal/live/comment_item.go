@@ -11,6 +11,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/integration/providers"
 )
 
 var _ commentItemWriter = (*Service)(nil)
@@ -32,16 +33,23 @@ type commentQuerier = sqlc.DBTX
 
 func (r *Repository) appliedCommentItem(ctx context.Context, q commentQuerier, commentID, productID string) (CommentItemResult, error) {
 	var result CommentItemResult
-	var status string
-	err := q.QueryRow(ctx, `SELECT e.cart_id::text,c.token,e.quantity,e.waitlisted_quantity,e.is_new_cart,c.status
+	var status, erpStatus string
+	var itemExists bool
+	err := q.QueryRow(ctx, `SELECT e.cart_id::text,c.token,e.quantity,e.waitlisted_quantity,e.is_new_cart,c.status,
+        COALESCE(host.erp_order_status,c.erp_order_status,''),ci.id IS NOT NULL,
+        COALESCE(ci.erp_pending_since IS NULL AND
+            ci.erp_confirmed_quantity >= ci.quantity-ci.waitlisted_quantity,false)
         FROM cart_item_events e JOIN carts c ON c.id=e.cart_id
+        LEFT JOIN carts host ON host.id=c.joined_to_cart_id
+        LEFT JOIN cart_items ci ON ci.cart_id=c.id AND ci.product_id=e.product_id
         WHERE e.platform_comment_id=$1 AND e.product_id=$2`, commentID, productID).Scan(
-		&result.CartID, &result.CartToken, &result.Quantity, &result.WaitlistedQuantity, &result.IsNewCart, &status)
+		&result.CartID, &result.CartToken, &result.Quantity, &result.WaitlistedQuantity, &result.IsNewCart, &status, &erpStatus, &itemExists, &result.ERPConfirmed)
 	if err != nil {
 		return result, err
 	}
 	result.AlreadyApplied = true
-	if status == "cancelled" || status == "expired" {
+	result.ERPBlocked = providers.ERPOrderStatus(erpStatus).FechadoParaNovosItens()
+	if !itemExists || status == "cancelled" || status == "expired" {
 		result.Quantity = 0
 		result.SkipReason = "cart_terminated"
 		return result, nil
@@ -73,7 +81,7 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 		return result, e
 	}
 	var payable bool
-	if err := tx.QueryRow(ctx, `SELECT status NOT IN ('cancelled','expired') AND COALESCE(payment_status,'pending') NOT IN ('paid','refunded') FROM carts WHERE id=$1 FOR UPDATE`, cart.ID).Scan(&payable); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status NOT IN ('cancelled','expired') AND COALESCE(payment_status,'pending') NOT IN ('paid','refunded') AND erp_order_accepts_items(erp_order_status) FROM carts WHERE id=$1 FOR UPDATE`, cart.ID).Scan(&payable); err != nil {
 		return result, err
 	}
 	if !payable {

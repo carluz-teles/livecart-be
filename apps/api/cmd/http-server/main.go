@@ -1689,27 +1689,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			return integrationSvc.ProcessBlingWebhook(ctx, command)
 		})
 
-		// Releitura em massa dos produtos de um ERP.
-		//
-		// Uma tarefa por loja, com TaskID por integração: dois cliques no botão
-		// viram uma execução só, e o asynq recusa a segunda enquanto a primeira
-		// não terminou. Sem isso, dobrar a releitura dobraria o consumo da cota
-		// do Tiny sem trazer nada de novo.
-		integrationSvc.SetERPResyncScheduler(erpResyncScheduler{client: eventsClient})
 		integrationSvc.SetERPResyncNotifier(notifInboxWriter)
 		eventsServer.Register(events.ERPResyncProducts, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
-			var p struct {
-				StoreID       string `json:"store_id"`
-				IntegrationID string `json:"integration_id"`
-			}
-			if err := json.Unmarshal(env.Payload, &p); err != nil || p.IntegrationID == "" {
+			var command integration.ERPResyncCommand
+			if err := json.Unmarshal(env.Payload, &command); err != nil {
 				return asynq.SkipRetry
 			}
-			return integrationSvc.RunERPResync(ctx, p.StoreID, p.IntegrationID)
+			return integrationSvc.RunERPResync(ctx, command)
 		})
 	}
 
@@ -1786,6 +1776,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	startRecovery("comment-recovery", liveSvc.RecoverPendingComments)
 	if integrationSvc != nil {
 		startRecovery("erp-item-recovery", integrationSvc.RecoverPendingERPItems)
+		startRecovery("erp-resync-recovery", integrationSvc.RecoverERPResync, 30*time.Second)
 	}
 
 	lifecycle.add("events-client", func() { _ = eventsClient.Close() })
@@ -1869,48 +1860,6 @@ func (s publishScheduler) CancelPublish(ctx context.Context, jobID string) error
 }
 
 func publishTaskID(jobID string) string { return "session-publish:" + jobID }
-
-// erpResyncScheduler adapta o cliente de eventos para a releitura em massa dos
-// produtos de um ERP.
-//
-// Vai para a fila BATCH, e não para a normal, porque é o que ela é: trabalho
-// pesado e tolerante a atraso. A varredura de 140 produtos de 14/08 levou mais
-// de sete minutos; na fila normal — onde a política é de 15 segundos e moram os
-// eventos de carrinho e comentário — ela ocupa um worker por todo esse tempo e
-// atrasa o que precisa ser rápido.
-//
-// Timeout explícito e generoso: a política da fila batch é de 60 segundos, que
-// mataria a varredura no primeiro minuto. MaxRetry 1 porque repetir custa a cota
-// inteira do ERP de novo para reescrever os mesmos saldos.
-//
-// TaskID por integração serve de dedup, e o conflito é resposta esperada: dois
-// cliques no botão são uma varredura só, não um erro para mostrar ao lojista.
-type erpResyncScheduler struct{ client *events.Client }
-
-func (s erpResyncScheduler) ScheduleERPResync(ctx context.Context, storeID, integrationID string) error {
-	payload, err := json.Marshal(struct {
-		StoreID       string `json:"store_id"`
-		IntegrationID string `json:"integration_id"`
-	}{StoreID: storeID, IntegrationID: integrationID})
-	if err != nil {
-		return err
-	}
-	_, err = s.client.Enqueue(ctx, events.Envelope{
-		EventID:    "erp-resync:" + integrationID,
-		Name:       events.ERPResyncProducts,
-		Source:     events.SourceInternal,
-		OccurredAt: time.Now(),
-		Payload:    payload,
-	},
-		asynq.Queue(events.QueueBatch),
-		asynq.Timeout(45*time.Minute),
-		asynq.MaxRetry(1),
-	)
-	if errors.Is(err, asynq.ErrTaskIDConflict) {
-		return nil
-	}
-	return err
-}
 
 // trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
 // enqueueing a trial.ending_soon ETA task keyed "trial-ending:<store>" for dedup.

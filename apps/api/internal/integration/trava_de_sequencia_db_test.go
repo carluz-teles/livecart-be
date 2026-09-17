@@ -199,6 +199,7 @@ func TestTravaSobConcorrencia(t *testing.T) {
 	const movimentos = 20
 	var wg sync.WaitGroup
 	largada := make(chan struct{})
+	espelhoAplicado := make(chan bool, 1)
 
 	for i := 0; i < movimentos; i++ {
 		wg.Add(1)
@@ -215,7 +216,9 @@ func TestTravaSobConcorrencia(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-largada
-		if _, err := repo.ApplyERPStockMirror(ctx, productID, inicial, seqNaLeitura); err != nil {
+		aplicado, err := repo.ApplyERPStockMirror(ctx, productID, inicial, seqNaLeitura)
+		espelhoAplicado <- aplicado
+		if err != nil {
 			t.Errorf("aplicando espelho: %v", err)
 		}
 	}()
@@ -228,8 +231,14 @@ func TestTravaSobConcorrencia(t *testing.T) {
 			"qualquer ponto, o saldo teria voltado para %d e as reservas depois dela "+
 			"sumiriam do contador", got, inicial-movimentos, inicial)
 	}
-	if seq := seqDoProduto(t, productID); seq != seqNaLeitura+movimentos {
-		t.Errorf("seq = %d, quero %d — um por movimento", seq, seqNaLeitura+movimentos)
+	// The mirror may win BEFORE every reservation; applying that snapshot also
+	// advances the sequence, while all 20 reservations must still be preserved.
+	expectedSeq := seqNaLeitura + movimentos
+	if <-espelhoAplicado {
+		expectedSeq++
+	}
+	if seq := seqDoProduto(t, productID); seq != expectedSeq {
+		t.Errorf("seq = %d, quero %d", seq, expectedSeq)
 	}
 }
 

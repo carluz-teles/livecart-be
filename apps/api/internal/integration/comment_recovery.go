@@ -13,6 +13,17 @@ import (
 
 var _ live.CommentWorkRepository = (*Repository)(nil)
 
+// Blocked comments become eligible when the order reopens, the pending items
+// are reconciled/removed, or the cart terminates. No ERP request is needed to
+// discover that the same invoice still prevents editing.
+const commentRecoveryReady = `(w.erp_blocked_at IS NULL OR NOT EXISTS (
+    SELECT 1 FROM cart_item_events e JOIN carts c ON c.id=e.cart_id
+    LEFT JOIN carts host ON host.id=c.joined_to_cart_id
+    JOIN cart_items ci ON ci.cart_id=c.id AND ci.product_id=e.product_id
+    WHERE e.platform_comment_id=w.platform_comment_id
+      AND c.status NOT IN ('cancelled','expired') AND ci.erp_pending_since IS NOT NULL
+      AND NOT erp_order_accepts_items(COALESCE(host.erp_order_status,c.erp_order_status))))`
+
 func (r *Repository) BeginCommentWork(ctx context.Context, commentID string, payload []byte) (string, bool, error) {
 	// Existing comments predate the recovery protocol and must never be replayed
 	// automatically: their local effects have no per-comment checkpoint.
@@ -26,8 +37,9 @@ func (r *Repository) BeginCommentWork(ctx context.Context, commentID string, pay
 	}
 	owner := uuid.NewString()
 	var claimed string
-	err = r.pool.QueryRow(ctx, `UPDATE live_comment_work SET lease_owner=$2,lease_until=now()+interval '3 minutes',attempts=attempts+1
-        WHERE platform_comment_id=$1 AND completed_at IS NULL AND (lease_until IS NULL OR lease_until<now())
+	err = r.pool.QueryRow(ctx, `UPDATE live_comment_work w SET erp_blocked_at=NULL,lease_owner=$2,lease_until=now()+interval '3 minutes',attempts=attempts+1
+        WHERE platform_comment_id=$1 AND completed_at IS NULL AND next_attempt_at<=now()
+        AND (lease_until IS NULL OR lease_until<now()) AND `+commentRecoveryReady+`
         RETURNING platform_comment_id`, commentID, owner).Scan(&claimed)
 	if err == nil {
 		return owner, false, nil
@@ -51,17 +63,19 @@ func (r *Repository) FinishCommentWork(ctx context.Context, commentID, owner str
 		message = processingErr.Error()
 	}
 	_, err := r.pool.Exec(ctx, `WITH finished AS (UPDATE live_comment_work SET lease_owner=NULL,lease_until=NULL,last_error=$3,
+        erp_blocked_at=CASE WHEN $4 THEN now() ELSE NULL END,
 		completed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,
-        next_attempt_at=now()+make_interval(secs=>LEAST(900,5*power(2,LEAST(attempts,7)))::double precision)
+        next_attempt_at=now()+make_interval(secs=>LEAST(900,5*power(2,LEAST(attempts,8)))::double precision)
         WHERE platform_comment_id=$1 AND lease_owner=$2 RETURNING platform_comment_id)
         UPDATE webhook_events SET processed=($3::text IS NULL),processed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,error_message=$3
-		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished)`, commentID, owner, message)
+		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished)`, commentID, owner, message, errors.Is(processingErr, live.ErrCommentERPBlocked))
 	return err
 }
 
 func (r *Repository) ListPendingCommentWork(ctx context.Context, limit int) ([][]byte, error) {
-	rows, err := r.pool.Query(ctx, `SELECT payload FROM live_comment_work
+	rows, err := r.pool.Query(ctx, `SELECT payload FROM live_comment_work w
         WHERE completed_at IS NULL AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now())
+        AND `+commentRecoveryReady+`
         ORDER BY next_attempt_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, err

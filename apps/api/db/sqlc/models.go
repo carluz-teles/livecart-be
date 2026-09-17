@@ -308,6 +308,26 @@ type ErpOrderStatusEvent struct {
 	Payload         json.RawMessage    `json:"payload"`
 }
 
+type ErpResyncJob struct {
+	IntegrationID      pgtype.UUID        `json:"integration_id"`
+	RunID              pgtype.UUID        `json:"run_id"`
+	DispatchID         pgtype.UUID        `json:"dispatch_id"`
+	Status             string             `json:"status"`
+	ProductIds         []string           `json:"product_ids"`
+	Total              int32              `json:"total"`
+	Processed          int32              `json:"processed"`
+	Succeeded          int32              `json:"succeeded"`
+	Failed             int32              `json:"failed"`
+	ConsecutiveRetries int32              `json:"consecutive_retries"`
+	LastError          pgtype.Text        `json:"last_error"`
+	LeaseOwner         pgtype.UUID        `json:"lease_owner"`
+	LeaseUntil         pgtype.Timestamptz `json:"lease_until"`
+	NextAttemptAt      pgtype.Timestamptz `json:"next_attempt_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	FinishedAt         pgtype.Timestamptz `json:"finished_at"`
+}
+
 type ErpStockMovement struct {
 	ID                pgtype.UUID        `json:"id"`
 	StoreID           pgtype.UUID        `json:"store_id"`
@@ -468,6 +488,7 @@ type LiveCommentWork struct {
 	LastError         pgtype.Text        `json:"last_error"`
 	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	ErpBlockedAt      pgtype.Timestamptz `json:"erp_blocked_at"`
 }
 
 // Container for live sessions. Carts are tied to events, not sessions.
