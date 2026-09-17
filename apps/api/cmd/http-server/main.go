@@ -838,6 +838,23 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				}
 			}()
 
+			stockCtx, stopStock := context.WithCancel(context.Background())
+			stockDone := make(chan struct{})
+			go func() {
+				defer close(stockDone)
+				ticker := time.NewTicker(time.Minute)
+				defer ticker.Stop()
+				for {
+					integrationSvc.RunTinyStockRecovery(stockCtx)
+					select {
+					case <-stockCtx.Done():
+						return
+					case <-ticker.C:
+					}
+				}
+			}()
+			lifecycle.add("tiny-stock-recovery", func() { stopStock(); <-stockDone })
+
 			log.Info("integration layer initialized")
 		}
 	}
@@ -1652,11 +1669,18 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
-			if env.Name != events.ERPWebhookProcess || env.Source != events.SourceBling {
+			if env.Name != events.ERPWebhookProcess || (env.Source != events.SourceBling && env.Source != events.SourceTiny) {
 				return asynq.SkipRetry
 			}
 			if env.ERPWebhookExpired(time.Now()) {
 				return fmt.Errorf("erp webhook retry window expired: %w", asynq.SkipRetry)
+			}
+			if env.Source == events.SourceTiny {
+				var command integration.TinyProductWebhookCommand
+				if err := json.Unmarshal(env.Payload, &command); err != nil {
+					return asynq.SkipRetry
+				}
+				return integrationSvc.ProcessTinyProductWebhook(ctx, command)
 			}
 			var command integration.BlingWebhookCommand
 			if err := json.Unmarshal(env.Payload, &command); err != nil {

@@ -129,7 +129,12 @@ func WebhookStoreContext(resolver StoreSlugResolver) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if storeID := c.Params("storeId"); storeID != "" {
 			c.Locals("store_id", storeID)
-			if slug, err := resolver.GetSlugByID(c.Context(), storeID); err == nil && slug != "" {
+			// Log enrichment must not hold a provider's delivery open during
+			// a database outage. The durable receiver owns the delivery budget.
+			ctx, cancel := context.WithTimeout(c.UserContext(), 500*time.Millisecond)
+			slug, err := resolver.GetSlugByID(ctx, storeID)
+			cancel()
+			if err == nil && slug != "" {
 				c.Locals("store_slug", slug)
 			}
 		}

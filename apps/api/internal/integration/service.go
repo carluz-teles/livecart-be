@@ -1022,25 +1022,15 @@ func (s *Service) RecordWebhookPing(ctx context.Context, storeID, provider strin
 		integrationType = "communication"
 	}
 
-	integration, err := s.repo.GetByProvider(ctx, storeID, integrationType, provider)
-	if err != nil || integration == nil {
-		// Webhook arrived before the merchant created the integration — nothing to stamp.
-		return
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	// Merge one field in SQL; a read/replace can erase a concurrent stock
+	// checkpoint, OAuth setting or webhook health timestamp.
+	_, err := s.repo.pool.Exec(ctx, `UPDATE integrations SET metadata=COALESCE(metadata,'{}'::jsonb)||jsonb_build_object('webhookLastPingAt',now()) WHERE store_id=$1 AND type=$2 AND provider=$3`, storeID, integrationType, provider)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to stamp webhook ping", zap.String("store_id", storeID), zap.String("provider", provider), zap.Error(err))
 	}
 
-	metadata := integration.Metadata
-	if metadata == nil {
-		metadata = make(map[string]any)
-	}
-	metadata["webhookLastPingAt"] = time.Now().UTC().Format(time.RFC3339)
-
-	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to stamp webhook ping",
-			zap.String("store_id", storeID),
-			zap.String("provider", provider),
-			zap.Error(err),
-		)
-	}
 }
 
 // HandleOAuthCallback handles the OAuth callback and creates/updates the integration.
@@ -3709,6 +3699,9 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		return nil, httpx.ErrUnprocessable("integração não corresponde à origem do produto")
 	}
 
+	// Capture the version before either HTTP read; a later version would accept stale stock.
+	localID, seenSeq, seqErr := s.repo.ProductSeqByExternalID(ctx, input.StoreID, externalSource, externalID)
+
 	// Fetch latest product data from the ERP
 	detailed, err := erpProvider.GetProduct(ctx, externalID)
 	if err != nil {
@@ -3737,23 +3730,25 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		return nil, fmt.Errorf("syncing product: %w", err)
 	}
 
-	// E o saldo entra pela MESMA porta do espelho: compensado e sob a trava.
-	if detailed.StockKnown {
-		localID, seenSeq, seqErr := s.repo.ProductSeqByExternalID(ctx, input.StoreID, externalSource, externalID)
-		switch {
-		case seqErr != nil || localID == "":
-			logger.From(ctx, s.logger).Warn("manual sync could not read the product seq; stock left untouched",
-				zap.String("external_id", externalID), zap.Error(seqErr))
-		default:
-			portao := s.PortaoAPartirDoSaldoDoERP(ctx, integration, externalID, detailed.Stock)
-			if portao < 0 {
-				break
-			}
-			if _, err := s.repo.ApplyERPStockMirror(ctx, localID, portao, seenSeq); err != nil {
-				logger.From(ctx, s.logger).Warn("manual sync could not apply the stock gate",
-					zap.String("external_id", externalID), zap.Error(err))
-			}
-		}
+	if !detailed.StockKnown {
+		return nil, httpx.DomainError(409, httpx.CodeStockMovementStale, "O ERP não informou o estoque disponível. Os dados do produto foram atualizados; tente sincronizar o estoque novamente.")
+	}
+	if seqErr != nil {
+		return nil, fmt.Errorf("reading stock version before manual synchronization: %w", seqErr)
+	}
+	if localID == "" {
+		return nil, httpx.DomainError(409, httpx.CodeStockMovementStale, "O vínculo do produto mudou. Atualize a página e tente novamente.")
+	}
+	portao := s.PortaoAPartirDoSaldoDoERP(ctx, integration, externalID, detailed.Stock)
+	if portao < 0 {
+		return nil, fmt.Errorf("reading pending reservations during manual synchronization")
+	}
+	applied, err := s.repo.ApplyERPStockMirror(ctx, localID, portao, seenSeq)
+	if err != nil {
+		return nil, fmt.Errorf("applying manual stock synchronization: %w", err)
+	}
+	if !applied {
+		return nil, httpx.DomainError(409, httpx.CodeStockMovementStale, "O estoque mudou durante a sincronização. Tente novamente para consultar o saldo atual.")
 	}
 
 	logger.From(ctx, s.logger).Info("product synced manually",
@@ -3768,7 +3763,7 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		ExternalID: externalID,
 		Name:       detailed.Name,
 		Price:      detailed.Price,
-		Stock:      detailed.Stock,
+		Stock:      portao,
 		ImageURL:   detailed.ImageURL,
 		Active:     detailed.Active,
 	}, nil
@@ -3918,7 +3913,7 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 			zap.String("product_id", externalProductID),
 			zap.Int("attempts", productWebhookMaxRetries+1),
 		)
-		return false, nil
+		return false, fmt.Errorf("ERP stock snapshot stayed stale after %d attempts", productWebhookMaxRetries+1)
 	}
 
 	logger.From(ctx, s.logger).Error("product webhook processing failed after retries",
@@ -4015,6 +4010,11 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
 			return stockMirrorNoTarget, fmt.Errorf("syncing product group: %w", err)
 		}
+		for _, variant := range detailed.Variants {
+			if _, err := s.refreshERPAvailableStock(ctx, integration, variant.ID); err != nil {
+				return stockMirrorStale, fmt.Errorf("syncing variant stock: %w", err)
+			}
+		}
 		return stockMirrorApplied, nil
 	}
 
@@ -4028,6 +4028,10 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	// empty after the product detail was successfully read.
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, true); err != nil {
 		return stockMirrorNoTarget, fmt.Errorf("syncing product: %w", err)
+	}
+
+	if !detailed.StockKnown {
+		return stockMirrorStale, fmt.Errorf("available ERP stock is unknown for product %s", externalProductID)
 	}
 
 	// O ESTOQUE nao passa pelo sync generico: e aplicado a parte, com trava

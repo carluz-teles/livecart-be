@@ -85,6 +85,7 @@ func (a *SyncerAdapter) SyncFromERP(ctx context.Context, storeIDStr, externalSou
 			Price:          money,
 			ImageURL:       v.ImageURL,
 			Stock:          v.Stock,
+			SkipStock:      true,
 			Active:         v.Active,
 			// Identificadores fora do perfil de frete: o sync os aplica sozinho e
 			// preserva o local quando o ERP não informa. Sem isto, variação sem

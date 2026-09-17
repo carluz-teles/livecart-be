@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -756,8 +757,8 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	// background so we never delay the 200 response.
 	go h.service.RecordWebhookPing(logger.WithStore(context.Background(), storeID, storeSlug), storeID, "tiny")
 
-	// Always return 200 to Tiny — after 20 consecutive non-200 responses,
-	// Tiny automatically removes the webhook URL.
+	// Validation pings acknowledge immediately. Product notifications acknowledge
+	// only after persistence; otherwise Tiny must retry instead of losing the change.
 	if len(body) == 0 {
 		logger.From(c.Context(), h.logger).Info("tiny webhook validation ping")
 		return httpx.OK(c, fiber.Map{"status": "ok"})
@@ -820,29 +821,18 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		productID = webhook.Dados.ID
 	}
 
-	// O payload cru, para descobrir QUAIS saldos o Tiny manda.
-	//
-	// Hoje o estoque local vem de `estoque.quantidade` do GET /produtos/{id}, que
-	// é o saldo FÍSICO. O lojista relatou que precisa ser o DISPONÍVEL: um
-	// orçamento salvo no Tiny reserva a peça, que sai do disponível e continua no
-	// físico — vender por cima disso é furo de estoque.
-	//
-	// O `saldo` deste payload é parseado e nunca usado, então ninguém sabe qual
-	// dos dois ele é. Se vier o disponível (ou vier a quebra reservado/disponível),
-	// o conserto não custa chamada nenhuma ao Tiny; se vier só o físico, é um GET
-	// /estoque/{id} por produto, e aí o rate limit entra na conta.
-	//
-	// Restrito a tipo=estoque de propósito: `atualizacao_pedido` carrega dados do
-	// comprador, que não têm por que ir para o log.
-	campos := []zap.Field{
-		zap.String("tipo", webhook.Tipo),
-		zap.String("id_produto", productID),
-		zap.String("sku", webhook.Dados.SKU),
+	// Persist product invalidations before acknowledging. A detached goroutine
+	// is lost on deployment, and a failed GET must stay retryable in the queue.
+	if (webhook.Tipo == "estoque" || webhook.Tipo == "produto") && productID != "" {
+		ctx, cancel := context.WithTimeout(c.UserContext(), 4*time.Second)
+		defer cancel()
+		if err := h.service.enqueueTinyProductWebhook(ctx, storeID, webhook.Tipo, productID); err != nil {
+			logger.From(ctx, h.logger).Error("Tiny product webhook not persisted", zap.String("id_produto", productID), zap.Error(err))
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"status": "retry"})
+		}
+		return httpx.OK(c, fiber.Map{"status": "queued"})
 	}
-	if webhook.Tipo == "estoque" {
-		campos = append(campos, zap.ByteString("payload", body))
-	}
-	logger.From(c.Context(), h.logger).Info("tiny webhook received", campos...)
+	logger.From(c.Context(), h.logger).Info("tiny webhook received", zap.String("tipo", webhook.Tipo))
 
 	// Âncora de dedupe do webhook_events. Para eventos de pedido é o par
 	// pedido+situação: sem a situação, uma redelivery e uma transição de verdade
@@ -870,50 +860,6 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		logger.From(c.Context(), h.logger).Error("failed to store webhook event",
 			zap.Error(err),
 		)
-	}
-
-	// Process product-related events: "estoque" (stock) and "produto" (product data)
-	isProductEvent := webhook.Tipo == "estoque" || webhook.Tipo == "produto"
-	if isProductEvent && productID != "" {
-		go func() {
-			ctx := logger.WithStore(context.Background(), storeID, storeSlug)
-			stockApplied, syncErr := h.service.ProcessProductWebhook(ctx, storeID, "tiny", productID)
-			if syncErr != nil {
-				logger.From(ctx, h.logger).Error("failed to process product webhook",
-					zap.String("tipo", webhook.Tipo),
-					zap.String("id_produto", productID),
-					zap.Error(syncErr),
-				)
-			}
-
-			// Após sincronizar produto/estoque, varre eventos ativos com
-			// fila para esse produto e tenta promover o próximo. Esse é
-			// o catch-all do "ERP devolveu estoque por mudança manual"
-			// — para release vindo de carts/checkout o caller já chama
-			// ProcessWaitlistForProduct inline; aqui é o backstop.
-			//
-			// Condicionado ao sync ter APLICADO o estoque local: se o sync
-			// falhou ou o guard segurou o overwrite (reserva ativa ou
-			// finalização ERP em voo), promover agora agiria sobre um
-			// contador stale/envenenado. O próximo webhook do produto
-			// re-dispara o backstop com o guard desarmado.
-			if webhook.Tipo == "estoque" {
-				if syncErr != nil || !stockApplied {
-					logger.From(ctx, h.logger).Info("skipping waitlist backstop: stock sync not applied",
-						zap.String("external_product_id", productID),
-						zap.Bool("stock_applied", stockApplied),
-						zap.Bool("sync_failed", syncErr != nil),
-					)
-					return
-				}
-				if err := h.service.ProcessWaitlistAfterStockWebhook(ctx, storeID, "tiny", productID); err != nil {
-					logger.From(ctx, h.logger).Warn("failed to process waitlist after stock webhook",
-						zap.String("external_product_id", productID),
-						zap.Error(err),
-					)
-				}
-			}
-		}()
 	}
 
 	// Eventos de PEDIDO: o ERP avisa a cada transição de situação, e é assim que
