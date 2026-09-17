@@ -329,6 +329,12 @@ type ErpStockMovement struct {
 	ReservationID     pgtype.UUID        `json:"reservation_id"`
 }
 
+type ErpStockSyncState struct {
+	ProductID     pgtype.UUID        `json:"product_id"`
+	LastAttemptAt pgtype.Timestamptz `json:"last_attempt_at"`
+	LastSuccessAt pgtype.Timestamptz `json:"last_success_at"`
+}
+
 type EventConsumed struct {
 	EventID    pgtype.UUID        `json:"event_id"`
 	Handler    string             `json:"handler"`
@@ -999,6 +1005,18 @@ type Subscription struct {
 	ManualOverride       bool               `json:"manual_override"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 	BillingInterval      string             `json:"billing_interval"`
+}
+
+type TinyCheckoutOperation struct {
+	ID            pgtype.UUID        `json:"id"`
+	CartID        pgtype.UUID        `json:"cart_id"`
+	IntegrationID pgtype.UUID        `json:"integration_id"`
+	SourceOrderID string             `json:"source_order_id"`
+	TargetOrderID pgtype.Text        `json:"target_order_id"`
+	Progress      json.RawMessage    `json:"progress"`
+	Completed     bool               `json:"completed"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type User struct {
