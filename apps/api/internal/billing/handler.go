@@ -32,7 +32,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 // GetSubscription returns the paywall/subscription snapshot for the store.
 // @Summary Get subscription state
-// @Description Returns plan, status, trial days left and blocked flag
+// @Description Returns plan, billing interval (monthly/semestral/annual), status, trial days left and blocked flag
 // @Tags billing
 // @Produce json
 // @Param storeId path string true "Store ID"

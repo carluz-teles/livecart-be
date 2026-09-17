@@ -23,6 +23,7 @@ type Subscription struct {
 	storeID            string
 	status             string
 	plan               string
+	billingInterval    string
 	trialEndsAt        *time.Time
 	currentPeriodStart *time.Time
 	currentPeriodEnd   *time.Time
@@ -36,6 +37,7 @@ func Reconstruct(
 	storeID string,
 	status string,
 	plan string,
+	billingInterval string,
 	trialEndsAt *time.Time,
 	currentPeriodStart *time.Time,
 	currentPeriodEnd *time.Time,
@@ -47,6 +49,7 @@ func Reconstruct(
 		storeID:            storeID,
 		status:             status,
 		plan:               plan,
+		billingInterval:    billingInterval,
 		trialEndsAt:        trialEndsAt,
 		currentPeriodStart: currentPeriodStart,
 		currentPeriodEnd:   currentPeriodEnd,
@@ -63,6 +66,7 @@ func Reconstruct(
 func (s *Subscription) StoreID() string                { return s.storeID }
 func (s *Subscription) Status() string                 { return s.status }
 func (s *Subscription) Plan() string                   { return s.plan }
+func (s *Subscription) BillingInterval() string        { return s.billingInterval }
 func (s *Subscription) TrialEndsAt() *time.Time        { return s.trialEndsAt }
 func (s *Subscription) CurrentPeriodStart() *time.Time { return s.currentPeriodStart }
 func (s *Subscription) CurrentPeriodEnd() *time.Time   { return s.currentPeriodEnd }

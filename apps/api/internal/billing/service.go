@@ -213,6 +213,7 @@ func rowToSubscription(row *sqlc.Subscription) *domain.Subscription {
 		uuidToString(row.StoreID),
 		row.Status,
 		row.Plan,
+		row.BillingInterval,
 		timePtr(row.TrialEndsAt),
 		timePtr(row.CurrentPeriodStart),
 		timePtr(row.CurrentPeriodEnd),

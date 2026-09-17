@@ -104,15 +104,16 @@ func planFromPriceID(priceID string) Plan {
 // by the billing endpoints (shared read-model — cross-package consumers rely on
 // this shape).
 type SubscriptionState struct {
-	Status            string     `json:"status"`
-	Plan              Plan       `json:"plan"`
-	TrialEndsAt       *time.Time `json:"trialEndsAt,omitempty"`
-	TrialDaysLeft     int        `json:"trialDaysLeft"`
-	CurrentPeriodEnd  *time.Time `json:"currentPeriodEnd,omitempty"`
-	CancelAtPeriodEnd bool       `json:"cancelAtPeriodEnd"`
-	GraceUntil        *time.Time `json:"graceUntil,omitempty"`
-	HasPaymentMethod  bool       `json:"hasPaymentMethod"`
-	Blocked           bool       `json:"blocked"`
+	Status            string          `json:"status"`
+	Plan              Plan            `json:"plan"`
+	BillingInterval   BillingInterval `json:"billingInterval"`
+	TrialEndsAt       *time.Time      `json:"trialEndsAt,omitempty"`
+	TrialDaysLeft     int             `json:"trialDaysLeft"`
+	CurrentPeriodEnd  *time.Time      `json:"currentPeriodEnd,omitempty"`
+	CancelAtPeriodEnd bool            `json:"cancelAtPeriodEnd"`
+	GraceUntil        *time.Time      `json:"graceUntil,omitempty"`
+	HasPaymentMethod  bool            `json:"hasPaymentMethod"`
+	Blocked           bool            `json:"blocked"`
 	// Enforced=false: paywall globalmente desativado (PAYWALL_ENABLED) — o
 	// estado continua sendo calculado/exibível, mas nada bloqueia e o FE
 	// esconde banners de pressão.
@@ -127,6 +128,7 @@ func NewSubscriptionResponse(sub *domain.Subscription, enforced bool, now time.T
 	state := SubscriptionState{
 		Status:            sub.Status(),
 		Plan:              Plan(sub.Plan()),
+		BillingInterval:   BillingInterval(sub.BillingInterval()),
 		TrialEndsAt:       sub.TrialEndsAt(),
 		TrialDaysLeft:     sub.TrialDaysLeft(now),
 		CurrentPeriodEnd:  sub.CurrentPeriodEnd(),
