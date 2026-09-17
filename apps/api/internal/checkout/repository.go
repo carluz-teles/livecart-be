@@ -458,6 +458,7 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 
 	cart := &CartRow{
 		PaymentReviewRequired: row.PaymentReviewRequired,
+		ERPOrderStatus:        row.ErpOrderStatus.String,
 		ID:                    uuid.UUID(row.ID.Bytes).String(),
 		EventID:               uuid.UUID(row.EventID.Bytes).String(),
 		PlatformUserID:        row.PlatformUserID,

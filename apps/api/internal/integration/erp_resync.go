@@ -329,8 +329,13 @@ func (s *Service) runERPResyncBatch(ctx context.Context, integration *Integratio
 			return err
 		}
 		if err != nil {
-			logger.From(ctx, s.logger).Warn("ERP resync product failed", zap.String("run_id", job.command.RunID),
-				zap.String("integration_id", integration.ID), zap.String("external_product_id", externalID), zap.Error(err))
+			fields := []zap.Field{zap.String("run_id", job.command.RunID), zap.String("store_id", integration.StoreID),
+				zap.String("integration_id", integration.ID), zap.String("external_product_id", externalID), zap.Error(err)}
+			if errors.Is(err, errERPStockPendingEdit) {
+				logger.From(ctx, s.logger).Info("ERP resync product awaits order edit reconciliation", fields...)
+			} else {
+				logger.From(ctx, s.logger).Warn("ERP resync product failed", fields...)
+			}
 		}
 		if err := s.repo.advanceERPResync(ctx, job, err); err != nil {
 			return err

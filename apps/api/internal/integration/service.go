@@ -3569,6 +3569,10 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		return nil, fmt.Errorf("reading pending reservations during manual synchronization")
 	}
 	applied, err := s.repo.ApplyERPStockMirror(ctx, localID, portao, seenSeq)
+	if errors.Is(err, errERPStockPendingEdit) {
+		return nil, httpx.DomainError(409, httpx.CodeCartERPSyncPending,
+			"O estoque aguarda a confirmação de uma alteração de pedido no ERP. Os dados do produto foram atualizados; o saldo será consultado após a conciliação.")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("applying manual stock synchronization: %w", err)
 	}
@@ -3714,6 +3718,9 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 		}
 
 		outcome, syncErr := s.processProductSync(ctx, integration, externalProductID)
+		if errors.Is(syncErr, errERPStockPendingEdit) {
+			return false, syncErr
+		}
 		if syncErr == nil {
 			// Leitura vencida é o único desfecho que pede outra rodada: a
 			// próxima passada faz um GetProduct NOVO, e é a leitura nova — não
@@ -3904,9 +3911,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, saldoParaOPortao, seenSeq)
 		switch {
 		case applyErr != nil:
-			logger.From(ctx, s.logger).Warn("failed to apply ERP stock mirror",
-				zap.String("external_product_id", externalProductID), zap.Error(applyErr))
-			outcome = stockMirrorStale
+			return stockMirrorStale, applyErr
 		case !applied:
 			// Um movimento nosso foi confirmado entre a leitura e agora. Aquele
 			// saldo e passado, e nao da para saber quanto dele ja estava velho —

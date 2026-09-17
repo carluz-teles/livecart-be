@@ -1444,6 +1444,9 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	if err != nil {
 		return nil, err
 	}
+	if err := assertCartItemsEditable(cart); err != nil {
+		return nil, err
+	}
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 	if input.Quantity < 1 {
 		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
@@ -1821,11 +1824,22 @@ func productAllowedForCart(cfg *EventProductConfig, byMerchant bool) bool {
 	return cfg.IsAllowed || byMerchant
 }
 
+func assertCartItemsEditable(cart *CartRow) error {
+	if providers.ERPOrderStatus(cart.ERPOrderStatus).FechadoParaNovosItens() {
+		return httpx.DomainError(409, httpx.CodeErpOrderInvoiced,
+			"Este pedido está fechado para alterações no ERP. Preserve a venda existente e registre os novos itens em outra compra.")
+	}
+	return nil
+}
+
 // loadEditableCartItem returns the cart and the specific item, asserting the
 // item belongs to the cart and the cart is editable.
 func (s *Service) loadEditableCartItem(ctx context.Context, token, itemID string, storeToggleApplies bool) (*CartRow, *CartItemRow, error) {
 	cart, err := s.loadEditableCart(ctx, token, storeToggleApplies)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := assertCartItemsEditable(cart); err != nil {
 		return nil, nil, err
 	}
 	item, err := s.repo.GetCartItem(ctx, itemID)

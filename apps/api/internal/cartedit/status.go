@@ -27,6 +27,7 @@ type Reader interface {
 type Status struct {
 	Pending    bool   `json:"pending"`
 	Processing bool   `json:"processing"`
+	Blocked    bool   `json:"blocked"`
 	LastError  string `json:"lastError,omitempty"`
 	Attempts   int    `json:"attempts"`
 }
@@ -34,9 +35,9 @@ type Status struct {
 func Read(ctx context.Context, db Reader, cartID string) (*Status, error) {
 	var s Status
 	err := db.QueryRow(ctx, `SELECT revision>synced_revision,
-        COALESCE(lease_until>now(),false),COALESCE(last_error,''),attempts
+		COALESCE(lease_until>now(),false),COALESCE(last_error,''),attempts,blocked_at IS NOT NULL AND revision>synced_revision
         FROM cart_erp_edits WHERE cart_id=$1`, cartID).
-		Scan(&s.Pending, &s.Processing, &s.LastError, &s.Attempts)
+		Scan(&s.Pending, &s.Processing, &s.LastError, &s.Attempts, &s.Blocked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &s, nil
 	}
@@ -49,6 +50,10 @@ func AssertReady(ctx context.Context, db Reader, cartID string) error {
 		return err
 	}
 	if s.Pending {
+		if s.Blocked {
+			return httpx.DomainError(409, httpx.CodeCartERPSyncPending,
+				"as alterações deste pedido precisam de conciliação com o ERP antes de continuar")
+		}
 		return httpx.DomainError(409, httpx.CodeCartERPSyncPending, "o pedido está sincronizando alterações; aguarde a confirmação antes de continuar")
 	}
 	return nil
