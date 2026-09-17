@@ -152,6 +152,7 @@ type CartErpEdit struct {
 	LeaseOwner     pgtype.UUID        `json:"lease_owner"`
 	LeaseUntil     pgtype.Timestamptz `json:"lease_until"`
 	LastError      pgtype.Text        `json:"last_error"`
+	BlockedAt      pgtype.Timestamptz `json:"blocked_at"`
 }
 
 type CartErpEditRequest struct {
@@ -353,6 +354,7 @@ type ErpStockSyncState struct {
 	ProductID     pgtype.UUID        `json:"product_id"`
 	LastAttemptAt pgtype.Timestamptz `json:"last_attempt_at"`
 	LastSuccessAt pgtype.Timestamptz `json:"last_success_at"`
+	DeferredAt    pgtype.Timestamptz `json:"deferred_at"`
 }
 
 type EventConsumed struct {

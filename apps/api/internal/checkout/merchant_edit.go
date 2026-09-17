@@ -82,11 +82,15 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	if err := assertCartMutable(cart, toggleGovernsMerchantItemEdit, time.Now()); err != nil {
 		return true, err
 	}
+	if err := assertCartItemsEditable(cart); err != nil {
+		return true, err
+	}
 	var state string
-	var processing, joined, review bool
+	var processing, joined, review, blocked bool
 	if err := tx.QueryRow(ctx, `SELECT erp_order_state,EXISTS(SELECT 1 FROM cart_erp_edits w
         WHERE w.cart_id=c.id AND w.lease_until>now()), EXISTS(SELECT 1 FROM carts child WHERE child.joined_to_cart_id=c.id) OR c.joined_to_cart_id IS NOT NULL
-         ,c.payment_review_required FROM carts c WHERE id=$1`, cart.ID).Scan(&state, &processing, &joined, &review); err != nil {
+         ,c.payment_review_required,EXISTS(SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=c.id AND w.blocked_at IS NOT NULL
+             AND w.revision>w.synced_revision) FROM carts c WHERE id=$1`, cart.ID).Scan(&state, &processing, &joined, &review, &blocked); err != nil {
 		return true, err
 	}
 	if joined {
@@ -94,6 +98,10 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	}
 	if review || cart.PaymentStatus == "refunded" {
 		return true, httpx.DomainError(409, httpx.CodePaymentReviewRequired, "o pagamento deste pedido requer conferência antes de editar")
+	}
+	if blocked {
+		return true, httpx.DomainError(409, httpx.CodeCartERPSyncPending,
+			"as alterações deste pedido precisam de conciliação com o ERP antes de editar novamente")
 	}
 	if processing || state != "open" {
 		return true, httpx.DomainError(409, httpx.CodeCartERPSyncPending, "o pedido está sincronizando; aguarde antes de editar novamente")

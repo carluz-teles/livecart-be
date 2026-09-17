@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -21,6 +23,8 @@ type merchantEditWork struct {
 	attempts                      int
 }
 
+var errMerchantEditPaymentReview = errors.New("pagamento recebido durante a edição; pedido requer conferência")
+
 // Recovery reads the database, not a fire-and-forget HTTP goroutine. Claims
 // expire after the operation deadline so another replica can resume a crash.
 func (s *Service) RecoverMerchantEdits(ctx context.Context) {
@@ -28,6 +32,7 @@ func (s *Service) RecoverMerchantEdits(ctx context.Context) {
 	rows, err := s.pool.Query(ctx, `WITH candidates AS (
         SELECT c.id FROM carts c JOIN cart_erp_edits w ON w.cart_id=c.id
         WHERE w.revision>w.synced_revision AND w.next_attempt_at<=now()
+        AND (w.blocked_at IS NULL OR (c.status IN ('cancelled','expired') AND c.erp_order_state IN ('cancelled','none')))
         AND (w.lease_until IS NULL OR w.lease_until<now())
         ORDER BY w.next_attempt_at LIMIT 5 FOR UPDATE OF c SKIP LOCKED
     ), claimed AS (
@@ -69,6 +74,21 @@ func (s *Service) RecoverMerchantEdits(ctx context.Context) {
 			cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer stop()
 			if err != nil {
+				if errors.Is(err, erp.ErrPedidoFaturado) || errors.Is(err, errMerchantEditPaymentReview) {
+					saved, saveErr := s.pool.Exec(cleanup, `UPDATE cart_erp_edits SET lease_owner=NULL,lease_until=NULL,
+						blocked_at=COALESCE(blocked_at,now()),last_error=$3 WHERE cart_id=$1 AND lease_owner=$2`,
+						w.cartID, w.owner, err.Error())
+					if saveErr != nil {
+						s.logger.Error("saving merchant edit reconciliation", zap.String("cart_id", w.cartID), zap.Error(saveErr))
+						return
+					}
+					if saved.RowsAffected() == 0 {
+						return // Another worker owns the current revision.
+					}
+					s.logger.Info("merchant edit awaits reconciliation", zap.String("cart_id", w.cartID),
+						zap.String("store_id", w.storeID), zap.Int64("revision", w.revision), zap.Error(err))
+					return
+				}
 				_, saveErr := s.pool.Exec(cleanup, `UPDATE cart_erp_edits SET lease_owner=NULL,lease_until=NULL,
                     last_error=$3,next_attempt_at=now()+make_interval(secs=>LEAST(900,5*power(2,LEAST(attempts,7)))::double precision)
                     WHERE cart_id=$1 AND lease_owner=$2`, w.cartID, w.owner, err.Error())
@@ -102,12 +122,15 @@ func (s *Service) syncMerchantEdit(ctx context.Context, w merchantEditWork) erro
 			return fmt.Errorf("aguardando confirmação do cancelamento no ERP")
 		}
 	} else {
+		if providers.ERPOrderStatus(cart.ERPOrderStatus).FechadoParaNovosItens() {
+			return fmt.Errorf("pedido em situação %q: %w", cart.ERPOrderStatus, erp.ErrPedidoFaturado)
+		}
 		var blocked bool
 		if err := s.pool.QueryRow(ctx, `SELECT payment_review_required OR COALESCE(payment_status,'') IN ('paid','refunded') FROM carts WHERE id=$1`, w.cartID).Scan(&blocked); err != nil {
 			return err
 		}
 		if blocked {
-			return fmt.Errorf("pagamento recebido durante a edição; pedido requer conferência")
+			return errMerchantEditPaymentReview
 		}
 		// Failure to cancel the old quote remains durable; do not announce a
 		// completed edit while an obsolete PIX is still active.
@@ -200,7 +223,7 @@ func (s *Service) finishMerchantEdit(ctx context.Context, w merchantEditWork) ([
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE cart_erp_edits SET synced_revision=$3,lease_owner=NULL,lease_until=NULL,
-        last_error=NULL,attempts=0 WHERE cart_id=$1 AND lease_owner=$2`, w.cartID, w.owner, w.revision); err != nil {
+        last_error=NULL,attempts=0,blocked_at=NULL WHERE cart_id=$1 AND lease_owner=$2`, w.cartID, w.owner, w.revision); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {

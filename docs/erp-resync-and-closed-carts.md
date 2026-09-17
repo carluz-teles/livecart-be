@@ -77,3 +77,38 @@ conflito, o rollback falha; não apagar ou juntar pedidos para forçá-lo.
   com falhas, valor acessível da barra e ausência de rolagem horizontal.
 - Build do backend concluído. Nenhuma alteração de dados ou fila em produção
   foi necessária para estes testes.
+
+## Edições manuais pendentes — migration 160
+
+Uma remoção manual mantém seu estoque retido até o ERP confirmar a alteração.
+Esse bloqueio antes era interpretado como disputa transitória do saldo e podia
+prender o SYNC completo no mesmo produto. Se a venda já estivesse faturada, a
+fila de edição também repetia uma alteração que o ERP não podia aceitar.
+
+- A edição de itens verifica a situação do ERP antes de mudar a grade local,
+  tanto com chave de idempotência quanto pelo caminho síncrono anterior.
+  Cancelar uma entrada da fila de espera mantém seu fluxo próprio.
+- A recuperação de edições reconhece documento fechado e pagamento que exige
+  conferência. Marca `cart_erp_edits.blocked_at` e interrompe as tentativas,
+  preservando revisões, itens e estoque retido. `erpItemSync.blocked` informa
+  essa condição ao painel e ao checkout. A conciliação deve resolver a revisão;
+  uma simples reabertura da venda não autoriza reenviar uma grade divergente.
+  Cancelamento confirmado pelo ERP ainda pode concluir a liberação uma vez.
+- O SYNC atualiza os metadados dos produtos bloqueados, conta-os como falhas de
+  atualização completa e avança o cursor. Não anuncia sucesso do estoque.
+- Antes de reconhecer um webhook bloqueado, grava `deferred_at` no checkpoint
+  existente por produto. Não cria histórico nem uma fila ilimitada. Enquanto
+  houver revisão pendente, a recuperação não consome requisições Tiny nesse SKU.
+  Após a conciliação, esses produtos têm prioridade para uma leitura nova de
+  estoque disponível, com o mesmo controle de cota e concorrência.
+- O deploy retoma um SYNC existente quando sua próxima tentativa vencer, sem
+  reiniciá-lo ou modificar manualmente Redis. Uma falha de cota/rede continua
+  adiando o lote; bloqueio por edição não bloqueia todo o catálogo.
+- Logs: `merchant edit awaits reconciliation`,
+  `ERP resync product awaits order edit reconciliation` e
+  `Tiny stock webhook awaits order edit reconciliation`.
+
+A migration somente adiciona dois campos de controle. Não cancela pedidos,
+não libera estoque e não altera o financeiro. Os pedidos históricos ainda
+exigem conciliação da grade com a venda faturada; o deploy não os declara
+sincronizados automaticamente. Publicar backend antes do frontend.

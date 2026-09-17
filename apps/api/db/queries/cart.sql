@@ -947,6 +947,7 @@ SELECT
     c.customer_email,
     c.payment_status,
     c.payment_review_required,
+    c.erp_order_status,
     c.paid_at,
     c.payment_integration_id,
     c.created_at,

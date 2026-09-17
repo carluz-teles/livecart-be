@@ -87,6 +87,11 @@ func (s *Service) ProcessTinyProductWebhook(ctx context.Context, command TinyPro
 	} else {
 		applied, err = s.ProcessProductWebhook(ctx, command.StoreID, "tiny", command.ProductID)
 	}
+	if errors.Is(err, errERPStockPendingEdit) {
+		logger.From(ctx, s.logger).Info("Tiny stock webhook awaits order edit reconciliation",
+			zap.String("external_product_id", command.ProductID))
+		return nil // The durable product checkpoint now owns recovery.
+	}
 	if err != nil {
 		return fmt.Errorf("processing Tiny product webhook: %w", err)
 	}
@@ -107,6 +112,9 @@ func (s *Service) refreshERPAvailableStock(ctx context.Context, integration *Int
 		return false, nil
 	}
 	if err != nil {
+		return false, err
+	}
+	if err := s.repo.deferStockForPendingEdit(ctx, id); err != nil {
 		return false, err
 	}
 	provider, err := s.createProviderFromRow(ctx, integration)
@@ -133,7 +141,7 @@ func (s *Service) refreshERPAvailableStock(ctx context.Context, integration *Int
 		return false, fmt.Errorf("ERP stock snapshot invalidated by concurrent change")
 	}
 	if integration.Provider == "tiny" {
-		_, err = s.repo.pool.Exec(ctx, `INSERT INTO erp_stock_sync_state(product_id,last_success_at) VALUES($1,now()) ON CONFLICT(product_id) DO UPDATE SET last_success_at=now()`, id)
+		_, err = s.repo.pool.Exec(ctx, `INSERT INTO erp_stock_sync_state(product_id,last_success_at) VALUES($1,now()) ON CONFLICT(product_id) DO UPDATE SET last_success_at=now(),deferred_at=NULL`, id)
 		if err != nil {
 			return false, fmt.Errorf("recording successful stock check: %w", err)
 		}
@@ -163,9 +171,11 @@ func (s *Service) claimTinyStockChecks(ctx context.Context, storeID string) ([]s
 	rows, err := tx.Query(ctx, `WITH candidates AS (
  SELECT p.id FROM products p LEFT JOIN erp_stock_sync_state s ON s.product_id=p.id
  WHERE p.store_id=$1 AND p.external_source='tiny' AND p.active AND COALESCE(p.external_id,'')<>''
+ AND NOT EXISTS(SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
+     WHERE r.product_id=p.id AND r.revision>w.synced_revision)
  AND (s.last_attempt_at IS NULL OR s.last_attempt_at<now()-interval '5 minutes')
- AND (s.last_success_at IS NULL OR s.last_success_at<now()-interval '15 minutes')
- ORDER BY s.last_attempt_at NULLS FIRST,p.id LIMIT 10
+ AND (s.deferred_at IS NOT NULL OR s.last_success_at IS NULL OR s.last_success_at<now()-interval '15 minutes')
+ ORDER BY s.deferred_at NULLS LAST,s.last_attempt_at NULLS FIRST,p.id LIMIT 10
  ), claimed AS (
  INSERT INTO erp_stock_sync_state(product_id,last_attempt_at)
  SELECT id,now() FROM candidates
