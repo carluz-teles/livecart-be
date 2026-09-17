@@ -325,18 +325,18 @@ func (h *Handler) UpdatePriority(c *fiber.Ctx) error {
 // @Produce json
 // @Param storeId path string true "Store ID"
 // @Param id path string true "Integration ID"
-// @Success 202 {object} httpx.Envelope{data=StartERPResyncResponse}
+// @Success 200 {object} httpx.Envelope{data=StartERPResyncResponse}
 // @Failure 422 {object} httpx.Envelope
 // @Router /stores/{storeId}/integrations/{id}/erp/resync [post]
 func (h *Handler) StartERPResync(c *fiber.Ctx) error {
-	total, err := h.service.StartERPResync(c.UserContext(), StartERPResyncInput{
+	progress, err := h.service.StartERPResync(c.UserContext(), StartERPResyncInput{
 		StoreID:       httpx.GetStoreID(c),
 		IntegrationID: c.Params("id"),
 	})
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, StartERPResyncResponse{Products: total})
+	return httpx.OK(c, StartERPResyncResponse{Products: progress.Total, Progress: progress})
 }
 
 // TestConnection tests the connection to the integration provider.
@@ -1322,7 +1322,16 @@ func mapToCredentials(m map[string]any) *providers.Credentials {
 }
 
 func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse {
-	resyncDone, resyncTotal := ERPResyncProgressFromMetadata(output.Metadata)
+	progress := output.ERPResync
+	// Legacy markers are not evidence of an executing job. Keep the problem
+	// visible, while allowing a new tracked run to bypass an archived task.
+	if progress == nil && output.Metadata[providers.MetadataResyncRunningSince] != nil {
+		progress = &ERPResyncProgress{Status: "interrupted"}
+	}
+	resyncDone, resyncTotal := 0, 0
+	if progress != nil {
+		resyncDone, resyncTotal = progress.Done, progress.Total
+	}
 	return &IntegrationResponse{
 		ID:                output.ID,
 		StoreID:           output.StoreID,
@@ -1330,7 +1339,8 @@ func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse
 		Provider:          output.Provider,
 		Status:            output.Status,
 		Metadata:          output.Metadata,
-		ERPResyncRunning:  ERPResyncRunningFromMetadata(output.Metadata),
+		ERPResync:         progress,
+		ERPResyncRunning:  progress.Running(),
 		ERPResyncDone:     resyncDone,
 		ERPResyncTotal:    resyncTotal,
 		LastSyncedAt:      output.LastSyncedAt,

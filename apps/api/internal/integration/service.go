@@ -121,7 +121,6 @@ type Service struct {
 	expiryScheduler     CartExpiryScheduler
 	waitlistCloseSched  WaitlistCloseScheduler
 	publishScheduler    PublishScheduler
-	erpResyncScheduler  ERPResyncScheduler
 	erpResyncNotifier   ERPResyncNotifier
 	logger              *zap.Logger
 
@@ -564,11 +563,6 @@ func NewService(
 }
 
 // SetProductSyncer sets the product syncer for webhook processing.
-// SetERPResyncScheduler injeta o enfileirador da releitura em massa.
-func (s *Service) SetERPResyncScheduler(sched ERPResyncScheduler) {
-	s.erpResyncScheduler = sched
-}
-
 // SetERPResyncNotifier injeta o avisador do fim da releitura em massa.
 func (s *Service) SetERPResyncNotifier(n ERPResyncNotifier) {
 	s.erpResyncNotifier = n
@@ -747,7 +741,13 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (*CreateInteg
 	if err != nil {
 		return nil, err
 	}
-	return s.toCreateOutput(row), nil
+	progress, err := s.repo.resyncProgressForStore(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	output := s.toCreateOutput(row)
+	output.ERPResync = progress[id]
+	return output, nil
 }
 
 // List lists all integrations for a store.
@@ -759,9 +759,14 @@ func (s *Service) List(ctx context.Context, input ListIntegrationsInput) (*ListI
 		return nil, err
 	}
 
+	progress, err := s.repo.resyncProgressForStore(ctx, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]CreateIntegrationOutput, len(rows))
 	for i, row := range rows {
 		result[i] = *s.toCreateOutput(&row)
+		result[i].ERPResync = progress[row.ID]
 	}
 
 	return &ListIntegrationsOutput{
@@ -5933,111 +5938,6 @@ type ERPResyncNotifier interface {
 	NotifyERPResyncFinished(ctx context.Context, storeID, provider string, synced, failed int) error
 }
 
-// ERPResyncScheduler enfileira a releitura em massa dos produtos de uma loja.
-type ERPResyncScheduler interface {
-	ScheduleERPResync(ctx context.Context, storeID, integrationID string) error
-}
-
-// erpResyncChunk é de quantos em quantos produtos a releitura respira.
-//
-// O limitador adaptativo já espaça as chamadas pelos headers do Tiny, então a
-// pausa não existe para respeitar o limite — existe para não MONOPOLIZÁ-LO. Sem
-// ela, uma releitura de 300 produtos ocupa a cota inteira e o webhook de estoque
-// de uma live em andamento fica na fila atrás dela.
-const erpResyncChunk = 25
-
-// erpResyncBreath é quanto a releitura para entre um bloco e outro.
-const erpResyncBreath = 2 * time.Second
-
-// StartERPResync agenda a releitura e devolve quantos produtos entrarão nela.
-//
-// Existe porque os produtos foram importados quando o LiveCart só sabia ler o
-// saldo FÍSICO do ERP. Ligar a configuração de saldo disponível muda o que as
-// PRÓXIMAS sincronizações gravam, mas não reescreve o que já está no banco: sem
-// isto, cada produto só se corrigiria quando o lojista mexesse nele no ERP.
-func (s *Service) StartERPResync(ctx context.Context, input StartERPResyncInput) (int, error) {
-	integration, err := s.repo.GetByID(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return 0, err
-	}
-	if integration.Type != "erp" {
-		return 0, httpx.DomainError(422, httpx.CodeErpStockSourceUnsupported,
-			"só integrações de ERP têm produtos para sincronizar")
-	}
-	if s.erpResyncScheduler == nil {
-		return 0, httpx.ErrUnprocessable("sincronização em massa não está configurada")
-	}
-
-	posicoes, err := s.repo.ListStockPositionsForReconciliation(ctx, input.StoreID, integration.Provider)
-	if err != nil {
-		return 0, err
-	}
-	if len(posicoes) == 0 {
-		return 0, nil
-	}
-
-	if err := s.erpResyncScheduler.ScheduleERPResync(ctx, input.StoreID, integration.ID); err != nil {
-		return 0, fmt.Errorf("scheduling ERP resync: %w", err)
-	}
-	s.markResyncRunning(ctx, integration, true)
-	return len(posicoes), nil
-}
-
-// markResyncRunning liga/desliga a marca de varredura em andamento.
-//
-// Best-effort: falhar aqui não pode impedir a varredura de começar nem de
-// terminar. O pior desfecho de uma marca presa é o botão ficar desabilitado até
-// a guarda de obsolescência expirar — chato, e muito melhor que duas varreduras
-// simultâneas sobre a mesma cota do ERP.
-func (s *Service) markResyncRunning(ctx context.Context, integration *IntegrationRow, running bool) {
-	metadata := integration.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	if running {
-		metadata[providers.MetadataResyncRunningSince] = time.Now().UTC().Format(time.RFC3339)
-	} else {
-		delete(metadata, providers.MetadataResyncRunningSince)
-		delete(metadata, providers.MetadataResyncDone)
-		delete(metadata, providers.MetadataResyncTotal)
-	}
-	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
-		logger.From(ctx, s.logger).Warn("could not update the ERP resync marker",
-			zap.String("integration_id", integration.ID),
-			zap.Bool("running", running),
-			zap.Error(err))
-		return
-	}
-	integration.Metadata = metadata
-}
-
-// erpResyncProgressEvery é de quantos em quantos produtos o progresso é gravado.
-//
-// Não a cada produto: seriam 154 escritas no metadata numa varredura comum, para
-// um número que ninguém consegue ler mudando a cada seis segundos. Não a cada
-// bloco de 25: com o ritmo que o ERP permite, o contador ficaria parado por
-// minutos e voltaria a parecer travado — que é o problema que ele existe para
-// resolver.
-const erpResyncProgressEvery = 5
-
-// markResyncProgress grava "vai em X de N".
-func (s *Service) markResyncProgress(ctx context.Context, integration *IntegrationRow, done, total int) {
-	metadata := integration.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadata[providers.MetadataResyncDone] = done
-	metadata[providers.MetadataResyncTotal] = total
-	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
-		// Progresso é conforto, não correção: perder uma atualização atrasa o
-		// número na tela e não muda nada do que foi gravado no estoque.
-		logger.From(ctx, s.logger).Debug("could not update the ERP resync progress",
-			zap.String("integration_id", integration.ID), zap.Error(err))
-		return
-	}
-	integration.Metadata = metadata
-}
-
 // erpResyncRateLimitRetries é quantas vezes um produto estrangulado é reposto na
 // fila antes de contar como falha.
 const erpResyncRateLimitRetries = 4
@@ -6102,95 +6002,6 @@ func retryERPProductSync(ctx context.Context, syncProduct func(context.Context) 
 }
 
 var errResyncStockDeferred = errors.New("ERP stock snapshot still deferred after product metadata sync")
-
-// RunERPResync percorre os produtos vinculados relendo cada um do ERP.
-//
-// Um produto que falha não derruba os outros: a releitura existe para consertar
-// um catálogo inteiro, e parar no primeiro erro deixaria o resto do estoque
-// errado por causa de um SKU que o lojista talvez tenha apagado no ERP.
-func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID string) error {
-	integration, err := s.repo.GetByID(ctx, integrationID, storeID)
-	if err != nil {
-		return err
-	}
-
-	// A marca sai no fim, dê no que der. Se ficar presa, o botão do lojista fica
-	// desabilitado até a guarda de obsolescência soltar — e `context.WithoutCancel`
-	// porque a limpeza precisa acontecer mesmo quando a varredura morreu por
-	// timeout, que é justamente quando a marca ficaria mais tempo pendurada.
-	defer s.markResyncRunning(context.WithoutCancel(ctx), integration, false)
-
-	posicoes, err := s.repo.ListStockPositionsForReconciliation(ctx, storeID, integration.Provider)
-	if err != nil {
-		return err
-	}
-
-	lg := logger.From(ctx, s.logger)
-	lg.Info("ERP resync started",
-		zap.String("store_id", storeID),
-		zap.String("integration_id", integrationID),
-		zap.Int("products", len(posicoes)),
-	)
-
-	total := len(posicoes)
-	s.markResyncProgress(ctx, integration, 0, total)
-	beforeCoverage, beforeErr := s.repo.catalogIdentifierCoverage(ctx, storeID, integration.Provider)
-
-	var ok, falhou int
-	for i, pos := range posicoes {
-		if i > 0 && i%erpResyncChunk == 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(erpResyncBreath):
-			}
-		}
-		if err := s.resyncOneProduct(ctx, integration, pos.ExternalID); err != nil {
-			falhou++
-			lg.Warn("ERP resync: product failed",
-				zap.String("external_product_id", pos.ExternalID),
-				zap.String("name", pos.Name),
-				zap.Error(err))
-		} else {
-			ok++
-		}
-
-		if (i+1)%erpResyncProgressEvery == 0 {
-			s.markResyncProgress(ctx, integration, i+1, total)
-		}
-	}
-
-	lg.Info("ERP resync finished",
-		zap.String("store_id", storeID),
-		zap.Int("synced", ok),
-		zap.Int("failed", falhou),
-	)
-	afterCoverage, afterErr := s.repo.catalogIdentifierCoverage(ctx, storeID, integration.Provider)
-	if beforeErr == nil && afterErr == nil {
-		lg.Info("ERP resync identifier coverage",
-			zap.String("store_id", storeID), zap.String("integration_id", integrationID),
-			zap.Int("products_before", beforeCoverage.total), zap.Int("products_after", afterCoverage.total),
-			zap.Int("missing_sku_before", beforeCoverage.missingSKU), zap.Int("missing_sku_after", afterCoverage.missingSKU),
-			zap.Int("missing_barcode_before", beforeCoverage.missingBarcode), zap.Int("missing_barcode_after", afterCoverage.missingBarcode),
-			zap.Int("synced", ok), zap.Int("failed", falhou),
-		)
-	} else {
-		lg.Warn("ERP resync identifier coverage unavailable", zap.String("store_id", storeID), zap.Error(errors.Join(beforeErr, afterErr)))
-	}
-
-	// O aviso é o fim do trabalho, não parte dele: falhar aqui não desfaz nada
-	// que já foi gravado, e devolver erro faria a asynq repetir a varredura
-	// inteira — gastando a cota do ERP de novo para reescrever os mesmos saldos.
-	if s.erpResyncNotifier != nil {
-		if err := s.erpResyncNotifier.NotifyERPResyncFinished(
-			ctx, storeID, integration.Provider, ok, falhou,
-		); err != nil {
-			lg.Warn("ERP resync finished but the merchant was not notified",
-				zap.String("store_id", storeID), zap.Error(err))
-		}
-	}
-	return nil
-}
 
 func (s *Service) createProviderFromRow(ctx context.Context, integration *IntegrationRow) (providers.Provider, error) {
 	if integration.InstagramCredentialsSourceID != "" {

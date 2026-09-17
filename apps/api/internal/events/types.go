@@ -206,13 +206,7 @@ const (
 	UserDeleted          Name = "user.deleted"
 	CustomerUpserted     Name = "customer.upserted"
 
-	// ERPResyncProducts: relê no ERP todos os produtos vinculados de uma loja.
-	//
-	// Uma tarefa por LOJA, não por produto. Enfileirar N tarefas só empurraria o
-	// problema para o rate limit do ERP: elas correriam em paralelo e o Tiny
-	// estrangularia todas, inclusive as da live em andamento. Uma tarefa que
-	// percorre a lista em sequência deixa o limitador adaptativo espaçar as
-	// chamadas com os headers do próprio Tiny.
+	// One sequential catalog batch; the next command follows its checkpoint.
 	ERPResyncProducts Name = "erp.products_resync"
 	// ERPWebhookProcess consumes an authenticated ERP webhook persisted before ACK.
 	ERPWebhookProcess Name = "erp.webhook.process"
@@ -274,6 +268,7 @@ var DefaultPolicies = map[string]QueuePolicy{
 // "Em aberto" no Tiny e a aprovação nunca roda. Em 16/08 foram 3 pedidos
 // pagos nesse estado, 2 deles sem sequer registrar o id de volta.
 var EventTimeouts = map[Name]time.Duration{
+	ERPResyncProducts: 2 * time.Minute,
 	ERPWebhookProcess: 90 * time.Second,
 	OrderPaid:         90 * time.Second,
 	// Additional Tiny payments reconcile freight and may replace the previous
@@ -337,9 +332,10 @@ type Envelope struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// Queue returns the queue this event should be enqueued on. For now every event
-// rides the normal queue; later phases route lifecycle events to fast-track and
-// aggregation to batch.
+// Catalog batches yield between checkpoints so normal events keep their queue.
 func (e Envelope) Queue() string {
+	if e.Name == ERPResyncProducts {
+		return QueueBatch
+	}
 	return QueueNormal
 }

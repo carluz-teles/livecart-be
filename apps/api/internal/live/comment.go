@@ -596,6 +596,11 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 	// — sem o preço de mentir para ele.
 	pendentes := itensPendentesNoERP(adicionados)
 	if pendentes > 0 {
+		for _, item := range adicionados {
+			if item.erpBloqueado {
+				return ErrCommentERPBlocked
+			}
+		}
 		logger.From(ctx, s.logger).Warn("DM adiada: o ERP ainda não confirmou o item",
 			zap.String("cart_id", ultimo.carrinho.CartID),
 			zap.String("username", input.Username),
@@ -846,8 +851,9 @@ type resultadoDoItem struct {
 	// É o que impede a DM de sair: avisar "item adicionado" quando o pedido do
 	// lojista não tem o item é prometer o que o sistema não pode cumprir — e a
 	// compradora fica com a prova de uma compra que a loja não enxerga.
-	erpPendente bool
-	replayed    bool
+	erpPendente  bool
+	erpBloqueado bool
+	replayed     bool
 }
 
 // itensPendentesNoERP conta quantos itens do comentário o ERP NÃO confirmou.
