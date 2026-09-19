@@ -2995,7 +2995,7 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(payment_status,''),COALESCE(checkout_id,'') FROM carts WHERE id=$1 FOR UPDATE`, cID).Scan(&currentStatus, &currentID); err != nil {
 		return "", err
 	}
-	if paymentMethod == "manual" {
+	if paymentMethod == "manual" || paymentMethod == providers.PaymentMethodERPManual {
 		if err := cartedit.AssertReady(ctx, tx, cartID); err != nil {
 			return "", err
 		}
@@ -4220,9 +4220,10 @@ func (r *Repository) ProductSeqByExternalID(ctx context.Context, storeID, extern
 // ApplyERPStockMirror grava o saldo lido do ERP, e só se nenhum movimento nosso
 // tiver acontecido desde a leitura.
 //
-// false significa leitura vencida — e descartar é a única resposta correta,
+// false,nil significa leitura vencida — e descartar é a única resposta correta,
 // porque não há como saber quanto daquele número já estava desatualizado. Uma
-// leitura nova chega no próximo webhook ou na reconciliação.
+// leitura nova chega no próximo webhook ou na reconciliação. Edição pendente
+// retorna errERPStockPendingEdit com recuperação persistida por produto.
 func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, erpStock int, seenSeq int64) (bool, error) {
 	id, err := parseUUID(productID)
 	if err != nil {
@@ -4233,6 +4234,11 @@ func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, 
 	})
 	if err != nil {
 		return false, fmt.Errorf("applying ERP stock mirror: %w", err)
+	}
+	if n == 0 {
+		if err := r.deferStockForPendingEdit(ctx, productID); err != nil {
+			return false, err
+		}
 	}
 	return n > 0, nil
 }

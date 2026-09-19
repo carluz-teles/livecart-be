@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/product/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -14,8 +16,9 @@ import (
 )
 
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	repo    *Repository
+	logger  *zap.Logger
+	readERP func(context.Context, string, string, string) (*providers.ERPProduct, error)
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -25,7 +28,36 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 	}
 }
 
+func (s *Service) SetERPProductReader(reader func(context.Context, string, string, string) (*providers.ERPProduct, error)) {
+	s.readERP = reader
+}
+
 func (s *Service) Create(ctx context.Context, input CreateProductInput) (*domain.Product, error) {
+	if input.ExternalSource.Equals(domain.ExternalSourceTiny) {
+		ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		if s.readERP == nil {
+			return nil, httpx.DomainError(503, httpx.CodeErpThrottled, "ERP indisponível")
+		}
+		p, err := s.readERP(ctx, input.StoreID.String(), input.ExternalSource.String(), input.ExternalID)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil || !p.Active || p.IsParent {
+			return nil, httpx.ErrUnprocessable("Produto inválido para importação simples")
+		}
+		if !p.StockKnown {
+			return nil, httpx.DomainError(503, httpx.CodeErpThrottled, "Estoque não confirmado")
+		}
+		input.Stock = p.Stock
+		input.Shipping.SKU, input.Shipping.Barcode = p.SKU, p.GTIN
+		return s.create(ctx, input)
+	}
+	return s.create(ctx, input)
+}
+
+// create is only used after validation by Create or the trusted ERP adapter.
+func (s *Service) create(ctx context.Context, input CreateProductInput) (*domain.Product, error) {
 	// Resolve keyword: validate if provided, or auto-generate
 	keyword, err := s.resolveKeyword(ctx, input.StoreID, input.Keyword)
 	if err != nil {

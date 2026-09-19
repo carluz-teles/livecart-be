@@ -671,6 +671,7 @@ type SelectShippingMethodOutput struct {
 // CartRow represents a cart row from the database
 type CartRow struct {
 	PaymentReviewRequired bool
+	ERPOrderStatus        string
 	ID                    string
 	EventID               string
 	PlatformUserID        string

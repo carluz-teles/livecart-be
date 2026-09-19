@@ -160,7 +160,6 @@ var baselineWithoutValidate = map[string]bool{
 	"integration.CreateIntegrationRequest":      true,
 	"integration.CreateShippingShipmentRequest": true,
 	"integration.GenerateShippingLabelsRequest": true,
-	"integration.ImportERPProductRequest":       true,
 	"integration.RefundRequest":                 true,
 	"integration.SendWhatsAppTestRequest":       true,
 	"integration.ShipmentItemRequest":           true,

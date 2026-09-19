@@ -1555,6 +1555,7 @@ SELECT
     c.customer_email,
     c.payment_status,
     c.payment_review_required,
+    c.erp_order_status,
     c.paid_at,
     c.payment_integration_id,
     c.created_at,
@@ -1596,6 +1597,7 @@ type GetCartByTokenWithDetailsRow struct {
 	CustomerEmail          pgtype.Text        `json:"customer_email"`
 	PaymentStatus          pgtype.Text        `json:"payment_status"`
 	PaymentReviewRequired  bool               `json:"payment_review_required"`
+	ErpOrderStatus         pgtype.Text        `json:"erp_order_status"`
 	PaidAt                 pgtype.Timestamptz `json:"paid_at"`
 	PaymentIntegrationID   pgtype.UUID        `json:"payment_integration_id"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
@@ -1636,6 +1638,7 @@ func (q *Queries) GetCartByTokenWithDetails(ctx context.Context, token string) (
 		&i.CustomerEmail,
 		&i.PaymentStatus,
 		&i.PaymentReviewRequired,
+		&i.ErpOrderStatus,
 		&i.PaidAt,
 		&i.PaymentIntegrationID,
 		&i.CreatedAt,

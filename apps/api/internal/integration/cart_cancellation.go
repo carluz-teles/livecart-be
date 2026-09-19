@@ -2,15 +2,18 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 
-	"errors"
+	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/integration/providers"
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
-	"time"
 )
 
 // Motivos de morte de um cart (coluna carts.cancelled_reason). São o
@@ -274,9 +277,26 @@ func (s *Service) MarkCartPaidFromERP(ctx context.Context, cartID, storeID strin
 	}
 
 	agora := time.Now()
-	_, err = s.repo.UpdateCartPaymentStatus(ctx, cartID, "paid",
-		"erp-"+st.ExternalOrderID, &agora, erpPaymentMethod, amountCents)
+	paymentID := "erp-" + st.ExternalOrderID
+	snapshot := providers.PaymentStatus{PaymentID: paymentID, PaymentMethod: erpPaymentMethod, Amount: amountCents, PaidAt: &agora, Status: "paid"}
+	payload, err := json.Marshal(struct {
+		CartID          string                  `json:"cart_id"`
+		StoreID         string                  `json:"store_id"`
+		PaymentID       string                  `json:"payment_id"`
+		Method          string                  `json:"payment_method"`
+		PaymentSnapshot providers.PaymentStatus `json:"payment_snapshot"`
+	}{cartID, storeID, paymentID, erpPaymentMethod, snapshot})
 	if err != nil {
+		return false, err
+	}
+	fact := events.Envelope{Name: events.CartPaid, Source: events.SourceInternal,
+		DedupKey: "cart.paid:erp:" + storeID + ":" + cartID + ":" + st.ExternalOrderID, Payload: payload}
+	_, err = s.repo.UpdateCartPaymentStatus(ctx, cartID, "paid",
+		paymentID, &agora, erpPaymentMethod, amountCents, fact)
+	if err != nil {
+		if errors.Is(err, paymentdomain.ErrStalePayment) {
+			return false, nil
+		}
 		if errors.Is(err, paymentdomain.ErrCartNotPayable) {
 			// Carrinho expirado ou cancelado. O pagamento existe no ERP e o
 			// carrinho não pode recebê-lo — é caso de gente, e a aba "Precisam
@@ -293,4 +313,4 @@ func (s *Service) MarkCartPaidFromERP(ctx context.Context, cartID, storeID strin
 
 // erpPaymentMethod nomeia, no histórico, o pagamento que veio de fora do
 // gateway. O lojista reconhece a origem sem precisar abrir o pedido no Tiny.
-const erpPaymentMethod = "erp_manual"
+const erpPaymentMethod = providers.PaymentMethodERPManual

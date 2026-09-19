@@ -55,6 +55,132 @@ func seedMerchantEdit(t *testing.T) editFixture {
 	return f
 }
 
+func TestMerchantEdit_ClosedERPOrderRejectsChangesBeforeMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name, operation, status string
+		queued                  bool
+	}{
+		{name: "queued removal", operation: "remove", status: "preparando_envio", queued: true},
+		{name: "queued addition", operation: "add", status: "faturado", queued: true},
+		{name: "queued quantity", operation: "set", status: "enviado", queued: true},
+		{name: "legacy removal", operation: "remove", status: "preparando_envio"},
+		{name: "legacy addition", operation: "add", status: "faturado"},
+		{name: "legacy quantity", operation: "set", status: "enviado"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := seedMerchantEdit(t)
+			if _, err := testPool.Exec(t.Context(), `UPDATE carts SET erp_order_status=$2 WHERE id=$1`, f.cart, tc.status); err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			if tc.queued {
+				ctx = cartedit.WithRequestID(ctx, uuid.NewString())
+			}
+			var err error
+			switch tc.operation {
+			case "remove":
+				err = f.service.RemoveCartItemAsMerchant(ctx, f.token, f.item)
+			case "add":
+				err = f.service.AddCartItemAsMerchant(ctx, f.token, f.product, 1)
+			case "set":
+				err = f.service.SetCartItemQuantityAsMerchant(ctx, f.token, f.item, 1)
+			}
+			var domain *httpx.ServiceError
+			if !errors.As(err, &domain) || domain.Code != 409 || domain.Reason != string(httpx.CodeErpOrderInvoiced) {
+				t.Fatalf("closed ERP order error: %v", err)
+			}
+			var quantity, stock, requests int
+			if err := testPool.QueryRow(ctx, `SELECT ci.quantity,p.stock,(SELECT count(*) FROM cart_erp_edit_requests WHERE cart_id=$2)
+				FROM cart_items ci JOIN products p ON p.id=ci.product_id WHERE ci.id=$1`, f.item, f.cart).Scan(&quantity, &stock, &requests); err != nil {
+				t.Fatal(err)
+			}
+			if quantity != 2 || stock != 8 || requests != 0 {
+				t.Fatalf("rejected edit mutated data: quantity=%d stock=%d requests=%d", quantity, stock, requests)
+			}
+		})
+	}
+}
+
+func TestMerchantEdit_ClosedOrderWaitsForReconciliationWithoutBlockingOtherStore(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		localState bool
+	}{
+		{name: "known invoice", localState: true},
+		{name: "provider discovered invoice"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := seedMerchantEdit(t)
+			ctx := cartedit.WithRequestID(t.Context(), uuid.NewString())
+			if err := f.service.RemoveCartItemAsMerchant(ctx, f.token, f.item); err != nil {
+				t.Fatal(err)
+			}
+			if tc.localState {
+				if _, err := testPool.Exec(ctx, `UPDATE carts SET erp_order_status='faturado' WHERE id=$1`, f.cart); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The accepted request remains idempotent after the invoice arrives.
+			if err := f.service.RemoveCartItemAsMerchant(ctx, f.token, f.item); err != nil {
+				t.Fatal(err)
+			}
+			var blockedCalls atomic.Int32
+			fake := &scriptedMerchantERP{mutate: func(_ context.Context, cart, _ string) error {
+				if cart == f.cart {
+					blockedCalls.Add(1)
+					return fmt.Errorf("invoice appeared: %w", erp.ErrPedidoFaturado)
+				}
+				return nil
+			}}
+			f.service.merchantEditERP = fake
+			dueMerchantEdit(t, f.cart)
+			f.service.RecoverMerchantEdits(t.Context())
+			st, err := cartedit.Read(t.Context(), testPool, f.cart)
+			if err != nil || !st.Pending || !st.Blocked || st.Processing || st.Attempts != 1 {
+				t.Fatalf("blocked state: %+v %v", st, err)
+			}
+			other := seedMerchantEdit(t)
+			if other.store == f.store {
+				t.Fatal("fixture did not isolate tenants")
+			}
+			if err := other.service.RemoveCartItemAsMerchant(cartedit.WithRequestID(t.Context(), uuid.NewString()), other.token, other.item); err != nil {
+				t.Fatal(err)
+			}
+			dueMerchantEdit(t, other.cart)
+			dueMerchantEdit(t, f.cart)
+			f.service.RecoverMerchantEdits(t.Context())
+			if err := cartedit.AssertReady(t.Context(), testPool, other.cart); err != nil {
+				t.Fatalf("unrelated store blocked: %v", err)
+			}
+			st, err = cartedit.Read(t.Context(), testPool, f.cart)
+			if err != nil || st.Attempts != 1 || !st.Blocked || !st.Pending {
+				t.Fatalf("repeated blocked edit: %+v %v", st, err)
+			}
+			wantCalls := int32(1)
+			if tc.localState {
+				wantCalls = 0
+			}
+			if blockedCalls.Load() != wantCalls {
+				t.Fatalf("closed order ERP calls=%d want=%d", blockedCalls.Load(), wantCalls)
+			}
+			var stock, held int
+			if err := testPool.QueryRow(t.Context(), `SELECT p.stock,r.retained_quantity FROM products p
+				JOIN cart_erp_edit_requests r ON r.product_id=p.id WHERE r.cart_id=$1`, f.cart).Scan(&stock, &held); err != nil || stock != 8 || held != 2 {
+				t.Fatalf("released unresolved stock: stock=%d held=%d err=%v", stock, held, err)
+			}
+			// A later confirmed cancellation may release retained stock once.
+			if _, err := testPool.Exec(t.Context(), `UPDATE carts SET status='cancelled',erp_order_state='cancelled' WHERE id=$1`, f.cart); err != nil {
+				t.Fatal(err)
+			}
+			f.service.RecoverMerchantEdits(t.Context())
+			st, err = cartedit.Read(t.Context(), testPool, f.cart)
+			if err != nil || st.Pending || st.Blocked {
+				t.Fatalf("confirmed cancellation not reconciled: %+v %v", st, err)
+			}
+		})
+	}
+}
+
 func TestMerchantEdit_RemovalIsDurableAndKeepsStockUntilAcknowledged(t *testing.T) {
 	f := seedMerchantEdit(t)
 	ctx := cartedit.WithRequestID(t.Context(), uuid.NewString())

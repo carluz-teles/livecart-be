@@ -935,7 +935,7 @@ func (s *Service) getInstagramOAuthURL(storeID string) (*GetOAuthURLOutput, erro
 // getTinyOAuthURL generates the Tiny ERP OAuth URL using stored credentials.
 func (s *Service) getTinyOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 	// Find existing integration (active or pending_auth) to get client_id
-	existing, err := s.repo.GetByProvider(context.Background(), storeID, "erp", "tiny")
+	existing, err := s.tinyOAuthIntegration(context.Background(), storeID)
 	if err != nil || existing == nil {
 		return nil, httpx.ErrUnprocessable("Crie primeiro o aplicativo Tiny e salve as credenciais")
 	}
@@ -1215,7 +1215,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 	storeID := input.State
 
 	// Get existing integration with stored client_id/client_secret
-	existing, err := s.repo.GetByProvider(ctx, storeID, "erp", "tiny")
+	existing, err := s.tinyOAuthIntegration(ctx, storeID)
 	if err != nil || existing == nil {
 		return nil, httpx.ErrUnprocessable("Integração Tiny não encontrada. Crie primeiro com client_id e client_secret.")
 	}
@@ -2912,16 +2912,34 @@ func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateIn
 // =============================================================================
 
 // SearchProducts searches for products in an ERP integration.
-// It lists products, then enriches each with full details (stock, images)
-// via GetProduct, and filters to only return active products with stock > 0.
+// Summary searches list previews; stock is read only after selection. Legacy
+// clients still receive details and available-stock filtering.
 func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput) (*SearchProductsOutput, error) {
+	started := time.Now()
 	erpProvider, err := s.GetERPProvider(ctx, input.IntegrationID, input.StoreID)
 	if err != nil {
 		return nil, err
 	}
 
+	result, err := s.searchERPProducts(ctx, erpProvider, input)
+	if err == nil {
+		logger.From(ctx, s.logger).Info("ERP product search completed",
+			zap.String("integration_id", input.IntegrationID),
+			zap.Bool("summary_only", input.SummaryOnly),
+			zap.Int("results", len(result.Products)),
+			zap.Duration("duration", time.Since(started)))
+	} else {
+		logger.From(ctx, s.logger).Warn("ERP product search failed",
+			zap.String("integration_id", input.IntegrationID),
+			zap.Bool("summary_only", input.SummaryOnly),
+			zap.Duration("duration", time.Since(started)), zap.Error(err))
+	}
+	return result, err
+}
+
+func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.ERPProvider, input SearchProductsInput) (*SearchProductsOutput, error) {
 	pageSize := input.PageSize
-	if pageSize <= 0 {
+	if pageSize <= 0 || pageSize > 20 {
 		pageSize = 20
 	}
 
@@ -2932,6 +2950,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 
 	type searchResult struct {
 		field    string
+		hasMore  bool
 		products []providers.ERPProduct
 		err      error
 	}
@@ -2940,33 +2959,58 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		field  string
 		params providers.ListProductsParams
 	}
+	lookup := func(job searchJob) searchResult {
+		started := time.Now()
+		r, err := erpProvider.ListProducts(ctx, job.params)
+		result := searchResult{field: job.field, err: err}
+		if err == nil && r != nil {
+			result.products, result.hasMore = r.Products, r.HasMore
+		}
+		logger.From(ctx, s.logger).Info("ERP product search lookup completed",
+			zap.String("integration_id", input.IntegrationID), zap.String("field", job.field),
+			zap.Int("results", len(result.products)), zap.Duration("duration", time.Since(started)),
+			zap.Bool("success", err == nil))
+		return result
+	}
 
 	jobs := []searchJob{
 		{"name", func() providers.ListProductsParams { p := baseParams; p.Search = input.Search; return p }()},
 		{"sku", func() providers.ListProductsParams { p := baseParams; p.SKU = input.Search; return p }()},
 	}
+	var results []searchResult
 	if isGTIN(input.Search) {
 		p := baseParams
 		p.GTIN = input.Search
-		jobs = append(jobs, searchJob{"gtin", p})
+		if erpProvider.Name() == providers.ProviderTiny {
+			// A scanned barcode should not wait for unrelated name/SKU queries.
+			// Only fall back after a successful empty GTIN response; an unavailable
+			// GTIN lookup must never masquerade as "not found".
+			exact := lookup(searchJob{"gtin", p})
+			if exact.err != nil {
+				return nil, fmt.Errorf("searching Tiny barcode: %w", exact.err)
+			}
+			results = append(results, exact)
+			if len(exact.products) > 0 {
+				jobs = nil
+			}
+		} else {
+			jobs = append(jobs, searchJob{"gtin", p})
+		}
 	}
 
-	results := make([]searchResult, len(jobs))
+	offset := len(results)
+	results = append(results, make([]searchResult, len(jobs))...)
 	var wg sync.WaitGroup
 	for i, j := range jobs {
 		wg.Add(1)
-		go func(i int, field string, params providers.ListProductsParams) {
+		go func(i int, job searchJob) {
 			defer wg.Done()
-			r, err := erpProvider.ListProducts(ctx, params)
-			if err != nil {
-				results[i] = searchResult{field: field, err: err}
-				return
-			}
-			results[i] = searchResult{field: field, products: r.Products}
-		}(i, j.field, j.params)
+			results[offset+i] = lookup(job)
+		}(i, j)
 	}
 	wg.Wait()
 
+	hasMore := false
 	merged := make([]providers.ERPProduct, 0)
 	seen := make(map[string]struct{})
 	allErrored := true
@@ -3003,6 +3047,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			}
 			allErrored = false
 			allRateLimited = false
+			hasMore = hasMore || r.hasMore
 			for _, p := range r.products {
 				if _, ok := seen[p.ID]; ok {
 					continue
@@ -3042,12 +3087,15 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	}
 
 	if len(merged) == 0 {
+		if firstErr != nil {
+			return nil, fmt.Errorf("incomplete ERP product search: %w", firstErr)
+		}
 		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
 	}
 
 	result := &providers.ProductListResult{
 		Products: merged,
-		HasMore:  false,
+		HasMore:  hasMore || len(merged) >= pageSize,
 	}
 
 	// Enrich each product with full details (stock, image, description)
@@ -3064,9 +3112,20 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	// abaixo derrubar todos, "não encontrado no ERP" seria mentira — o produto
 	// existe, o Tiny é que não deixou ler o detalhe.
 	enrichThrottled := false
+	var enrichmentErr error
 	for _, listed := range result.Products {
+		if input.SummaryOnly {
+			preview := newERPProductResponse(&listed)
+			preview.DetailsPending = true
+			products = append(products, preview)
+			continue
+		}
 		detailed, err := erpProvider.GetProduct(ctx, listed.ID)
 		if err != nil {
+			enrichmentErr = err
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, err
+			}
 			var rl *ratelimit.ErrRateLimited
 			if errors.As(err, &rl) {
 				// Estrangulado: PARA. Insistir nos que faltam só empilha 429 a
@@ -3089,61 +3148,15 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			continue
 		}
 
-		isParent := detailed.IsParent && len(detailed.Variants) > 0
-		effectiveStock := detailed.Stock
-		var variantsResp []ERPVariantResponse
-		if isParent {
-			// NOTE: NOT calling enrichVariantsFromIndividualGets here on
-			// purpose — that helper does N extra Tiny GetProducts (one per
-			// variation) just to pull imageUrl + per-variant shipping for the
-			// picker preview. With Tiny's 1 req/s rate limit and products
-			// carrying 9+ variations, the search request was taking ~15-20s
-			// and the front was timing out ("A busca demorou demais").
-			// The per-variation GetProduct happens later when the merchant
-			// actually imports the product, where the latency is acceptable.
-			// At search time we settle for whatever came in the parent's
-			// `variacoes[]` (id/sku/stock/attributes) — enough to render the
-			// picker.
-
-			effectiveStock = 0
-			variantsResp = make([]ERPVariantResponse, len(detailed.Variants))
-			for i, v := range detailed.Variants {
-				effectiveStock += v.Stock
-				variantsResp[i] = ERPVariantResponse{
-					ID:         v.ID,
-					SKU:        v.SKU,
-					GTIN:       v.GTIN,
-					Name:       v.Name,
-					Price:      v.Price,
-					Stock:      v.Stock,
-					Active:     v.Active,
-					ImageURL:   v.ImageURL,
-					Shipping:   shippingPreviewFromERP(v.Shipping, v.WeightGramsHint),
-					Attributes: v.Attributes,
-				}
-			}
+		if erpProvider.Name() == providers.ProviderTiny && !tinyImportStockKnown(detailed) {
+			return nil, erpImportStockUnavailable()
 		}
-
-		if effectiveStock <= 0 {
+		product := newERPProductResponse(detailed)
+		if !product.Active || product.Stock <= 0 {
 			foundButNoStock = true
 			continue
 		}
-
-		products = append(products, ERPProductResponse{
-			ID:          detailed.ID,
-			SKU:         detailed.SKU,
-			GTIN:        detailed.GTIN,
-			Name:        detailed.Name,
-			Description: detailed.Description,
-			Price:       detailed.Price,
-			Stock:       effectiveStock,
-			ImageURL:    detailed.ImageURL,
-			ImageURLs:   detailed.ImageURLs,
-			Active:      detailed.Active,
-			Shipping:    shippingPreviewFromERP(detailed.Shipping, detailed.WeightGramsHint),
-			IsParent:    isParent,
-			Variants:    variantsResp,
-		})
+		products = append(products, product)
 	}
 
 	if len(products) == 0 {
@@ -3157,6 +3170,9 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		if enrichThrottled {
 			return nil, httpx.DomainError(503, httpx.CodeErpThrottled,
 				"O ERP está limitando as consultas neste momento. Aguarde alguns segundos e busque de novo.")
+		}
+		if enrichmentErr != nil {
+			return nil, fmt.Errorf("loading ERP product details: %w", enrichmentErr)
 		}
 		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
 	}
@@ -3188,6 +3204,9 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		}
 	}
 
+	if err := s.markCatalogImportState(ctx, input.StoreID, string(erpProvider.Name()), products); err != nil {
+		return nil, err
+	}
 	return &SearchProductsOutput{
 		Products:   products,
 		TotalCount: len(products),
@@ -3218,7 +3237,7 @@ func (s *Service) inheritShippingFromParent(ctx context.Context, erpProvider pro
 			zap.Bool("is_parent", detailed.IsParent))
 		return
 	}
-	parent, err := erpProvider.GetProduct(ctx, detailed.ParentExternalID)
+	parent, err := getProductForImport(ctx, erpProvider, detailed.ParentExternalID)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to fetch parent for shipping inheritance",
 			zap.String("variant_id", detailed.ID),
@@ -3247,7 +3266,8 @@ func (s *Service) inheritShippingFromParent(ctx context.Context, erpProvider pro
 // merchant actually cadastrou no ERP.
 //
 // Bounded concurrency keeps us under the per-account rate limit (60 req/min on
-// Tiny basic). Failures are silent — variant keeps whatever it had.
+// Tiny basic). Failed reads invalidate StockKnown, so an import cannot persist
+// the old numeric value as a newly confirmed balance.
 func (s *Service) enrichVariantsFromIndividualGets(ctx context.Context, erpProvider providers.ERPProvider, parent *providers.ERPProduct) {
 	if parent == nil || len(parent.Variants) == 0 {
 		return
@@ -3268,6 +3288,7 @@ func (s *Service) enrichVariantsFromIndividualGets(ctx context.Context, erpProvi
 			defer func() { <-sem }()
 			child, err := erpProvider.GetProduct(ctx, childID)
 			if err != nil || child == nil {
+				parent.Variants[idx].StockKnown = false
 				return
 			}
 			// O saldo da variação também vem daqui.
@@ -3280,6 +3301,8 @@ func (s *Service) enrichVariantsFromIndividualGets(ctx context.Context, erpProvi
 			//
 			// De graça: a chamada já estava sendo feita para imagem e frete.
 			parent.Variants[idx].Stock = child.Stock
+			parent.Variants[idx].StockKnown = child.StockKnown
+			parent.Variants[idx].Active = child.Active
 
 			if child.ImageURL != "" {
 				parent.Variants[idx].ImageURL = child.ImageURL
@@ -3361,7 +3384,24 @@ func (s *Service) applyStoreDefaultDimensions(ctx context.Context, storeID strin
 // For products with variations, it creates a product_group + N variants in one
 // transaction (filtered by VariantIDs when present). For simple products, it
 // creates a single product.
-func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductInput) (*ImportERPProductOutput, error) {
+func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductInput) (output *ImportERPProductOutput, err error) {
+	started := time.Now()
+	defer func() {
+		count := 0
+		if output != nil {
+			count = len(output.Imported)
+		}
+		logger.From(ctx, s.logger).Info("ERP product import completed",
+			zap.String("store_id", input.StoreID), zap.String("integration_id", input.IntegrationID),
+			zap.String("external_product_id", input.TinyProductID), zap.Int("imported_count", count),
+			zap.Int("selected_count", len(input.VariantIDs)), zap.Duration("duration", time.Since(started)), zap.Bool("success", err == nil))
+	}()
+
+	ctx, cancel := context.WithTimeout(ctx, erpProductDetailsTimeout)
+	defer cancel()
+	if strings.TrimSpace(input.TinyProductID) == "" || strings.ContainsAny(input.TinyProductID, "/?#") {
+		return nil, httpx.ErrUnprocessable("Produto inválido")
+	}
 	if s.productSyncer == nil {
 		return nil, httpx.ErrUnprocessable("product syncer not configured")
 	}
@@ -3375,10 +3415,20 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		return nil, err
 	}
 
-	detailed, err := erpProvider.GetProduct(ctx, input.TinyProductID)
+	detailed, err := getProductForImport(ctx, erpProvider, input.TinyProductID)
 	if err != nil {
 		s.handleProviderError(ctx, input.IntegrationID, "import_get_product", err)
-		return nil, fmt.Errorf("fetching product from ERP: %w", err)
+		return nil, productSearchError(fmt.Errorf("fetching product from ERP: %w", err))
+	}
+
+	if detailed == nil {
+		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
+	}
+	if !detailed.Active {
+		return nil, httpx.DomainError(422, httpx.CodeErpProductInactive, "Produto inativo no ERP")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, productSearchError(err)
 	}
 
 	// Imagem que EXPIRA vira imagem nossa, aqui e não antes.
@@ -3410,6 +3460,9 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		// only weight / partial dimensions.
 		s.inheritShippingFromParent(ctx, erpProvider, detailed)
 		s.applyStoreDefaultDimensions(ctx, input.StoreID, detailed)
+		if err := validateImportStock(ctx, erpProvider, detailed); err != nil {
+			return nil, err
+		}
 		productID, err := s.productSyncer.ImportProduct(ctx, input.StoreID, integration.Provider, *detailed)
 		if err != nil {
 			return nil, fmt.Errorf("importing simple product: %w", err)
@@ -3450,11 +3503,22 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		detailed.Variants = filtered
 	}
 
+	// Keep each HTTP transaction within the browser budget even for large grades.
+	// The client sends resumable batches; no rows are written by an oversized call.
+	if erpProvider.Name() == providers.ProviderTiny && len(detailed.Variants) > 5 {
+		return nil, httpx.ErrUnprocessable("Selecione até 5 variantes por etapa de importação")
+	}
+
 	// Tiny doesn't include imageUrl, dimensoes or flat dimensions inside
 	// variacoes[] of a parent response — fetch each child individually so we
 	// pick up per-variant images AND per-variant shipping the merchant
 	// cadastrou no ERP.
 	s.enrichVariantsFromIndividualGets(ctx, erpProvider, detailed)
+	for i := range detailed.Variants {
+		if err := validateImportStock(ctx, erpProvider, &detailed.Variants[i]); err != nil {
+			return nil, err
+		}
+	}
 
 	// Fall back to merchant-configured store defaults for any variant whose
 	// shipping is still incomplete after the Tiny payload + parent inheritance.
@@ -3569,6 +3633,10 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		return nil, fmt.Errorf("reading pending reservations during manual synchronization")
 	}
 	applied, err := s.repo.ApplyERPStockMirror(ctx, localID, portao, seenSeq)
+	if errors.Is(err, errERPStockPendingEdit) {
+		return nil, httpx.DomainError(409, httpx.CodeCartERPSyncPending,
+			"O estoque aguarda a confirmação de uma alteração de pedido no ERP. Os dados do produto foram atualizados; o saldo será consultado após a conciliação.")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("applying manual stock synchronization: %w", err)
 	}
@@ -3714,6 +3782,9 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 		}
 
 		outcome, syncErr := s.processProductSync(ctx, integration, externalProductID)
+		if errors.Is(syncErr, errERPStockPendingEdit) {
+			return false, syncErr
+		}
 		if syncErr == nil {
 			// Leitura vencida é o único desfecho que pede outra rodada: a
 			// próxima passada faz um GetProduct NOVO, e é a leitura nova — não
@@ -3904,9 +3975,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, saldoParaOPortao, seenSeq)
 		switch {
 		case applyErr != nil:
-			logger.From(ctx, s.logger).Warn("failed to apply ERP stock mirror",
-				zap.String("external_product_id", externalProductID), zap.Error(applyErr))
-			outcome = stockMirrorStale
+			return stockMirrorStale, applyErr
 		case !applied:
 			// Um movimento nosso foi confirmado entre a leitura e agora. Aquele
 			// saldo e passado, e nao da para saber quanto dele ja estava velho —
@@ -3935,9 +4004,9 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	return outcome, nil
 }
 
-// isGTIN checks if a string looks like a GTIN/barcode (8+ digits).
+// isGTIN accepts only standard GTIN lengths; longer numeric codes remain SKUs.
 func isGTIN(s string) bool {
-	if len(s) < 8 {
+	if len(s) != 8 && len(s) != 12 && len(s) != 13 && len(s) != 14 {
 		return false
 	}
 	for _, c := range s {

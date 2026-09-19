@@ -140,6 +140,7 @@ func (d *Detail) Variants() []Variant  { return d.variants }
 
 // CreatedVariant is the minimal identity of a variant produced by a Create.
 type CreatedVariant struct {
+	ExternalID   string
 	ID           string
 	Keyword      string
 	OptionValues []string
