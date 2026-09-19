@@ -975,6 +975,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Wire product syncer for ERP webhooks
 	if integrationSvc != nil {
 		integrationSvc.SetProductSyncer(product.NewProductSyncerAdapter(productSvc))
+		productSvc.SetERPProductReader(integrationSvc.ReadCatalogProduct)
 		integrationSvc.SetProductGroupSyncer(productgroup.NewSyncerAdapter(productGroupSvc, productSvc))
 	}
 
@@ -1275,12 +1276,15 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := orderListener.OnCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents, p.PaymentSnapshot); err != nil {
 				return err
 			}
-			// Later payments must also synchronize an already confirmed Bling order.
-			if err := integrationSvc.ERP().OnCartPaidBlingCheckout(ctx, p.CartID, p.StoreID); err != nil {
-				return err
-			}
-			if err := integrationSvc.ERP().OnCartPaidTinyCheckout(ctx, p.CartID, p.StoreID); err != nil {
-				return err
+			// ERP-origin payments already belong to an approved ERP sale.
+			if !providers.IsERPRecordedPaymentSnapshot(p.PaymentSnapshot) {
+				// Later payments must also synchronize an already confirmed Bling order.
+				if err := integrationSvc.ERP().OnCartPaidBlingCheckout(ctx, p.CartID, p.StoreID); err != nil {
+					return err
+				}
+				if err := integrationSvc.ERP().OnCartPaidTinyCheckout(ctx, p.CartID, p.StoreID); err != nil {
+					return err
+				}
 			}
 			// Coupon reactor: confirm the redemption (reserved → confirmed) in
 			// reaction to cart.paid, replacing the inline coupon confirm that ran
@@ -1676,6 +1680,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				return fmt.Errorf("erp webhook retry window expired: %w", asynq.SkipRetry)
 			}
 			if env.Source == events.SourceTiny {
+				var kind struct {
+					Kind string `json:"kind"`
+				}
+				if err := json.Unmarshal(env.Payload, &kind); err != nil {
+					return asynq.SkipRetry
+				}
+				if kind.Kind == "order_approved" {
+					var command integration.TinyApprovalCommand
+					if err := json.Unmarshal(env.Payload, &command); err != nil {
+						return asynq.SkipRetry
+					}
+					return integrationSvc.ProcessTinyApproval(ctx, command)
+				}
 				var command integration.TinyProductWebhookCommand
 				if err := json.Unmarshal(env.Payload, &command); err != nil {
 					return asynq.SkipRetry

@@ -150,6 +150,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	// ERP operations
 	g.Get("/:id/products", h.SearchProducts)
+	g.Get("/:id/products/:productId", h.GetERPProductDetails)
 	g.Post("/:id/products/:productId/sync", h.SyncProduct)
 	g.Post("/:id/products/:tinyProductId/import", h.ImportERPProduct)
 
@@ -968,32 +969,59 @@ func (h *Handler) DeleteInstagramComment(c *fiber.Ctx) error {
 // @Param storeId path string true "Store ID"
 // @Param id path string true "Integration ID"
 // @Param search query string true "Search term (product name, SKU, or barcode)"
-// @Param limit query int false "Max results" default(20)
+// @Param limit query int false "Max results (1–20)" default(20)
+// @Param summary query bool false "List previews; read selected product details before import"
 // @Success 200 {object} httpx.Envelope{data=SearchProductsOutput}
 // @Failure 400 {object} httpx.Envelope
 // @Failure 404 {object} httpx.Envelope
 // @Router /api/v1/stores/{storeId}/integrations/{id}/products [get]
 // @Security BearerAuth
 func (h *Handler) SearchProducts(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
-	search := c.Query("search")
-
-	if search == "" {
-		return httpx.BadRequest(c, "search parameter is required")
+	request := SearchERPProductsRequest{Limit: 20}
+	if err := c.QueryParser(&request); err != nil {
+		return httpx.ErrBadRequest("Parâmetros de busca inválidos")
 	}
-
-	output, err := h.service.SearchProducts(c.Context(), SearchProductsInput{
-		StoreID:       storeID,
-		IntegrationID: id,
-		Search:        search,
-		PageSize:      c.QueryInt("limit", 20),
-	})
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	input, err := request.ToInput(httpx.GetStoreID(c), c.Params("id"))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
+	ctx, cancel := context.WithTimeout(c.UserContext(), erpSearchTimeout)
+	defer cancel()
+	output, err := h.service.SearchProducts(ctx, input)
+	if err != nil {
+		return productSearchError(err)
+	}
 	return httpx.OK(c, output)
+}
+
+// GetERPProductDetails reads the selected product before import.
+// @Summary Read ERP product details and available stock
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Param productId path string true "ERP product ID"
+// @Success 200 {object} httpx.Envelope{data=ERPProductResponse}
+// @Failure 404 {object} httpx.Envelope
+// @Failure 422 {object} httpx.Envelope
+// @Failure 503 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{id}/products/{productId} [get]
+// @Security BearerAuth
+func (h *Handler) GetERPProductDetails(c *fiber.Ctx) error {
+	ctx, cancel := context.WithTimeout(c.UserContext(), erpProductDetailsTimeout)
+	defer cancel()
+	product, err := h.service.GetERPProductDetails(ctx, httpx.GetStoreID(c), c.Params("id"), c.Params("productId"))
+	if err != nil {
+		return productSearchError(err)
+	}
+	responses := []ERPProductResponse{newERPProductResponse(product)}
+	if err := h.service.MarkERPImportState(ctx, httpx.GetStoreID(c), c.Params("id"), responses); err != nil {
+		return err
+	}
+	return httpx.OK(c, responses[0])
 }
 
 // ImportERPProduct imports a product (or a subset of its variations) from the
@@ -1020,28 +1048,19 @@ func (h *Handler) SearchProducts(c *fiber.Ctx) error {
 // @Router /api/v1/stores/{storeId}/integrations/{id}/products/{tinyProductId}/import [post]
 // @Security BearerAuth
 func (h *Handler) ImportERPProduct(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	integrationID := c.Params("id")
-	tinyProductID := c.Params("tinyProductId")
-
 	var req ImportERPProductRequest
 	if len(c.Body()) > 0 {
-		if err := c.BodyParser(&req); err != nil {
-			return httpx.BadRequest(c, "invalid request body")
-		}
-		if err := h.validate.Struct(req); err != nil {
-			return httpx.ValidationError(c, err)
+		if err := httpx.BindAndValidate(c, &req); err != nil {
+			return err
 		}
 	}
-
-	output, err := h.service.ImportERPProduct(c.Context(), ImportERPProductInput{
-		StoreID:       storeID,
-		IntegrationID: integrationID,
-		TinyProductID: tinyProductID,
-		VariantIDs:    req.VariantIDs,
-	})
+	input, err := req.ToInput(httpx.GetStoreID(c), c.Params("id"), c.Params("tinyProductId"))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
+	}
+	output, err := h.service.ImportERPProduct(c.UserContext(), input)
+	if err != nil {
+		return productSearchError(err)
 	}
 	return httpx.Created(c, output)
 }

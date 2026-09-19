@@ -91,6 +91,12 @@ func HandleServiceError(c *fiber.Ctx, err error) error {
 
 	var se *ServiceError
 	if errors.As(err, &se) {
+		// Only explicitly catalogued transient errors have a public 5xx body.
+		// Never serialize a provider/driver message, even for an allowed code.
+		if se.Code == 503 && se.Category == CategoryDomain && se.Reason == string(CodeErpThrottled) {
+			c.Set("Retry-After", "5")
+			return c.Status(503).JSON(Envelope{Error: "O ERP ainda não confirmou os dados ou o estoque disponível. Aguarde alguns segundos e tente novamente.", Reason: string(CodeErpThrottled), RequestID: reqID})
+		}
 		if se.Code >= 500 {
 			logUnhandledError(c, err, reqID)
 			// 5xx is hardened: the client NEVER sees se.Message, se.Reason or the

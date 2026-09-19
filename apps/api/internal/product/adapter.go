@@ -83,7 +83,7 @@ func (a *ProductSyncerAdapter) ImportProduct(ctx context.Context, storeID, exter
 		return "", err
 	}
 
-	created, err := a.service.Create(ctx, CreateProductInput{
+	created, err := a.service.create(ctx, CreateProductInput{
 		StoreID:        sid,
 		Name:           p.Name,
 		ExternalID:     p.ID,

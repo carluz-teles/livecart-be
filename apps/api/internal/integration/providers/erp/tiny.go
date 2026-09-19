@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"livecart/apps/api/lib/httpx"
 	"math"
 	"net"
 	"net/http"
@@ -608,6 +609,16 @@ func ExtrairSaldoDisponivel(cru map[string]any) (saldo int, campo string, ok boo
 }
 
 func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, error) {
+	return t.getProduct(ctx, productID, false)
+}
+
+// GetProductForImport reads the parent's catalogue without fetching every
+// child's stock. A simple product still includes authoritative available stock.
+func (t *Tiny) GetProductForImport(ctx context.Context, productID string) (*ERPProduct, error) {
+	return t.getProduct(ctx, productID, true)
+}
+
+func (t *Tiny) getProduct(ctx context.Context, productID string, deferVariants bool) (*ERPProduct, error) {
 	endpoint := fmt.Sprintf("%s/produtos/%s", tinyAPIBaseURL, productID)
 
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
@@ -616,7 +627,7 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("product not found: %s", productID)
+		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
 	}
 	// 429 tipado, como em ListProducts. Sem isto o estrangulamento do Tiny
 	// (1 req/s) chegava ao chamador como um erro genérico indistinguível de
@@ -636,6 +647,14 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	}
 
 	out := tinyPayloadToERP(p)
+	if deferVariants && out.IsParent && len(out.Variants) > 0 {
+		out.Stock = 0
+		for i := range out.Variants {
+			out.Variants[i].Stock = 0
+			out.Variants[i].StockKnown = false
+		}
+		return &out, nil
+	}
 
 	// O saldo que vale para vender é o DISPONÍVEL, e ele não vem nesta resposta.
 	//

@@ -29,6 +29,10 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 
 // Create creates the group + options + values + variants atomically.
 func (s *Service) Create(ctx context.Context, input CreateGroupInput) (*domain.CreateResult, error) {
+	return s.create(ctx, input, false)
+}
+
+func (s *Service) create(ctx context.Context, input CreateGroupInput, resume bool) (*domain.CreateResult, error) {
 	if err := validateCreateInput(input); err != nil {
 		return nil, httpx.ErrUnprocessable(err.Error())
 	}
@@ -40,46 +44,90 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (*domain.C
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	q := sqlc.New(tx)
+	// Serialize ERP batches for this store before reading groups or allocating keywords.
+	if resume {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "erp-catalog:"+input.StoreID.String()); err != nil {
+			return nil, err
+		}
+	}
 
 	group, err := domain.NewGroup(input.StoreID, input.Name, input.Description, input.ExternalID, input.ExternalSource)
 	if err != nil {
 		return nil, httpx.ErrUnprocessable(err.Error())
 	}
 
-	groupRow, err := q.CreateProductGroup(ctx, sqlc.CreateProductGroupParams{
-		StoreID:        group.StoreID().ToPgUUID(),
-		Name:           group.Name(),
-		Description:    pgtype.Text{String: group.Description(), Valid: group.Description() != ""},
-		ExternalID:     pgtype.Text{String: group.ExternalID(), Valid: group.ExternalID() != ""},
-		ExternalSource: group.ExternalSource().String(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("inserting group: %w", err)
+	var groupRow sqlc.ProductGroup
+	existingGroup := false
+	if resume {
+		groupRow, err = q.GetProductGroupByExternalID(ctx, sqlc.GetProductGroupByExternalIDParams{
+			StoreID: input.StoreID.ToPgUUID(), ExternalSource: input.ExternalSource.String(),
+			ExternalID: pgtype.Text{String: input.ExternalID, Valid: true},
+		})
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		existingGroup = err == nil
+	}
+	if !existingGroup {
+		groupRow, err = q.CreateProductGroup(ctx, sqlc.CreateProductGroupParams{
+			StoreID: group.StoreID().ToPgUUID(), Name: group.Name(),
+			Description:    pgtype.Text{String: group.Description(), Valid: group.Description() != ""},
+			ExternalID:     pgtype.Text{String: group.ExternalID(), Valid: group.ExternalID() != ""},
+			ExternalSource: group.ExternalSource().String(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("inserting group: %w", err)
+		}
 	}
 	groupID := groupRow.ID
 
-	// optionValuesByOption[optionName][value] = optionValueUUID (pgtype)
+	// Reuse existing option/value IDs; extending a partial import must never
+	// replace products, images, quantities or option assignments already saved.
 	optionValuesByOption := make(map[string]map[string]pgtype.UUID, len(input.Options))
+	existingOptions, err := q.ListProductOptionsByGroup(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	existingValues, err := q.ListProductOptionValuesByGroup(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if existingGroup && len(existingOptions) != len(input.Options) {
+		return nil, httpx.DomainError(422, httpx.CodeProductGroupChanged, "A grade do ERP mudou. Revise as opções do grupo antes de importar novas variantes")
+	}
 	for i, opt := range input.Options {
-		optionRow, err := q.CreateProductOption(ctx, sqlc.CreateProductOptionParams{
-			GroupID:  groupID,
-			Name:     opt.Name,
-			Position: int32(i),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("inserting option %q: %w", opt.Name, err)
-		}
-		valueMap := make(map[string]pgtype.UUID, len(opt.Values))
-		for j, v := range opt.Values {
-			vRow, err := q.CreateProductOptionValue(ctx, sqlc.CreateProductOptionValueParams{
-				OptionID: optionRow.ID,
-				Value:    v,
-				Position: int32(j),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("inserting option value %q/%q: %w", opt.Name, v, err)
+		var optionID pgtype.UUID
+		for _, saved := range existingOptions {
+			if saved.Name == opt.Name {
+				optionID = saved.ID
+				break
 			}
-			valueMap[v] = vRow.ID
+		}
+		if !optionID.Valid {
+			if existingGroup {
+				return nil, httpx.DomainError(422, httpx.CodeProductGroupChanged, "As opções da grade do ERP mudaram")
+			}
+			row, err := q.CreateProductOption(ctx, sqlc.CreateProductOptionParams{GroupID: groupID, Name: opt.Name, Position: int32(i)})
+			if err != nil {
+				return nil, err
+			}
+			optionID = row.ID
+		}
+		valueMap := make(map[string]pgtype.UUID)
+		for _, saved := range existingValues {
+			if saved.OptionID == optionID {
+				valueMap[saved.Value] = saved.ID
+			}
+		}
+		for _, value := range opt.Values {
+			if _, found := valueMap[value]; found {
+				continue
+			}
+			row, err := q.CreateProductOptionValue(ctx, sqlc.CreateProductOptionValueParams{OptionID: optionID, Value: value, Position: int32(len(valueMap))})
+			if err != nil {
+				return nil, err
+			}
+			valueMap[value] = row.ID
 		}
 		optionValuesByOption[opt.Name] = valueMap
 	}
@@ -96,8 +144,43 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (*domain.C
 
 	createdVariants := make([]domain.CreatedVariant, 0, len(input.Variants))
 	seenCombos := make(map[string]struct{}, len(input.Variants))
+	if existingGroup {
+		rows, err := q.ListVariantOptionsByGroup(ctx, groupID)
+		if err != nil {
+			return nil, err
+		}
+		byProduct := make(map[pgtype.UUID]map[string]string)
+		for _, row := range rows {
+			if byProduct[row.ProductID] == nil {
+				byProduct[row.ProductID] = make(map[string]string)
+			}
+			byProduct[row.ProductID][row.OptionName] = row.Value
+		}
+		for _, attrs := range byProduct {
+			values := make([]string, len(input.Options))
+			for i, option := range input.Options {
+				values[i] = attrs[option.Name]
+			}
+			seenCombos[strings.Join(values, "||")] = struct{}{}
+		}
+	}
 
 	for vIdx, v := range input.Variants {
+		if resume && v.ExternalID != "" {
+			saved, err := q.GetProductByExternalID(ctx, sqlc.GetProductByExternalIDParams{
+				StoreID: input.StoreID.ToPgUUID(), ExternalSource: input.ExternalSource.String(),
+				ExternalID: pgtype.Text{String: v.ExternalID, Valid: true},
+			})
+			if err == nil {
+				if saved.GroupID != groupID {
+					return nil, httpx.DomainError(409, httpx.CodeProductAlreadyExists, "Variante já cadastrada fora deste grupo")
+				}
+				continue // Retry after a lost response is idempotent.
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return nil, err
+			}
+		}
 		if len(v.OptionValues) != len(input.Options) {
 			return nil, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: %s", vIdx+1, domain.ErrVariantOptionsMismatch.Error()))
 		}
@@ -192,23 +275,26 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (*domain.C
 		}
 
 		createdVariants = append(createdVariants, domain.CreatedVariant{
+			ExternalID:   v.ExternalID,
 			ID:           pgUUIDToString(productRow.ID),
 			Keyword:      keyword,
 			OptionValues: append([]string(nil), v.OptionValues...),
 		})
 	}
 
-	// Group images
-	for i, url := range input.GroupImages {
-		if _, err := q.CreateProductGroupImage(ctx, sqlc.CreateProductGroupImageParams{
-			GroupID:  groupID,
-			Url:      url,
-			Position: int32(i),
-		}); err != nil {
-			return nil, fmt.Errorf("inserting group image: %w", err)
+	// Group images are created once; continuing does not duplicate the gallery.
+	if !existingGroup {
+		for i, url := range input.GroupImages {
+			if _, err := q.CreateProductGroupImage(ctx, sqlc.CreateProductGroupImageParams{
+				GroupID:  groupID,
+				Url:      url,
+				Position: int32(i),
+			}); err != nil {
+				return nil, fmt.Errorf("inserting group image: %w", err)
+			}
 		}
-	}
 
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
@@ -346,7 +432,7 @@ func (s *Service) HasGroupForExternalID(ctx context.Context, storeID vo.StoreID,
 // to the created product rows so subsequent stock/price webhook updates can
 // resolve the variant by external_id.
 func (s *Service) CreateForERP(ctx context.Context, input CreateGroupInput) (*domain.CreateResult, error) {
-	return s.Create(ctx, input)
+	return s.create(ctx, input, true)
 }
 
 // ============================================

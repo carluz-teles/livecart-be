@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -48,6 +49,10 @@ func (r *Repository) Save(ctx context.Context, product *domain.Product) error {
 		GroupID:             groupIDToPg(product.GroupID()),
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return httpx.DomainError(409, httpx.CodeProductAlreadyExists, "Produto ou código já cadastrado no catálogo")
+		}
 		return fmt.Errorf("inserting product: %w", err)
 	}
 	return nil

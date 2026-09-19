@@ -832,6 +832,20 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		}
 		return httpx.OK(c, fiber.Map{"status": "queued"})
 	}
+	if (webhook.Tipo == "inclusao_pedido" || webhook.Tipo == "atualizacao_pedido") && webhook.Dados.CodigoSituacao == string(providers.ERPOrderStatusAprovado) {
+		orderID := webhook.Dados.ID
+		if orderID == "" {
+			orderID = webhook.Dados.IDPedido.String()
+		}
+		if orderID != "" {
+			ctx, cancel := context.WithTimeout(c.UserContext(), 4*time.Second)
+			defer cancel()
+			if err := h.service.enqueueTinyApproval(ctx, storeID, orderID); err != nil {
+				logger.From(ctx, h.logger).Error("Tiny approval was not persisted", zap.String("external_order_id", orderID), zap.Error(err))
+				return c.SendStatus(fiber.StatusServiceUnavailable)
+			}
+		}
+	}
 	logger.From(c.Context(), h.logger).Info("tiny webhook received", zap.String("tipo", webhook.Tipo))
 
 	// Âncora de dedupe do webhook_events. Para eventos de pedido é o par

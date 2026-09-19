@@ -207,12 +207,18 @@ func TestRajadaNoPedidoPagoNaoPerdeUnidade(t *testing.T) {
 	}
 	close(pronto)
 	for i := 0; i < comentarios; i++ {
-		if err := <-fim; err != nil {
-			t.Fatalf("comentário %d: %v", i, err)
+		if err := <-fim; err != nil && !errors.Is(err, ErrOrderBusy) {
+			t.Errorf("comentário %d: %v", i, err)
 		}
 	}
-	// A última mutação a soltar o estado reconfere; dá tempo a ela.
-	time.Sleep(50 * time.Millisecond)
+	// Three successive snapshots can become stale during a burst. Busy is a
+	// retryable queue outcome, not proof that the final grid was acknowledged.
+	// Drain the same retry explicitly, instead of assuming 50ms makes it happen.
+	retryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := svc.MutateERPOrderItems(retryCtx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("reconciliação após a rajada: %v", err)
+	}
 
 	if novo := repo.carrinho("cart-1").externalOrderID; novo != orderID {
 		t.Errorf("a rajada abriu um segundo pedido: %s ≠ %s", novo, orderID)

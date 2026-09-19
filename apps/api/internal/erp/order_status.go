@@ -149,7 +149,15 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 		return fmt.Errorf("recording ERP order status: %w", err)
 	}
 	if !changed {
-		return nil
+		// History is deduplicated; failed payment projection must still retry.
+		if status != providers.ERPOrderStatusAprovado || s.reopener == nil {
+			return nil
+		}
+		cartID, err := s.repo.FindCartByExternalOrderID(ctx, externalOrderID, storeID)
+		if err != nil {
+			return fmt.Errorf("resolving ERP payment owner: %w", err)
+		}
+		return s.ReflectApprovedPayment(ctx, storeID, cartID, externalOrderID)
 	}
 
 	if t.CartID == "" {
@@ -164,43 +172,9 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 		return nil
 	}
 
-	// O pedido voltou a viver e o carrinho não. Sobe como ERRO, e não como
-	// info: dali em diante existe uma unidade reservada no ERP que nenhum
-	// carrinho reclama, e ela some do disponível até alguém reparar no Tiny.
-	//
-	// O LiveCart não desfaz o cancelamento sozinho de propósito. Cancelar aqui
-	// devolveu estoque local, desativou o link e avisou a compradora; reabrir o
-	// pedido no ERP desfaz UMA dessas coisas, e ressuscitar o carrinho por
-	// conta própria tentaria refazer as outras — inclusive re-reservar uma peça
-	// que pode já ter sido vendida no meio tempo. Quem decide é gente; o que o
-	// sistema deve é não deixar isso invisível.
-	// O PAGAMENTO LANÇADO NO ERP.
-	//
-	// O lojista recebeu por fora — dinheiro, transferência, maquininha — e
-	// registrou no Tiny, que leva o pedido para "Aprovado". Antes disto ele
-	// tinha de repetir o gesto aqui, no "confirmar pagamento manual", e os dois
-	// lados divergiam sempre que ele esquecia um.
-	//
-	// A guarda é o próprio estado daqui: só age quando o carrinho AINDA NÃO
-	// está pago. Sem ela isto dispararia na nossa própria aprovação — somos nós
-	// que levamos o pedido a "Aprovado" quando o pagamento entra pelo gateway —
-	// e o carrinho seria "pago" duas vezes.
-	if providers.ERPOrderStatus(t.Status) == providers.ERPOrderStatusAprovado && s.reopener != nil {
-		if pago, err := s.repo.CartIsPaid(ctx, t.CartID); err == nil && !pago {
-			total := s.totalDoPedido(ctx, storeID, externalOrderID)
-			marcou, pErr := s.reopener.MarkCartPaidFromERP(ctx, t.CartID, storeID, total)
-			switch {
-			case pErr != nil:
-				logger.From(ctx, s.logger).Error("the order was approved in the ERP but the payment could not be recorded here",
-					zap.String("cart_id", t.CartID),
-					zap.String("external_order_id", externalOrderID),
-					zap.Error(pErr))
-			case marcou:
-				logger.From(ctx, s.logger).Info("cart marked as paid following the ERP order approval",
-					zap.String("cart_id", t.CartID),
-					zap.String("external_order_id", externalOrderID),
-					zap.Int64("amount_cents", total))
-			}
+	if status == providers.ERPOrderStatusAprovado && s.reopener != nil {
+		if err := s.ReflectApprovedPayment(ctx, storeID, t.CartID, externalOrderID); err != nil {
+			return err
 		}
 	}
 
@@ -443,29 +417,45 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 	return s.ConfirmERPOrderPayment(ctx, cartID, storeID, status)
 }
 
-// totalDoPedido lê quanto o pedido vale no ERP.
-//
-// É o valor que o pagamento lançado lá cobre: o lojista aprovou o pedido
-// inteiro, e o ERP é quem sabe quanto ele vale depois de qualquer ajuste que o
-// lojista tenha feito pelo painel. Zero quando não dá para ler — e aí o
-// pagamento é registrado sem valor, que é melhor do que registrar um errado.
-func (s *Service) totalDoPedido(ctx context.Context, storeID, externalOrderID string) int64 {
-	if externalOrderID == "" {
-		return 0
+// ReflectApprovedPayment retries the local projection independently of status
+// history. The existing approval policy is preserved; invoicing alone is not a
+// receipt. Errors stay retryable through both the durable webhook and the sweep.
+func (s *Service) ReflectApprovedPayment(ctx context.Context, storeID, cartID, externalOrderID string) error {
+	if cartID == "" || s.reopener == nil {
+		return nil
 	}
-	erpProvider, err := s.providerFor(ctx, storeID)
+	paid, err := s.repo.CartIsPaid(ctx, cartID)
 	if err != nil {
-		return 0
+		return fmt.Errorf("reading cart payment before ERP reconciliation: %w", err)
 	}
-	contador, ok := erpProvider.(interface {
-		GetOrderTotal(ctx context.Context, orderID string) (int64, bool, error)
+	if paid {
+		return nil
+	}
+	provider, err := s.providerFor(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	reader, ok := provider.(interface {
+		GetOrderTotal(context.Context, string) (int64, bool, error)
 	})
 	if !ok {
-		return 0
+		return fmt.Errorf("ERP does not expose the order total for payment reconciliation")
 	}
-	total, _, err := contador.GetOrderTotal(ctx, externalOrderID)
+	total, _, err := reader.GetOrderTotal(ctx, externalOrderID)
 	if err != nil {
-		return 0
+		return fmt.Errorf("reading approved ERP order total: %w", err)
 	}
-	return total
+	if total <= 0 {
+		return fmt.Errorf("approved ERP order has no positive verified payment amount")
+	}
+	marked, err := s.reopener.MarkCartPaidFromERP(ctx, cartID, storeID, total)
+	if err != nil {
+		return fmt.Errorf("recording approved ERP order payment: %w", err)
+	}
+	if marked {
+		logger.From(ctx, s.logger).Info("cart marked as paid following the ERP order approval",
+			zap.String("cart_id", cartID), zap.String("external_order_id", externalOrderID),
+			zap.Int64("amount_cents", total))
+	}
+	return nil
 }

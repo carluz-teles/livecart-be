@@ -49,6 +49,16 @@ func (s *Service) OnOrderPaid(ctx context.Context, cartID, storeID string, snaps
 				zap.String("cart_id", cartID), zap.Error(err))
 		}
 	}
+	if providers.IsERPRecordedPaymentSnapshot(snapshotJSON) {
+		state, err := s.repo.GetCartERPOrderState(ctx, cartID)
+		if err != nil {
+			return fmt.Errorf("reading ERP-origin payment binding: %w", err)
+		}
+		if state.ExternalOrderID == "" || status.PaymentID != "erp-"+state.ExternalOrderID {
+			return fmt.Errorf("ERP-origin payment does not match the cart order")
+		}
+		return s.repo.MarkCartERPFinalisationDone(ctx, cartID)
+	}
 	return s.FinalizeOrConfirm(ctx, cartID, storeID, status)
 }
 

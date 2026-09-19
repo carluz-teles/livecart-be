@@ -15,6 +15,10 @@ type Code string
 func (c Code) String() string { return string(c) }
 
 const (
+	CodeErpProductInactive   Code = "ERP_PRODUCT_INACTIVE"
+	CodeProductAlreadyExists Code = "PRODUCT_ALREADY_EXISTS"
+	CodeProductGroupChanged  Code = "PRODUCT_GROUP_CHANGED"
+
 	// --- generic (non-domain, client-safe) ---
 	CodeInternal         Code = "INTERNAL"          // repo/infra failures collapse to this on the wire
 	CodeValidationFailed Code = "VALIDATION_FAILED" // ozzo/fields channel (errorhandler.go)

@@ -3,11 +3,11 @@ package productgroup
 import (
 	"context"
 	"fmt"
+	"livecart/apps/api/lib/httpx"
 
 	"livecart/apps/api/internal/integration/providers"
 	productpkg "livecart/apps/api/internal/product"
 	productdomain "livecart/apps/api/internal/product/domain"
-	"livecart/apps/api/lib/httpx"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
@@ -109,8 +109,8 @@ func (a *SyncerAdapter) SyncFromERP(ctx context.Context, storeIDStr, externalSou
 
 // ImportFromERP creates a brand-new product_group in LiveCart from an ERP
 // parent product whose `Variants` slice has already been filtered to the
-// caller's desired subset. Unlike SyncFromERP it errors out if the group
-// already exists (caller decides what to do — typically ask the user).
+// caller's desired subset. Existing groups are extended atomically; retries
+// preserve previously imported variants.
 //
 // Returns the new group UUID and the external IDs of the variants that were
 // persisted, in input order.
@@ -126,14 +126,6 @@ func (a *SyncerAdapter) ImportFromERP(ctx context.Context, storeIDStr, externalS
 	source, err := productdomain.NewExternalSource(externalSourceStr)
 	if err != nil {
 		return "", nil, fmt.Errorf("invalid external source %q: %w", externalSourceStr, err)
-	}
-
-	exists, err := a.groupSvc.HasGroupForExternalID(ctx, storeID, source, parent.ID)
-	if err != nil {
-		return "", nil, err
-	}
-	if exists {
-		return "", nil, httpx.ErrConflict("grupo de produto já importado neste catálogo")
 	}
 
 	options := buildOptionsFromVariants(parent.GradeKeys, parent.Variants)
@@ -157,13 +149,9 @@ func (a *SyncerAdapter) ImportFromERP(ctx context.Context, storeIDStr, externalS
 		return "", nil, err
 	}
 
-	// Variants are persisted in input order; map back to ERP external IDs.
-	importedExternalIDs := make([]string, 0, len(variants))
-	for i := range out.Variants() {
-		if i >= len(variants) {
-			break
-		}
-		importedExternalIDs = append(importedExternalIDs, variants[i].ExternalID)
+	importedExternalIDs := make([]string, 0, len(out.Variants()))
+	for _, created := range out.Variants() {
+		importedExternalIDs = append(importedExternalIDs, created.ExternalID)
 	}
 	return out.ID(), importedExternalIDs, nil
 }
