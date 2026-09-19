@@ -68,8 +68,43 @@ func TestTinyBarcodeSearchFallsBackToNumericSKU(t *testing.T) {
 		return &providers.ProductListResult{}, nil
 	}}
 	result, err := (&Service{logger: zap.NewNop()}).searchERPProducts(t.Context(), p, SearchProductsInput{Search: "47169001", SummaryOnly: true})
-	if err != nil || len(result.Products) != 1 || result.Products[0].ID != "numeric-sku" || p.lists.Load() != 3 {
+	if err != nil || len(result.Products) != 1 || result.Products[0].ID != "numeric-sku" || p.lists.Load() != 2 {
 		t.Fatalf("numeric SKU fallback result=%+v err=%v calls=%d", result, err, p.lists.Load())
+	}
+}
+
+func TestTinyExactSKUDoesNotWaitForNameSearch(t *testing.T) {
+	for _, term := range []string{"MD2026", " 47169001 "} {
+		t.Run(term, func(t *testing.T) {
+			p := &barcodeSearchProvider{list: func(params providers.ListProductsParams) (*providers.ProductListResult, error) {
+				if params.SKU != "" {
+					return &providers.ProductListResult{Products: []providers.ERPProduct{{ID: "exact", SKU: params.SKU, Active: true}}}, nil
+				}
+				if params.GTIN != "" {
+					return &providers.ProductListResult{}, nil
+				}
+				t.Error("unnecessary name lookup for an exact SKU")
+				return nil, context.DeadlineExceeded
+			}}
+			result, err := (&Service{logger: zap.NewNop()}).searchERPProducts(t.Context(), p, SearchProductsInput{Search: term, SummaryOnly: true})
+			if err != nil || len(result.Products) != 1 || result.Products[0].ID != "exact" {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestTinyPartialSKURetainsNameMatches(t *testing.T) {
+	p := &barcodeSearchProvider{list: func(params providers.ListProductsParams) (*providers.ProductListResult, error) {
+		id, sku := "name", "OTHER"
+		if params.SKU != "" {
+			id, sku = "partial", "MD2026"
+		}
+		return &providers.ProductListResult{Products: []providers.ERPProduct{{ID: id, SKU: sku, Active: true}}}, nil
+	}}
+	result, err := (&Service{logger: zap.NewNop()}).searchERPProducts(t.Context(), p, SearchProductsInput{Search: "MD", SummaryOnly: true})
+	if err != nil || len(result.Products) != 2 || p.lists.Load() != 2 {
+		t.Fatalf("partial SKU hid name matches: result=%+v error=%v", result, err)
 	}
 }
 

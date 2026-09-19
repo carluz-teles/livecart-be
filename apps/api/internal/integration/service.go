@@ -2915,6 +2915,7 @@ func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateIn
 // Summary searches list previews; stock is read only after selection. Legacy
 // clients still receive details and available-stock filtering.
 func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput) (*SearchProductsOutput, error) {
+	ctx = ratelimit.WithTinyInteractiveRead(ctx)
 	started := time.Now()
 	erpProvider, err := s.GetERPProvider(ctx, input.IntegrationID, input.StoreID)
 	if err != nil {
@@ -2995,6 +2996,17 @@ func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.E
 			}
 		} else {
 			jobs = append(jobs, searchJob{"gtin", p})
+		}
+	}
+	if erpProvider.Name() == providers.ProviderTiny && len(jobs) > 0 {
+		// A unique exact SKU is already the answer. Do not spend another quota
+		// slot (or wait for a full catalogue sync) searching its digits as a name.
+		sku := lookup(jobs[1])
+		results = append(results, sku)
+		jobs = jobs[:1]
+		if sku.err == nil && len(sku.products) == 1 &&
+			strings.EqualFold(strings.TrimSpace(sku.products[0].SKU), strings.TrimSpace(input.Search)) {
+			jobs = nil
 		}
 	}
 
@@ -3385,6 +3397,7 @@ func (s *Service) applyStoreDefaultDimensions(ctx context.Context, storeID strin
 // transaction (filtered by VariantIDs when present). For simple products, it
 // creates a single product.
 func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductInput) (output *ImportERPProductOutput, err error) {
+	ctx = ratelimit.WithTinyInteractiveRead(ctx)
 	started := time.Now()
 	defer func() {
 		count := 0

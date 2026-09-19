@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,11 +31,13 @@ type requestBudget struct {
 	mu                sync.Mutex
 	local             map[string]*tinyBudget
 	now               func() time.Time
+	tinyPriorities    bool
 }
 
 type tinyBudget struct {
 	interval             time.Duration
 	nextAt, blockedUntil time.Time
+	interactiveUntil     time.Time
 }
 
 func (m *Manager) SetSharedPool(pool *pgxpool.Pool) {
@@ -50,6 +53,7 @@ func (m *Manager) GetOrCreateTiny(account string) *Tiny {
 		return t
 	}
 	t := &Tiny{account: account, requestBudget: newRequestBudget(m.pool, tinyDefaultIntervalMS)}
+	t.tinyPriorities = true
 	m.tiny[account] = t
 	return t
 }
@@ -87,6 +91,10 @@ func (t *requestBudget) wait(ctx context.Context, key string) error {
 		if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
 			return ErrNaoDespachado
 		}
+		if t.readPriority(ctx, key) == tinyInteractiveRead {
+			// Renew the short lease while waiting, including long quota windows.
+			wait = min(wait, time.Second)
+		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -110,11 +118,18 @@ func (t *requestBudget) claim(ctx context.Context, key string) (*Reservation, er
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrNaoDespachado, err)
 	}
+	priority := t.readPriority(ctx, key)
 	if t.pool == nil {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		budget, now := t.localBudget(key), t.now()
+		if priority == tinyInteractiveRead {
+			budget.interactiveUntil = now.Add(tinyInteractiveLease)
+		}
 		wait := max(budget.nextAt.Sub(now), budget.blockedUntil.Sub(now), 0)
+		if priority == tinyCatalogRead {
+			wait = max(wait, budget.interactiveUntil.Sub(now))
+		}
 		if wait == 0 {
 			budget.nextAt = now.Add(budget.interval)
 		}
@@ -129,7 +144,12 @@ func (t *requestBudget) claim(ctx context.Context, key string) (*Reservation, er
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 	var delay float64
-	err = tx.QueryRow(ctx, `SELECT GREATEST(0,EXTRACT(EPOCH FROM GREATEST(next_at,blocked_until)-clock_timestamp()))::float8 FROM api_rate_budgets WHERE account_key=$1 FOR UPDATE`, key).Scan(&delay)
+	err = tx.QueryRow(ctx, `SELECT GREATEST(0,EXTRACT(EPOCH FROM GREATEST(next_at,blocked_until,
+  CASE WHEN $2 THEN interactive_until ELSE '-infinity'::timestamptz END)-clock_timestamp()))::float8
+  FROM api_rate_budgets WHERE account_key=$1 FOR UPDATE`, key, priority == tinyCatalogRead).Scan(&delay)
+	if err == nil && priority == tinyInteractiveRead {
+		_, err = tx.Exec(ctx, `UPDATE api_rate_budgets SET interactive_until=clock_timestamp()+$2*interval '1 millisecond' WHERE account_key=$1`, key, tinyInteractiveLease.Milliseconds())
+	}
 	if err == nil && delay <= 0 {
 		_, err = tx.Exec(ctx, `UPDATE api_rate_budgets SET next_at=clock_timestamp()+interval_ms*interval '1 millisecond' WHERE account_key=$1`, key)
 	}
@@ -140,6 +160,35 @@ func (t *requestBudget) claim(ctx context.Context, key string) (*Reservation, er
 		return nil, err
 	}
 	return &Reservation{Allowed: delay <= 0, RetryAfter: time.Duration(delay * float64(time.Second)), Remaining: -1}, nil
+}
+
+type tinyReadPriorityKey struct{}
+type tinyReadPriority uint8
+
+const (
+	tinyNormalRead tinyReadPriority = iota
+	tinyCatalogRead
+	tinyInteractiveRead
+	tinyInteractiveLease = 5 * time.Second
+)
+
+// WithTinyInteractiveRead lets an operator's lookup precede a catalogue scan,
+// without bypassing the account quota or blocking payment/order operations.
+func WithTinyInteractiveRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tinyReadPriorityKey{}, tinyInteractiveRead)
+}
+
+// WithTinyCatalogRead marks resumable catalogue and periodic stock scans as deferrable.
+func WithTinyCatalogRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tinyReadPriorityKey{}, tinyCatalogRead)
+}
+
+func (t *requestBudget) readPriority(ctx context.Context, key string) tinyReadPriority {
+	if !t.tinyPriorities || !strings.HasSuffix(key, ":read") {
+		return tinyNormalRead
+	}
+	priority, _ := ctx.Value(tinyReadPriorityKey{}).(tinyReadPriority)
+	return priority
 }
 
 func (t *Tiny) ObserveResponse(ctx context.Context, method string, status int, headers http.Header) error {
