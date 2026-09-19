@@ -11,10 +11,11 @@ import (
 )
 
 type ApiRateBudget struct {
-	AccountKey   string             `json:"account_key"`
-	NextAt       pgtype.Timestamptz `json:"next_at"`
-	IntervalMs   int64              `json:"interval_ms"`
-	BlockedUntil pgtype.Timestamptz `json:"blocked_until"`
+	AccountKey       string             `json:"account_key"`
+	NextAt           pgtype.Timestamptz `json:"next_at"`
+	IntervalMs       int64              `json:"interval_ms"`
+	BlockedUntil     pgtype.Timestamptz `json:"blocked_until"`
+	InteractiveUntil pgtype.Timestamptz `json:"interactive_until"`
 }
 
 type BillingLedgerEntry struct {

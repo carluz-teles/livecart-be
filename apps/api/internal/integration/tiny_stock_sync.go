@@ -17,6 +17,7 @@ import (
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
+	"livecart/apps/api/lib/ratelimit"
 )
 
 // The stock payload is an invalidation signal. Always read available stock;
@@ -248,7 +249,9 @@ func (s *Service) RunTinyStockRecovery(ctx context.Context) {
 				if accountCtx.Err() != nil {
 					break
 				}
-				applied, readErr := s.refreshERPAvailableStock(accountCtx, integration, id)
+				// The periodic scan can wait for an operator's lookup. Keep the
+				// original context for subsequent waitlist/order processing.
+				applied, readErr := s.refreshERPAvailableStock(ratelimit.WithTinyCatalogRead(accountCtx), integration, id)
 				if readErr != nil {
 					logger.From(accountCtx, s.logger).Warn("Tiny stock recovery deferred", zap.String("external_product_id", id), zap.Error(readErr))
 					// A removed SKU must not starve the rest of the batch. The shared

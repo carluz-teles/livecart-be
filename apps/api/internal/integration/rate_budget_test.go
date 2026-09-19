@@ -57,6 +57,45 @@ func TestRateBudget_ReplicasShareOneDispatchSchedule(t *testing.T) {
 		t.Fatalf("replicas exceeded shared schedule: six calls in %s", elapsed)
 	}
 }
+
+func TestTinyInteractiveLeaseCoordinatesCatalogAcrossReplicas(t *testing.T) {
+	requireDB(t)
+	fx := seedScaleEvent(t)
+	key := "tiny:priority:" + fx.storeID
+	a, b := ratelimit.NewManager(zap.NewNop()), ratelimit.NewManager(zap.NewNop())
+	a.SetSharedPool(testPool)
+	b.SetSharedPool(testPool)
+	first, second := a.GetOrCreateTiny(key), b.GetOrCreateTiny(key)
+	ctx := t.Context()
+	if err := first.WaitRequest(ratelimit.WithTinyInteractiveRead(ctx), http.MethodGet); err != nil {
+		t.Fatal(err)
+	}
+	// The regular rate window is free, but the short interactive lease remains.
+	if _, err := testPool.Exec(ctx, `UPDATE api_rate_budgets SET next_at=clock_timestamp()-interval '1 second' WHERE account_key=$1`, key+":read"); err != nil {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if err := second.WaitRequest(ratelimit.WithTinyCatalogRead(short), http.MethodGet); !errors.Is(err, ratelimit.ErrNaoDespachado) {
+		t.Fatalf("another replica's catalogue bypassed interactive priority: %v", err)
+	}
+	if err := second.WaitRequest(ratelimit.WithTinyInteractiveRead(short), http.MethodGet); err != nil {
+		t.Fatalf("interactive lease blocked another operator: %v", err)
+	}
+	if err := second.WaitRequest(ratelimit.WithTinyCatalogRead(short), http.MethodPut); err != nil {
+		t.Fatalf("read lease blocked writes: %v", err)
+	}
+	other := b.GetOrCreateTiny(key + ":other")
+	if err := other.WaitRequest(ratelimit.WithTinyCatalogRead(short), http.MethodGet); err != nil {
+		t.Fatalf("priority leaked into another account: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE api_rate_budgets SET next_at=clock_timestamp()-interval '1 second', interactive_until=clock_timestamp()-interval '1 second' WHERE account_key=$1`, key+":read"); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.WaitRequest(ratelimit.WithTinyCatalogRead(short), http.MethodGet); err != nil {
+		t.Fatalf("expired lease stopped catalogue recovery: %v", err)
+	}
+}
 func TestRateBudget_ReadLimitDoesNotBlockWriteCategory(t *testing.T) {
 	requireDB(t)
 	fx := seedScaleEvent(t)

@@ -277,6 +277,7 @@ func (s *Service) RunERPResync(ctx context.Context, command ERPResyncCommand) er
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	ctx = ratelimit.WithTinyCatalogRead(ctx)
 	integration, err := s.repo.GetByID(ctx, command.IntegrationID, command.StoreID)
 	if err == nil && integration.Status != "active" {
 		err = errors.New("ERP integration is not active")
