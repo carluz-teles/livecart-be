@@ -71,6 +71,7 @@ func productSearchError(err error) error {
 // GetERPProductDetails only reads the selected product. Available stock still
 // comes from the ERP stock endpoint, never from a list's absent stock field.
 func (s *Service) GetERPProductDetails(ctx context.Context, storeID, integrationID, productID string) (product *providers.ERPProduct, err error) {
+	ctx = ratelimit.WithTinyInteractiveRead(ctx)
 	started := time.Now()
 	defer func() {
 		logger.From(ctx, s.logger).Info("ERP selected product lookup completed",
@@ -161,6 +162,7 @@ func newERPProductResponse(product *providers.ERPProduct) ERPProductResponse {
 // ReadCatalogProduct is the server-side authority for the simple creation form.
 // The caller supplies only the store and external identity, never credentials.
 func (s *Service) ReadCatalogProduct(ctx context.Context, storeID, source, id string) (*providers.ERPProduct, error) {
+	ctx = ratelimit.WithTinyInteractiveRead(ctx)
 	row, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", source)
 	if err != nil {
 		return nil, err

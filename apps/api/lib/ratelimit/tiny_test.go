@@ -42,6 +42,63 @@ func TestTinyEnforcesQuotaWithoutHeaders(t *testing.T) {
 	}
 }
 
+func TestTinyInteractiveReadsPrecedeCatalogWithoutBypassingQuota(t *testing.T) {
+	limiter := NewManager(zap.NewNop()).GetOrCreateTiny("account")
+	now := time.Now()
+	limiter.now = func() time.Time { return now }
+	interactive := WithTinyInteractiveRead(t.Context())
+	bulk := WithTinyCatalogRead(t.Context())
+	key := limiter.category(http.MethodGet)
+	first, err := limiter.claim(interactive, key)
+	if err != nil || !first.Allowed {
+		t.Fatalf("first interactive read: %+v %v", first, err)
+	}
+	now = now.Add(2500 * time.Millisecond)
+	background, _ := limiter.claim(bulk, key)
+	if background.Allowed {
+		t.Fatal("catalogue took the interactive slot")
+	}
+	second, _ := limiter.claim(interactive, key)
+	if !second.Allowed {
+		t.Fatal("interactive read blocked by catalogue lease")
+	}
+	tooSoon, _ := limiter.claim(interactive, key)
+	if tooSoon.Allowed || tooSoon.RetryAfter != 2500*time.Millisecond {
+		t.Fatalf("interactive priority bypassed quota: %+v", tooSoon)
+	}
+	write, _ := limiter.claim(bulk, limiter.category(http.MethodPut))
+	if !write.Allowed {
+		t.Fatal("read lease delayed an independent write")
+	}
+	now = now.Add(2500 * time.Millisecond)
+	order, _ := limiter.claim(t.Context(), key)
+	if !order.Allowed {
+		t.Fatal("catalogue preference blocked an order operation")
+	}
+	now = now.Add(tinyInteractiveLease)
+	resumed, _ := limiter.claim(bulk, key)
+	if !resumed.Allowed {
+		t.Fatal("abandoned interactive operation blocked catalogue indefinitely")
+	}
+}
+
+func TestTinyInteractivePriorityStillHonorsCooldownAndCancellation(t *testing.T) {
+	limiter := NewManager(zap.NewNop()).GetOrCreateTiny("account")
+	ctx := WithTinyInteractiveRead(t.Context())
+	if err := limiter.ObserveResponse(ctx, http.MethodGet, 429, quotaHeaders("60", "0", "60")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := limiter.claim(ctx, limiter.category(http.MethodGet))
+	if err != nil || res.Allowed || res.RetryAfter < 59*time.Second {
+		t.Fatalf("interactive request bypassed cooldown: %+v %v", res, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := limiter.WaitRequest(cancelled, http.MethodGet); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled interactive request kept waiting: %v", err)
+	}
+}
+
 func TestTinyBurstAndOldSuccessCannotClearCooldown(t *testing.T) {
 	limiter := NewManager(zap.NewNop()).GetOrCreateTiny("account")
 	now := time.Now()
