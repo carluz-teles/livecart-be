@@ -30,6 +30,9 @@ func createCatalogProduct(t *testing.T, service *Service, storeID vo.StoreID, sh
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.SetERPProductReader(func(context.Context, string, string, string) (*providers.ERPProduct, error) {
+		return &providers.ERPProduct{ID: input.ExternalID, Active: true, StockKnown: true, Stock: 7, SKU: input.Shipping.SKU, GTIN: input.Shipping.Barcode}, nil
+	})
 	created, err := service.Create(t.Context(), input)
 	if err != nil {
 		t.Fatal(err)

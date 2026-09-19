@@ -2995,7 +2995,7 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(payment_status,''),COALESCE(checkout_id,'') FROM carts WHERE id=$1 FOR UPDATE`, cID).Scan(&currentStatus, &currentID); err != nil {
 		return "", err
 	}
-	if paymentMethod == "manual" {
+	if paymentMethod == "manual" || paymentMethod == providers.PaymentMethodERPManual {
 		if err := cartedit.AssertReady(ctx, tx, cartID); err != nil {
 			return "", err
 		}
