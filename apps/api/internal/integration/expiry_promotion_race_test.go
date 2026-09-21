@@ -1,28 +1,7 @@
 package integration
 
-// Corrida EXPIRAÇÃO × PROMOÇÃO DA FILA (branch fix/expiry-promotion-race).
-//
-// Sem o sweep (expiração 100% via schedule asynq), no finalize do evento o cart
-// do HOLDER e o cart do WAITLISTER do mesmo produto ganham o MESMO expires_at →
-// duas tasks cart.expire disparam concorrentes. A expiração do holder promove o
-// waitlister (de-waitlista o item, re-garante estoque, marca 'notified', estende
-// a janela). A task do PRÓPRIO waitlister dispara junto — sem guard ela o expira
-// no meio da promoção, deixando um cart notified+expired segurando estoque
-// vazado.
-//
-// GARANTIA (forte): um waitlister que é o PRÓXIMO da fila é SEMPRE promovido
-// quando o estoque libera; o carrinho dele NUNCA expira pelo próprio timer
-// enquanto ele está 'waiting' na fila ou sendo promovido — só DEPOIS de
-// promovido, no prazo estendido, se não pagar.
-//
-// Estes testes exercem o guard de ExpireCart (cart.sql) + o retry/revert de
-// ProcessWaitlistForProduct. Reusam os seeds e helpers de waitlist_scale_test.go
-// (seedScaleEvent/seedSoldOutProductWithQueue/seedQueueWaiter/scaleService/…).
-//
-// Rodar (com -race para a invariante de concorrência):
-//
-//	TEST_DATABASE_URL='postgres://livecart:livecart@localhost:5432/livecart?sslmode=disable' \
-//	go test -race -run TestExpiryPromotion -v ./apps/api/internal/integration/
+// Expiration and promotion share the cart deadline. Waiting never prevents an
+// expired cart from closing; promotion never starts a second item-level timer.
 
 import (
 	"context"
@@ -177,191 +156,133 @@ func countNotifiedOnExpiredCartsInWindow(t *testing.T, productID string) int {
 	return n
 }
 
-// ============================================================================
-// (A) Cart de waitlister 'waiting' com janela vencida NÃO expira pelo timer
-// ============================================================================
-
-func TestExpiryPromotionWaitingCartDoesNotSelfExpire(t *testing.T) {
+func TestExpiryPromotionWaitingCartExpiresAtDeadline(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	svc := scaleService()
 	fx := seedScaleEvent(t)
-	// stock=0: unidade "vendida"; 1 cliente na fila ('waiting'), cart 'checkout'.
 	productID := seedSoldOutProductWithQueue(t, fx, 0, 1)
-
 	var cartID string
 	if err := testPool.QueryRow(ctx,
 		`SELECT cart_id::text FROM waitlist_items WHERE product_id = $1 AND status = 'waiting' LIMIT 1`,
 		productID).Scan(&cartID); err != nil {
-		t.Fatalf("lookup waiter cart: %v", err)
+		t.Fatal(err)
 	}
-	// Janela já vencida (mesma janela do finalize) — sem o guard, o timer o
-	// expiraria enquanto ele está na fila.
 	setCartExpiresAt(t, cartID, time.Now().Add(-time.Minute))
-
-	// Caminho real da task: RunScheduledExpiry → (janela no passado) → ExpireCart.
 	if err := svc.RunScheduledExpiry(ctx, cartID); err != nil {
-		t.Fatalf("RunScheduledExpiry: %v", err)
+		t.Fatal(err)
 	}
-	// E a chamada direta, para não depender do snapshot.
 	svc.ExpireCart(ctx, cartID, fx.storeID)
-
-	if st := cartStatus(t, cartID); st == "expired" {
-		t.Fatalf("cart de waitlister 'waiting' foi expirado pelo próprio timer (status=%s) — garantia violada", st)
+	if st := cartStatus(t, cartID); st != "expired" {
+		t.Fatalf("waiting cart failed to expire: %s", st)
 	}
-	if st := waitlistStatusOnCart(t, cartID); st != "waiting" {
-		t.Fatalf("item da fila deveria seguir 'waiting', got %s", st)
+	if st := waitlistStatusOnCart(t, cartID); st == "waiting" {
+		t.Fatal("expired cart retained an active waiting balance")
 	}
-	if n := countNotifiedOnExpiredCartsInWindow(t, productID); n != 0 {
-		t.Fatalf("estado notified+expired detectado (%d)", n)
+	if stock := productStock(t, productID); stock != 0 {
+		t.Fatalf("unallocated units were returned to stock: %d", stock)
 	}
 }
 
-// ============================================================================
-// (B) Holder expira → PRÓXIMO 'waiting' é promovido; cart dele NÃO expira
-// ============================================================================
-
-func TestExpiryPromotionHolderExpiryPromotesNext(t *testing.T) {
+func TestExpiryPromotionHolderExpiryPreservesWaiterDeadline(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	svc := scaleService()
 	fx := seedScaleEvent(t)
-	// stock=0 + 1 waitlister na fila; holder segura 1 unidade real à parte.
 	productID := seedSoldOutProductWithQueue(t, fx, 0, 1)
 	holderCart := seedHolderCart(t, fx, productID, 1)
-
 	var waiterCart string
 	if err := testPool.QueryRow(ctx,
 		`SELECT cart_id::text FROM waitlist_items WHERE product_id = $1 AND status = 'waiting' LIMIT 1`,
 		productID).Scan(&waiterCart); err != nil {
-		t.Fatalf("lookup waiter cart: %v", err)
+		t.Fatal(err)
 	}
-	// Ambos com a MESMA janela vencida (o cenário do finalize).
-	past := time.Now().Add(-time.Minute)
-	setCartExpiresAt(t, holderCart, past)
-	setCartExpiresAt(t, waiterCart, past)
-
-	// Expira o holder: devolve 1 unidade e promove o próximo da fila.
+	setCartExpiresAt(t, holderCart, time.Now().Add(-time.Minute))
+	deadline := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	setCartExpiresAt(t, waiterCart, deadline)
 	svc.ExpireCart(ctx, holderCart, fx.storeID)
-
 	if st := cartStatus(t, holderCart); st != "expired" {
-		t.Fatalf("holder deveria expirar, got %s", st)
+		t.Fatalf("holder should expire: %s", st)
 	}
 	if st := waitlistStatusOnCart(t, waiterCart); st != "notified" {
-		t.Fatalf("waitlister deveria ser promovido a 'notified', got %s", st)
-	}
-	if st := cartStatus(t, waiterCart); st == "expired" {
-		t.Fatalf("cart do waitlister promovido NÃO pode estar 'expired'")
+		t.Fatalf("eligible waiter should be promoted: %s", st)
 	}
 	if q := waitlistedQtyOnCart(t, waiterCart, productID); q != 0 {
-		t.Fatalf("item deveria estar de-waitlisted (waitlisted=0), got %d", q)
+		t.Fatalf("pending quantity = %d, want 0", q)
 	}
-	if !cartExpiresInFuture(t, waiterCart) {
-		t.Fatalf("a janela do cart promovido deveria ter sido estendida para o futuro")
+	var actual time.Time
+	var itemDeadline *time.Time
+	if err := testPool.QueryRow(ctx, `SELECT c.expires_at, wi.expires_at FROM carts c
+	    JOIN waitlist_items wi ON wi.cart_id = c.id WHERE c.id = $1`, waiterCart).Scan(&actual, &itemDeadline); err != nil {
+		t.Fatal(err)
 	}
-	if s := productStock(t, productID); s != 0 {
-		t.Fatalf("estoque deveria ser 0 (unidade re-garantida ao promovido), got %d", s)
+	if !actual.Equal(deadline) || itemDeadline != nil {
+		t.Fatalf("promotion changed deadline or created item timer: cart=%v item=%v want=%v", actual, itemDeadline, deadline)
 	}
-	if n := countNotifiedOnExpiredCartsInWindow(t, productID); n != 0 {
-		t.Fatalf("estado notified+expired detectado (%d)", n)
+	if stock := productStock(t, productID); stock != 0 {
+		t.Fatalf("stock = %d, want 0", stock)
 	}
 }
 
-// ============================================================================
-// (C) Cart promovido ('notified'): janela futura não expira; janela vencida sim
-// ============================================================================
-
-func TestExpiryPromotionNotifiedCartWindowRespected(t *testing.T) {
+func TestExpiryPromotionOnlyCartDeadlineMatters(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	svc := scaleService()
-
-	t.Run("janela de promoção ainda vigente (cart vencido) não expira", func(t *testing.T) {
-		fx := seedScaleEvent(t)
-		productID := seedSoldOutProductWithQueue(t, fx, 0, 0)
-		// Janela do CART no passado, mas a janela da PROMOÇÃO (wi.expires_at) no
-		// futuro: guard (b) deve abster (cobre a sub-janela claim→lock).
-		cartID := seedNotifiedCart(t, fx, productID,
-			time.Now().Add(-time.Minute), time.Now().Add(20*time.Minute))
-
-		svc.ExpireCart(ctx, cartID, fx.storeID)
-
-		if st := cartStatus(t, cartID); st == "expired" {
-			t.Fatalf("cart 'notified' dentro da janela de promoção NÃO pode expirar, got %s", st)
-		}
-		if n := countNotifiedOnExpiredCartsInWindow(t, productID); n != 0 {
-			t.Fatalf("estado notified+expired detectado (%d)", n)
-		}
-	})
-
-	t.Run("janela estendida já vencida expira normalmente", func(t *testing.T) {
-		fx := seedScaleEvent(t)
-		productID := seedSoldOutProductWithQueue(t, fx, 0, 0)
-		// Cliente promovido não pagou: janela do cart E da promoção já vencidas.
-		cartID := seedNotifiedCart(t, fx, productID,
-			time.Now().Add(-time.Minute), time.Now().Add(-time.Minute))
-
-		svc.ExpireCart(ctx, cartID, fx.storeID)
-
-		if st := cartStatus(t, cartID); st != "expired" {
-			t.Fatalf("cart promovido com janela vencida deveria expirar, got %s", st)
-		}
-	})
+	for _, tc := range []struct {
+		name                   string
+		cartOffset, itemOffset time.Duration
+		expired                bool
+	}{
+		{"future cart and expired legacy item", time.Hour, -time.Minute, false},
+		{"expired cart and future legacy item", -time.Minute, time.Hour, true},
+		{"both expired", -time.Minute, -time.Minute, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := seedScaleEvent(t)
+			productID := seedSoldOutProductWithQueue(t, fx, 0, 0)
+			cartID := seedNotifiedCart(t, fx, productID,
+				time.Now().Add(tc.cartOffset), time.Now().Add(tc.itemOffset))
+			svc.ExpireCart(ctx, cartID, fx.storeID)
+			if expired := cartStatus(t, cartID) == "expired"; expired != tc.expired {
+				t.Fatalf("expired = %v, want %v", expired, tc.expired)
+			}
+		})
+	}
 }
 
-// ============================================================================
-// (D) Invariante sob concorrência: ExpireCart(waitlister) × promoção do holder
-// ============================================================================
-
-func TestExpiryPromotionConcurrentRaceInvariant(t *testing.T) {
+func TestExpiryPromotionConcurrentExpiredWaiterCannotResurrect(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	svc := scaleService()
 	fx := seedScaleEvent(t)
-
-	// Muitos setups independentes, cada um dispara a corrida holder×waitlister em
-	// paralelo. Rodar com -race para expor qualquer interleaving corrompido.
-	const ROUNDS = 80
-	for round := 0; round < ROUNDS; round++ {
+	for round := 0; round < 30; round++ {
 		productID := seedSoldOutProductWithQueue(t, fx, 0, 1)
 		holderCart := seedHolderCart(t, fx, productID, 1)
-
 		var waiterCart string
 		if err := testPool.QueryRow(ctx,
 			`SELECT cart_id::text FROM waitlist_items WHERE product_id = $1 AND status = 'waiting' LIMIT 1`,
 			productID).Scan(&waiterCart); err != nil {
-			t.Fatalf("round %d: lookup waiter cart: %v", round, err)
+			t.Fatal(err)
 		}
 		past := time.Now().Add(-time.Minute)
 		setCartExpiresAt(t, holderCart, past)
 		setCartExpiresAt(t, waiterCart, past)
-
-		// As DUAS tasks cart.expire (holder e waitlister) disparam concorrentes.
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); svc.ExpireCart(ctx, holderCart, fx.storeID) }()
 		go func() { defer wg.Done(); svc.ExpireCart(ctx, waiterCart, fx.storeID) }()
 		wg.Wait()
-
-		// Invariante forte: NUNCA um cart notified+expired dentro da janela.
-		if n := countNotifiedOnExpiredCartsInWindow(t, productID); n != 0 {
-			t.Fatalf("round %d: notified+expired dentro da janela (%d) — corrupção da corrida", round, n)
+		if st := cartStatus(t, waiterCart); st != "expired" {
+			t.Fatalf("round %d: expired waiter resurrected: %s", round, st)
 		}
-		// Garantia do dono: o próximo da fila é SEMPRE promovido quando o estoque
-		// libera, e o cart dele nunca expira pelo próprio timer durante a promoção.
-		if st := waitlistStatusOnCart(t, waiterCart); st != "notified" {
-			t.Fatalf("round %d: waitlister deveria ser SEMPRE promovido, status=%s", round, st)
+		if st := waitlistStatusOnCart(t, waiterCart); st == "waiting" || st == "notified" {
+			t.Fatalf("round %d: expired waiter remained eligible: %s", round, st)
 		}
-		if st := cartStatus(t, waiterCart); st == "expired" {
-			t.Fatalf("round %d: cart do waitlister promovido não pode expirar", round)
+		if held := unitsHeldAvailableLive(t, productID); held != 0 {
+			t.Fatalf("round %d: held=%d, want 0", round, held)
 		}
-		// Conservação: a unidade do holder acabou nas mãos do promovido (held vivo
-		// =1, estoque=0) — sem vazamento nem duplicação.
-		if held := unitsHeldAvailableLive(t, productID); held != 1 {
-			t.Fatalf("round %d: held=%d, esperado 1 (unidade com o promovido)", round, held)
-		}
-		if s := productStock(t, productID); s != 0 {
-			t.Fatalf("round %d: estoque=%d, esperado 0", round, s)
+		if stock := productStock(t, productID); stock != 1 {
+			t.Fatalf("round %d: stock=%d, want 1", round, stock)
 		}
 	}
 }

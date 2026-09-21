@@ -692,9 +692,8 @@ type CreateLiveRequest struct {
 	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
 	// PixDiscountPercent (0-100). 0 disables the feature.
 	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
-	// RN-10 — janela extra do promovido da fila. O range espelha o CHECK da
-	// migration 000073 (5..240): desalinhar devolveria 500 em vez de 422.
-	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=5,max=240"`
+	// Prazo extra para quem ainda aguarda estoque no encerramento (0 a 30 dias).
+	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=0,max=43200"`
 }
 
 type CreateLiveResponse struct {
@@ -717,8 +716,8 @@ type UpdateLiveRequest struct {
 	// modo que antecipar o fim fecharia o evento na hora antiga.
 	StartsAt *string `json:"startsAt"`
 	EndsAt   *string `json:"endsAt"`
-	// RN-10 — mesmo range do CHECK da 000073.
-	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=5,max=240"`
+	// Prazo extra para quem aguarda estoque no encerramento: 0 a 30 dias.
+	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=0,max=43200"`
 	// Prazo do carrinho, editável depois de criado (20/08/2026). nil = não
 	// mexer. Mesmo range da criação (piso do CHECK 000106, teto de 30 dias).
 	// Mudar aqui PROPAGA para os carrinhos abertos — ver Update.

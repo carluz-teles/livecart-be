@@ -95,12 +95,12 @@ WITH before AS (
     SELECT stock AS s FROM products WHERE id = sqlc.arg(id) FOR UPDATE
 )
 UPDATE products p
-SET stock = p.stock - LEAST(before.s, sqlc.arg(want)::int),
+SET stock = p.stock - LEAST(GREATEST(before.s,0), GREATEST(sqlc.arg(want)::int,0)),
     erp_seq = p.erp_seq + 1,
     updated_at = now()
 FROM before
 WHERE p.id = sqlc.arg(id)
-RETURNING LEAST(before.s, sqlc.arg(want)::int)::int AS taken;
+RETURNING LEAST(GREATEST(before.s,0), GREATEST(sqlc.arg(want)::int,0))::int AS taken;
 
 
 -- name: ProductSeqByExternalID :one

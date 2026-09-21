@@ -44,8 +44,7 @@ func TestSairDaFilaEmWaitingDecrementaOContadorDoCarrinho(t *testing.T) {
 }
 
 func TestSairDaFilaEmNotifiedNaoMexeNoContadorDeFila(t *testing.T) {
-	// Promovido: a promoção JÁ moveu fila→disponível; o cancelamento devolve a
-	// unidade inteira (DecrementCartItem), não o contador de fila.
+	// Promovido: já é um item normal. Sair da fila não pode remover a unidade.
 	repo := &fakeRepo{
 		item: &inventory.WaitlistItemRow{
 			ID: "wl-2", CartID: "cart-x", ProductID: "p-1",
@@ -60,7 +59,7 @@ func TestSairDaFilaEmNotifiedNaoMexeNoContadorDeFila(t *testing.T) {
 	if got := repo.waitlistedDecrements["cart-x|p-1"]; got != 0 {
 		t.Errorf("contador de fila decrementado (%d) num 'notified' — dupla baixa", got)
 	}
-	if repo.decCalls != 1 {
-		t.Errorf("DecrementCartItem chamado %d vez(es); esperava 1", repo.decCalls)
+	if repo.decCalls != 0 {
+		t.Errorf("DecrementCartItem chamado %d vez(es); esperava 0: item promovido pertence ao carrinho", repo.decCalls)
 	}
 }

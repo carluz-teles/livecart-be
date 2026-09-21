@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -1491,6 +1492,12 @@ func (r *Repository) emitStockEvent(ctx context.Context, q *sqlc.Queries, name e
 // key falls back to product+op, which is not unique across buyers — callers that
 // need a stable key must supply a ReservationID.
 func stockDedupKey(name events.Name, keyPrefix string, p StockEventParams) string {
+	// Releasing the same product twice (two quantity edits) creates two wakeups.
+	// Allocation is idempotent against current stock, so replay cannot overfill.
+	if name == events.StockReleased {
+		return keyPrefix + uuid.NewString()
+	}
+
 	if name == events.StockReserved && p.ReservationID != "" {
 		return keyPrefix + p.ReservationID
 	}
@@ -1700,9 +1707,9 @@ func (r *Repository) ListActiveByCart(ctx context.Context, cartID string) ([]Lis
 			ProductName:     row.ProductName,
 			ProductKeyword:  row.ProductKeyword,
 			ProductImageURL: textToString(row.ProductImageUrl),
-			ProductPrice:    row.ProductPrice.Int64,
+			ProductPrice:    row.ProductPrice,
 			Quantity:        int(row.Quantity),
-			Position:        int(row.Position),
+			Position:        int(row.QueuePosition),
 			Status:          row.Status,
 			NotifiedAt:      timestamptzToPtr(row.NotifiedAt),
 			ExpiresAt:       timestamptzToPtr(row.ExpiresAt),
@@ -2023,7 +2030,7 @@ func (r *Repository) ListNonWaitlistedCartItems(ctx context.Context, cartID stri
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.queries.ListNonWaitlistedCartItems(ctx, id)
+	rows, err := r.queries.ListNonWaitlistedCartPriceLots(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("listing non-waitlisted cart items: %w", err)
 	}
@@ -2038,7 +2045,7 @@ func (r *Repository) ListNonWaitlistedCartItems(ctx context.Context, cartID stri
 			CartID:            uuidToString(row.CartID),
 			ProductID:         uuidToString(row.ProductID),
 			Quantity:          int(row.Quantity),
-			UnitPrice:         row.UnitPrice.Int64,
+			UnitPrice:         row.UnitPrice,
 			ProductName:       row.ProductName,
 			ProductExternalID: extID,
 			ProductKeyword:    row.ProductKeyword,
@@ -4385,6 +4392,32 @@ func (r *Repository) ReopenCancelledCartFromERP(ctx context.Context, cartID, sto
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op depois do Commit
 
+	// Lock products in a stable order before the cart. Promotion and comment
+	// admission use the same product -> cart order; reversing it deadlocks.
+	productRows, err := tx.Query(ctx, `SELECT product_id::text FROM cart_items WHERE cart_id=$1 ORDER BY product_id`, cID)
+	if err != nil {
+		return out, err
+	}
+	productIDs := []string{}
+	for productRows.Next() {
+		var id string
+		if err = productRows.Scan(&id); err != nil {
+			productRows.Close()
+			return out, err
+		}
+		productIDs = append(productIDs, id)
+	}
+	err = productRows.Err()
+	productRows.Close()
+	if err != nil {
+		return out, err
+	}
+	for _, id := range productIDs {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "waitlist_product:"+id); err != nil {
+			return out, err
+		}
+	}
+
 	err = func(q *sqlc.Queries) error {
 		// O prazo vem da fonte única (evento com fallback da loja). Precisa ser
 		// lido ANTES do flip, porque o flip já grava o expires_at novo.
@@ -4439,24 +4472,12 @@ func (r *Repository) ReopenCancelledCartFromERP(ctx context.Context, cartID, sto
 			}); err != nil {
 				return fmt.Errorf("marking waitlisted units on reopen: %w", err)
 			}
-			pos, err := q.GetNextWaitlistPosition(ctx, sqlc.GetNextWaitlistPositionParams{
-				EventID:   cart.EventID,
-				ProductID: item.ProductID,
-			})
-			if err != nil {
-				return fmt.Errorf("reading waitlist position: %w", err)
+			// Reopening never resets the prices agreed for each addition. The
+			// ledger already split missing units into their original price lots.
+			if err := r.enqueueReopenedWaitlistLots(ctx, tx, cart, item.ProductID, cID); err != nil {
+				return fmt.Errorf("putting missing price lots on waitlist: %w", err)
 			}
-			if _, err := q.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
-				EventID:        cart.EventID,
-				ProductID:      item.ProductID,
-				PlatformUserID: cart.PlatformUserID,
-				PlatformHandle: cart.PlatformHandle,
-				Quantity:       falta,
-				Position:       int32(pos),
-				CartID:         cID,
-			}); err != nil {
-				return fmt.Errorf("putting the missing units on the waitlist: %w", err)
-			}
+
 		}
 		return nil
 	}(r.queries.WithTx(tx))

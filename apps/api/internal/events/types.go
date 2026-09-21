@@ -270,6 +270,8 @@ var DefaultPolicies = map[string]QueuePolicy{
 var EventTimeouts = map[Name]time.Duration{
 	ERPResyncProducts: 2 * time.Minute,
 	ERPWebhookProcess: 90 * time.Second,
+	WaitlistQueued:    90 * time.Second,
+	StockReleased:     90 * time.Second,
 	OrderPaid:         90 * time.Second,
 	// Additional Tiny payments reconcile freight and may replace the previous
 	// reservation under the same per-account API quota as order.paid.

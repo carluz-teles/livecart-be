@@ -54,8 +54,8 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger, exporter Exporter) {
 
 	// Group D — stock & waitlist. Observability-only for now.
 	mux.HandleFunc(string(StockReserved), logEvent(log))
-	mux.HandleFunc(string(StockReleased), logEvent(log))
-	mux.HandleFunc(string(WaitlistQueued), logEvent(log))
+	// StockReleased is wired to the FIFO wakeup consumer in the composition root.
+	// WaitlistQueued is a durable allocation command wired by the composition root.
 	mux.HandleFunc(string(WaitlistNotified), logEvent(log))
 	mux.HandleFunc(string(WaitlistFulfilled), logEvent(log))
 	mux.HandleFunc(string(WaitlistExpired), logEvent(log))

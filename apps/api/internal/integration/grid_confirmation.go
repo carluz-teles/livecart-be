@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"go.uber.org/zap"
@@ -16,27 +17,48 @@ func (r *Repository) ConfirmERPGrid(ctx context.Context, cartID string, grid []p
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
-	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE COALESCE(joined_to_cart_id,id)=$1 ORDER BY id FOR UPDATE`, cartID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE COALESCE(joined_to_cart_id,id)=$1 ORDER BY (id=$1) DESC,id FOR UPDATE`, cartID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `SELECT p.id FROM products p WHERE EXISTS(SELECT 1 FROM cart_items ci JOIN carts c ON c.id=ci.cart_id WHERE ci.product_id=p.id AND COALESCE(c.joined_to_cart_id,c.id)=$1) ORDER BY p.id FOR UPDATE`, cartID); err != nil {
 		return err
 	}
+	byProduct := make(map[string]map[int64]int)
 	for _, item := range grid {
+		if byProduct[item.ProductID] == nil {
+			byProduct[item.ProductID] = make(map[int64]int)
+		}
+		byProduct[item.ProductID][item.UnitPrice] += item.Quantity
+	}
+	for productID, prices := range byProduct {
+		wanted, err := json.Marshal(prices)
+		if err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `WITH members AS (
-            SELECT ci.id,ci.quantity-ci.waitlisted_quantity AS qty,ci.unit_price
+            SELECT ci.id,ci.quantity-ci.waitlisted_quantity AS qty
             FROM cart_items ci JOIN products p ON p.id=ci.product_id JOIN carts c ON c.id=ci.cart_id
             WHERE COALESCE(c.joined_to_cart_id,c.id)=$1 AND p.external_id=$2
-        ), totals AS (SELECT SUM(qty) AS qty,MAX(unit_price) AS price,COUNT(*) AS n FROM members),
-        changed AS (UPDATE cart_items ci SET
-            erp_confirmed_quantity=CASE WHEN t.qty=$3 AND t.price=$4 THEN m.qty WHEN t.n=1 THEN $3 ELSE ci.erp_confirmed_quantity END,
-            erp_pending_since=CASE WHEN t.qty=$3 AND t.price=$4 THEN NULL ELSE ci.erp_pending_since END
-        FROM members m CROSS JOIN totals t WHERE ci.id=m.id
-            AND (ci.erp_confirmed_quantity IS DISTINCT FROM CASE WHEN t.qty=$3 AND t.price=$4 THEN m.qty WHEN t.n=1 THEN $3 ELSE ci.erp_confirmed_quantity END
-                 OR (t.qty=$3 AND t.price=$4 AND ci.erp_pending_since IS NOT NULL))
-            RETURNING ci.product_id)
-        UPDATE products SET erp_seq=erp_seq+1 WHERE id IN (SELECT product_id FROM changed)`,
-			cartID, item.ProductID, item.Quantity, item.UnitPrice)
+        ), actual AS (
+            SELECT l.unit_price AS price,SUM(l.quantity-l.waitlisted_quantity)::bigint AS qty
+            FROM members m JOIN cart_item_price_lots l ON l.cart_item_id=m.id
+            WHERE l.quantity>l.waitlisted_quantity GROUP BY l.unit_price
+        ), desired AS (
+            SELECT key::bigint AS price,value::bigint AS qty FROM jsonb_each_text($3::jsonb)
+        ), comparison AS (
+            SELECT NOT EXISTS ((SELECT * FROM actual EXCEPT SELECT * FROM desired)
+                UNION ALL (SELECT * FROM desired EXCEPT SELECT * FROM actual)) AS matches,
+                (SELECT COUNT(*) FROM members) AS n, (SELECT SUM(qty) FROM desired) AS qty
+        ), changed AS (
+            UPDATE cart_items ci SET
+                erp_confirmed_quantity=CASE WHEN t.matches THEN m.qty WHEN t.n=1 THEN t.qty ELSE ci.erp_confirmed_quantity END,
+                erp_pending_since=CASE WHEN t.matches THEN NULL ELSE ci.erp_pending_since END
+            FROM members m CROSS JOIN comparison t WHERE ci.id=m.id
+                AND (ci.erp_confirmed_quantity IS DISTINCT FROM CASE WHEN t.matches THEN m.qty WHEN t.n=1 THEN t.qty ELSE ci.erp_confirmed_quantity END
+                    OR (t.matches AND ci.erp_pending_since IS NOT NULL))
+            RETURNING ci.product_id
+        ) UPDATE products SET erp_seq=erp_seq+1 WHERE id IN (SELECT product_id FROM changed)`,
+			cartID, productID, string(wanted))
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package order
 
 import (
+	"livecart/apps/api/internal/cartpricing"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -127,15 +128,16 @@ type RegenerateCheckoutResponse struct {
 }
 
 type OrderItemResponse struct {
-	ID           string  `json:"id"`
-	ProductID    string  `json:"productId"`
-	ProductName  string  `json:"productName"`
-	ProductImage *string `json:"productImage"`
-	Keyword      string  `json:"keyword"`
-	Size         *string `json:"size"`
-	Quantity     int     `json:"quantity"`
-	UnitPrice    int64   `json:"unitPrice"`
-	TotalPrice   int64   `json:"totalPrice"`
+	PriceLots    []cartpricing.Lot `json:"priceLots,omitempty"`
+	ID           string            `json:"id"`
+	ProductID    string            `json:"productId"`
+	ProductName  string            `json:"productName"`
+	ProductImage *string           `json:"productImage"`
+	Keyword      string            `json:"keyword"`
+	Size         *string           `json:"size"`
+	Quantity     int               `json:"quantity"`
+	UnitPrice    int64             `json:"unitPrice"`
+	TotalPrice   int64             `json:"totalPrice"`
 
 	// WaitlistedQuantity é a parcela de quantity SEM estoque. `quantity` é o
 	// total pedido, então o que a cliente pode pagar agora é
@@ -509,6 +511,7 @@ func NewOrderResponse(o OrderOutput) OrderResponse {
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
 			TotalPrice:         item.TotalPrice,
+			PriceLots:          item.PriceLots,
 			WaitlistedQuantity: item.WaitlistedQuantity,
 			WeightGrams:        item.WeightGrams,
 			HeightCm:           item.HeightCm,
@@ -839,6 +842,7 @@ type OrderItemPreviewOutput struct {
 }
 
 type OrderItemOutput struct {
+	PriceLots    []cartpricing.Lot `json:"priceLots,omitempty"`
 	ID           string
 	ProductID    string
 	ProductName  string
@@ -952,6 +956,7 @@ type OrderItemPreviewRow struct {
 }
 
 type OrderItemRow struct {
+	PriceLots      []cartpricing.Lot `json:"priceLots,omitempty"`
 	ID             string
 	CartID         string
 	ProductID      string

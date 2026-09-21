@@ -1,19 +1,7 @@
 package live
 
-// RN-10 / adendo A8 — a extensão de prazo de quem é promovido da fila JÁ
-// funcionava no runtime: o TTL é lido do EVENTO
-// (GetWaitlistNotifiedTTLByEvent), vira notifiedUntil na reivindicação atômica
-// e empurra o expires_at do carrinho com GREATEST (não encolhe). A coluna
-// live_events.waitlist_notified_ttl_minutes existe desde a 000073, com
-// CHECK 5..240 — e não existe equivalente em stores.
-//
-// O que FALTAVA era só exposição: a coluna não aparecia em nenhum DTO da API
-// nem em nenhum arquivo do frontend, então o lojista não podia nem ver nem
-// mudar o número que governa a regra. Sem migration.
-//
-// Estes testes travam o caminho de escrita/leitura e o alinhamento com o CHECK
-// — a lição E6 da errata é exatamente essa: validação de aplicação frouxa
-// transforma erro de campo em 500.
+// Y is configurable from zero to thirty days. API validation and the
+// defensive repository clamp must agree with the database constraint.
 
 import (
 	"context"
@@ -84,10 +72,8 @@ func TestWaitlistNotifiedTTLDefaultsAndClamps(t *testing.T) {
 		t.Errorf("default = %d, queria 30 (000073)", got.WaitlistNotifiedTTLMinutes)
 	}
 
-	// Fora da faixa: o repo faz o clamp em vez de deixar o CHECK 5..240
-	// devolver 500. A validação sintática (5..240) já barra no handler; este é
-	// o guarda-costas para chamadas internas.
-	for _, tc := range []struct{ in, want int }{{1, 5}, {9999, 240}} {
+	// Boundary values round-trip; internal callers outside the range are clamped.
+	for _, tc := range []struct{ in, want int }{{-1, 0}, {0, 0}, {1, 1}, {43200, 43200}, {43201, 43200}} {
 		ttl := tc.in
 		if _, err := svc.Update(ctx, UpdateLiveInput{
 			ID: out.ID, StoreID: storeID, Title: "Sem TTL",

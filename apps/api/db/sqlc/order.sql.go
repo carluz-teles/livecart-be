@@ -253,7 +253,7 @@ const updateOrderPaymentStatus = `-- name: UpdateOrderPaymentStatus :one
 UPDATE carts
 SET payment_status = $2, paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until, waitlist_extra_eligible, deadline_config_base_at, deadline_config_x_minutes, deadline_config_y_minutes, purchase_closed
 `
 
 type UpdateOrderPaymentStatusParams struct {
@@ -333,6 +333,11 @@ func (q *Queries) UpdateOrderPaymentStatus(ctx context.Context, arg UpdateOrderP
 		&i.ErpItemsRetryAt,
 		&i.PaymentReviewRequired,
 		&i.PixCancelLeaseUntil,
+		&i.WaitlistExtraEligible,
+		&i.DeadlineConfigBaseAt,
+		&i.DeadlineConfigXMinutes,
+		&i.DeadlineConfigYMinutes,
+		&i.PurchaseClosed,
 	)
 	return i, err
 }
@@ -341,7 +346,7 @@ const updateOrderStatus = `-- name: UpdateOrderStatus :one
 UPDATE carts
 SET status = $2
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until, waitlist_extra_eligible, deadline_config_base_at, deadline_config_x_minutes, deadline_config_y_minutes, purchase_closed
 `
 
 type UpdateOrderStatusParams struct {
@@ -421,6 +426,11 @@ func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusPa
 		&i.ErpItemsRetryAt,
 		&i.PaymentReviewRequired,
 		&i.PixCancelLeaseUntil,
+		&i.WaitlistExtraEligible,
+		&i.DeadlineConfigBaseAt,
+		&i.DeadlineConfigXMinutes,
+		&i.DeadlineConfigYMinutes,
+		&i.PurchaseClosed,
 	)
 	return i, err
 }

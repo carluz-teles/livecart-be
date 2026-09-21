@@ -49,6 +49,12 @@ type CartSyncCollaborators interface {
 	RemoveCartItem(ctx context.Context, cartID, productID string) error
 }
 
+// CartPriceSyncCollaborators preserves every ERP price line while leaving
+// pending requests at their original agreed prices.
+type CartPriceSyncCollaborators interface {
+	SetCartItemPriceLines(context.Context, string, string, []providers.ERPOrderItem) error
+}
+
 // SetCartSyncCollaborators liga o reflexo.
 func (s *Service) SetCartSyncCollaborators(c CartSyncCollaborators) { s.cartSync = c }
 
@@ -135,7 +141,7 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 	// its pending marker keeps the order in the attention queue. The repository
 	// compares current quantity AND price, protecting additions made during GET.
 	if ack, ok := s.repo.(ERPGridAcknowledger); ok && erpProvider.Name() == providers.ProviderTiny {
-		if err := ack.ConfirmERPGrid(ctx, cartID, unambiguousReflectionGrid(doPedido)); err != nil {
+		if err := ack.ConfirmERPGrid(ctx, cartID, doPedido); err != nil {
 			return nil, fmt.Errorf("confirming Tiny order items read from ERP: %w", err)
 		}
 	}
@@ -145,18 +151,45 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 		return nil, fmt.Errorf("listing cart items for reflection: %w", err)
 	}
 	noCarrinho := make(map[string]NonWaitlistedCartItem, len(doCarrinho))
+	localPrices := make(map[string]map[int64]int)
 	for _, it := range doCarrinho {
-		if it.ProductExternalID != "" {
-			noCarrinho[it.ProductExternalID] = it
+		if it.ProductExternalID == "" {
+			continue
 		}
+		current := noCarrinho[it.ProductExternalID]
+		if current.ProductID == "" {
+			current = it
+			current.Quantity = 0
+		}
+		current.Quantity += it.Quantity
+		noCarrinho[it.ProductExternalID] = current
+		if localPrices[it.ProductExternalID] == nil {
+			localPrices[it.ProductExternalID] = make(map[int64]int)
+		}
+		localPrices[it.ProductExternalID][it.UnitPrice] += it.Quantity
 	}
 
-	vistos := make(map[string]bool, len(doPedido))
-	for _, linha := range doPedido {
-		vistos[linha.ProductID] = true
-		atual, existe := noCarrinho[linha.ProductID]
-
-		if existe && atual.Quantity == linha.Quantity && atual.UnitPrice == linha.UnitPrice {
+	remoteLines := make(map[string][]providers.ERPOrderItem)
+	var productOrder []string
+	for _, line := range doPedido {
+		if _, exists := remoteLines[line.ProductID]; !exists {
+			productOrder = append(productOrder, line.ProductID)
+		}
+		remoteLines[line.ProductID] = append(remoteLines[line.ProductID], line)
+	}
+	vistos := make(map[string]bool, len(remoteLines))
+	for _, externalID := range productOrder {
+		lines := remoteLines[externalID]
+		linha := lines[0]
+		prices := make(map[int64]int)
+		linha.Quantity = 0
+		for _, line := range lines {
+			prices[line.UnitPrice] += line.Quantity
+			linha.Quantity += line.Quantity
+		}
+		vistos[externalID] = true
+		atual, existe := noCarrinho[externalID]
+		if existe && equalReflectionPrices(localPrices[externalID], prices) {
 			continue
 		}
 
@@ -194,8 +227,17 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 		if existe {
 			de = atual.Quantity
 		}
-		if err := s.cartSync.SetCartItemQuantity(ctx, cartID, productID, linha.Quantity, linha.UnitPrice); err != nil {
-			return rel, fmt.Errorf("setting cart item from order: %w", err)
+		if priceSync, ok := s.cartSync.(CartPriceSyncCollaborators); ok {
+			if err := priceSync.SetCartItemPriceLines(ctx, cartID, productID, lines); err != nil {
+				return rel, fmt.Errorf("setting cart price lots from order: %w", err)
+			}
+		} else {
+			if len(prices) > 1 {
+				return rel, fmt.Errorf("cart price reflection requires lot-aware collaborator")
+			}
+			if err := s.cartSync.SetCartItemQuantity(ctx, cartID, productID, linha.Quantity, linha.UnitPrice); err != nil {
+				return rel, fmt.Errorf("setting cart item from order: %w", err)
+			}
 		}
 		kind := "quantity"
 		if !existe {
@@ -213,7 +255,11 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 		if vistos[ext] {
 			continue
 		}
-		if err := s.cartSync.RemoveCartItem(ctx, cartID, it.ProductID); err != nil {
+		if priceSync, ok := s.cartSync.(CartPriceSyncCollaborators); ok {
+			if err := priceSync.SetCartItemPriceLines(ctx, cartID, it.ProductID, nil); err != nil {
+				return rel, fmt.Errorf("removing allocated cart price lots: %w", err)
+			}
+		} else if err := s.cartSync.RemoveCartItem(ctx, cartID, it.ProductID); err != nil {
 			return rel, fmt.Errorf("removing cart item the merchant deleted: %w", err)
 		}
 		rel.Changes = append(rel.Changes, CartSyncChange{
@@ -235,18 +281,14 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 
 var _ = providers.ERPOrderItem{}
 
-// ConfirmERPGrid acknowledges one total per product. A merchant may split a
-// product into multiple ERP lines; none of those lines alone proves that total.
-func unambiguousReflectionGrid(grid []providers.ERPOrderItem) []providers.ERPOrderItem {
-	counts := make(map[string]int, len(grid))
-	for _, item := range grid {
-		counts[item.ProductID]++
+func equalReflectionPrices(a, b map[int64]int) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	unique := make([]providers.ERPOrderItem, 0, len(grid))
-	for _, item := range grid {
-		if item.ProductID != "" && counts[item.ProductID] == 1 {
-			unique = append(unique, item)
+	for price, quantity := range a {
+		if b[price] != quantity {
+			return false
 		}
 	}
-	return unique
+	return true
 }

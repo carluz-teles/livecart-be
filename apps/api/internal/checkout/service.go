@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"livecart/apps/api/internal/cartpricing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -246,6 +247,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	output := &GetCartForCheckoutOutput{
 		ERPItemSync: editStatus,
 		Cart: CartDetails{
+			PurchaseClosed:          cart.PurchaseClosed,
 			PaymentReviewRequired:   cart.PaymentReviewRequired,
 			ID:                      cart.ID,
 			EventID:                 cart.EventID,
@@ -287,6 +289,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			ProductID:          item.ProductID,
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
+			PriceLots:          item.PriceLots,
 			WaitlistedQuantity: item.WaitlistedQuantity,
 			Name:               item.Name,
 			ImageURL:           item.ImageURL,
@@ -295,22 +298,6 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			GroupName:          item.GroupName,
 			Variant:            item.Variant,
 		}
-	}
-
-	// Lazy expiration: antes de listar a waitlist, varre 'notified' com
-	// expires_at vencido e devolve o estoque para o próximo da fila.
-	// Substitui um worker dedicado — a fila só precisa "andar" quando
-	// alguém está olhando para o checkout. Best-effort: erro aqui só vira
-	// log, a leitura segue mesmo com o sweep meio rodado.
-	if !editStatus.Pending {
-		if processed, err := s.integrationService.ExpireNotifiedWaitlistSweep(ctx); err != nil {
-			logger.From(ctx, s.logger).Warn("inline waitlist expiration sweep failed",
-				zap.String("cart_id", cart.ID),
-				zap.Int("processed_before_err", processed),
-				zap.Error(err),
-			)
-		}
-
 	}
 
 	// Hidrata a fila de espera vinculada ao cart (waiting + notified). É
@@ -403,6 +390,9 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
+	if cart.PurchaseClosed {
+		return nil, httpx.DomainError(409, httpx.CodeCartNotPayable, "esta compra foi encerrada no pedido que reúne seus carrinhos")
+	}
 	if cart.Status == "expired" {
 		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
@@ -438,14 +428,13 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		if availableQty <= 0 {
 			continue // Skip items that are fully waitlisted
 		}
-		checkoutItems = append(checkoutItems, providers.CheckoutItem{
-			ID:        item.ProductID,
-			Name:      item.Name,
-			Quantity:  availableQty, // Only the available quantity
-			UnitPrice: item.UnitPrice,
-			ImageURL:  derefString(item.ImageURL),
-		})
-		totalAmount += item.UnitPrice * int64(availableQty)
+		for _, lot := range cartpricing.Reserved(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice) {
+			checkoutItems = append(checkoutItems, providers.CheckoutItem{
+				ID: item.ProductID, Name: item.Name, Quantity: lot.Quantity,
+				UnitPrice: lot.UnitPrice, ImageURL: derefString(item.ImageURL),
+			})
+		}
+		totalAmount += cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 	}
 
 	if len(checkoutItems) == 0 {
@@ -606,6 +595,9 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
+	if cart.PurchaseClosed {
+		return nil, httpx.DomainError(409, httpx.CodeCartNotPayable, "esta compra foi encerrada no pedido que reúne seus carrinhos")
+	}
 	if cart.Status == "expired" {
 		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
@@ -628,7 +620,7 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 		// Calculate available quantity (total - waitlisted)
 		availableQty := item.Quantity - item.WaitlistedQuantity
 		if availableQty > 0 {
-			totalAmount += item.UnitPrice * int64(availableQty)
+			totalAmount += cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 		}
 	}
 
@@ -765,6 +757,9 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
+	if cart.PurchaseClosed {
+		return nil, httpx.DomainError(409, httpx.CodeCartNotPayable, "esta compra foi encerrada no pedido que reúne seus carrinhos")
+	}
 	if cart.Status == "expired" {
 		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
@@ -801,14 +796,13 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		if availableQty <= 0 {
 			continue // Skip items that are fully waitlisted
 		}
-		checkoutItems = append(checkoutItems, providers.CheckoutItem{
-			ID:        item.ProductID,
-			Name:      item.Name,
-			Quantity:  availableQty, // Only the available quantity
-			UnitPrice: item.UnitPrice,
-			ImageURL:  derefString(item.ImageURL),
-		})
-		totalAmount += item.UnitPrice * int64(availableQty)
+		for _, lot := range cartpricing.Reserved(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice) {
+			checkoutItems = append(checkoutItems, providers.CheckoutItem{
+				ID: item.ProductID, Name: item.Name, Quantity: lot.Quantity,
+				UnitPrice: lot.UnitPrice, ImageURL: derefString(item.ImageURL),
+			})
+		}
+		totalAmount += cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 	}
 
 	if len(checkoutItems) == 0 {
@@ -961,6 +955,9 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
+	if cart.PurchaseClosed {
+		return nil, httpx.DomainError(409, httpx.CodeCartNotPayable, "esta compra foi encerrada no pedido que reúne seus carrinhos")
+	}
 	if cart.Status == "expired" {
 		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
@@ -997,14 +994,13 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		if availableQty <= 0 {
 			continue // Skip items that are fully waitlisted
 		}
-		checkoutItems = append(checkoutItems, providers.CheckoutItem{
-			ID:        item.ProductID,
-			Name:      item.Name,
-			Quantity:  availableQty, // Only the available quantity
-			UnitPrice: item.UnitPrice,
-			ImageURL:  derefString(item.ImageURL),
-		})
-		totalAmount += item.UnitPrice * int64(availableQty)
+		for _, lot := range cartpricing.Reserved(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice) {
+			checkoutItems = append(checkoutItems, providers.CheckoutItem{
+				ID: item.ProductID, Name: item.Name, Quantity: lot.Quantity,
+				UnitPrice: lot.UnitPrice, ImageURL: derefString(item.ImageURL),
+			})
+		}
+		totalAmount += cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 	}
 
 	if len(checkoutItems) == 0 {
@@ -1184,6 +1180,9 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 		return nil, err
 	}
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
+	if item.WaitlistedQuantity > 0 {
+		return nil, httpx.DomainError(409, httpx.CodeCartItemChanged, "encerre a espera deste produto antes de alterar sua quantidade")
+	}
 	if input.Quantity < 1 {
 		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
 	}
@@ -1226,41 +1225,18 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	// escritores leram quantity=2 com 3s de diferença; o segundo calculou o
 	// delta contra um valor obsoleto e uma unidade sumiu do carrinho enquanto
 	// uma saída a mais era lançada no ERP.
-	ok, err := s.repo.SetCartItemSplitIfUnchanged(ctx, item.ID, item.Quantity, input.Quantity, waitlistedAfter)
+	expectedItem, err := s.mutateCartItemWithSnapshot(ctx, item, func(repo *Repository) error {
+		ok, err := repo.SetCartItemSplitIfUnchanged(ctx, item.ID, item.Quantity, input.Quantity, waitlistedAfter)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return httpx.DomainError(409, httpx.CodeCartItemChanged, "o item mudou; atualize o carrinho")
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if ok && waitlistedAfter < item.WaitlistedQuantity {
-		// A parcela em fila encolheu, então as linhas de waitlist_items que ela
-		// representava precisam morrer junto.
-		//
-		// Sem isto elas ficam órfãs e a próxima promoção as reivindica: debita
-		// estoque local, emite uma SAÍDA no Tiny, e não entrega unidade a
-		// ninguém — o comprador já tinha desistido daquela parcela. É o gerador
-		// crônico do "tirei uma unidade e o estoque ficou errado".
-		//
-		// Best-effort: falhar aqui não pode desfazer a alteração que o comprador
-		// acabou de fazer, e a linha órfã é recuperável pela expiração da fila.
-		if n, cancelErr := s.integrationService.CancelWaitlistForCartProduct(ctx, cart.ID, item.ProductID); cancelErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to cancel waitlist rows freed by the quantity decrease",
-				zap.String("cart_id", cart.ID),
-				zap.String("product_id", item.ProductID),
-				zap.Error(cancelErr),
-			)
-		} else if n > 0 {
-			logger.From(ctx, s.logger).Info("waitlist rows cancelled after checkout decrease",
-				zap.String("cart_id", cart.ID),
-				zap.String("product_id", item.ProductID),
-				zap.Int("cancelled", n),
-			)
-		}
-	}
-	if !ok {
-		// Alguém alterou este item entre a leitura e a escrita. Recusar é o
-		// único caminho correto: o delta calculado não vale mais, e aplicá-lo
-		// corromperia a conta de estoque.
-		return nil, httpx.DomainError(409, httpx.CodeCartItemChanged,
-			"a quantidade deste item mudou enquanto você editava, recarregue e tente de novo")
 	}
 
 	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
@@ -1271,7 +1247,9 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 		// Roll back the local change so the buyer sees the failure clearly.
 		// Restaura as DUAS parcelas: reverter só o total deixaria a fila com o
 		// valor novo sobre um total antigo.
-		_, _ = s.repo.SetCartItemSplitIfUnchanged(ctx, item.ID, input.Quantity, item.Quantity, item.WaitlistedQuantity)
+		if restoreErr := s.restoreCartItem(ctx, item, expectedItem); restoreErr != nil {
+			logger.From(ctx, s.logger).Error("failed to restore cart prices after ERP failure", zap.String("cart_id", cart.ID), zap.Error(restoreErr))
+		}
 		// Propagate typed httpx errors verbatim (e.g., "estoque insuficiente")
 		// so the buyer sees the actual reason instead of a generic retry copy.
 		var svcErr *httpx.ServiceError
@@ -1331,11 +1309,17 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 		return nil, err
 	}
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
+	if item.WaitlistedQuantity > 0 {
+		return nil, httpx.DomainError(409, httpx.CodeCartItemChanged, "encerre a espera deste produto antes de remover o item")
+	}
 
 	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
 		return nil, err
 	}
-	if err := s.repo.DeleteCartItem(ctx, item.ID); err != nil {
+	expectedItem, err := s.mutateCartItemWithSnapshot(ctx, item, func(repo *Repository) error {
+		return repo.DeleteCartItem(ctx, item.ID)
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -1359,7 +1343,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 	)
 	if syncErr != nil {
 		// Re-create the row at the original quantity to keep state consistent.
-		if _, restoreErr := s.repo.CreateCartItem(ctx, cart.ID, item.ProductID, item.Quantity, item.UnitPrice); restoreErr != nil {
+		if restoreErr := s.restoreCartItem(ctx, item, expectedItem); restoreErr != nil {
 			logger.From(ctx, s.logger).Error("failed to restore cart item after ERP failure — manual intervention needed",
 				zap.String("cart_id", cart.ID),
 				zap.String("product_id", item.ProductID),
@@ -1479,6 +1463,11 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	}
 	currentQty := 0
 	if existing != nil {
+		// The listing omits the exact lot snapshot needed for compensation.
+		existing, err = s.repo.GetCartItem(ctx, existing.ID)
+		if err != nil {
+			return nil, err
+		}
 		currentQty = existing.Quantity
 	}
 	desiredQty := currentQty + input.Quantity
@@ -1496,12 +1485,24 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 		return nil, err
 	}
 
+	var expectedItem *cartItemMutationState
 	if existing != nil {
-		if err := s.repo.SetCartItemQuantity(ctx, existing.ID, desiredQty); err != nil {
+		expectedItem, err = s.mutateCartItemWithSnapshot(ctx, existing, func(repo *Repository) error {
+			changed, err := repo.AddCartItemQuantityAtPrice(ctx, existing.ID, currentQty, input.Quantity, cfg.UnitPrice)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				return httpx.DomainError(409, httpx.CodeCartItemChanged, "o item mudou; atualize o carrinho")
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 	} else {
-		if _, err := s.repo.CreateCartItem(ctx, cart.ID, input.ProductID, input.Quantity, cfg.UnitPrice); err != nil {
+		expectedItem, err = s.createCartItemWithSnapshot(ctx, cart.ID, input.ProductID, input.Quantity, cfg.UnitPrice)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1511,11 +1512,11 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 		input.Quantity, cfg.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
 	)
 	if syncErr != nil {
-		// Roll back. With existing != nil, restore previous qty; with new row, delete it.
-		if existing != nil {
-			_ = s.repo.SetCartItemQuantity(ctx, existing.ID, currentQty)
-		} else if rollback, _ := s.repo.FindCartItemByProduct(ctx, cart.ID, input.ProductID); rollback != nil {
-			_ = s.repo.DeleteCartItem(ctx, rollback.ID)
+		// Restore the exact old agreements only while our mutation is current.
+		// A newer addition or payment must never be overwritten by compensation.
+		rollbackErr := s.restoreCartItem(ctx, existing, expectedItem)
+		if rollbackErr != nil {
+			logger.From(ctx, s.logger).Error("failed to compensate cart addition", zap.String("cart_id", cart.ID), zap.Error(rollbackErr))
 		}
 		var svcErr *httpx.ServiceError
 		if errors.As(syncErr, &svcErr) {
@@ -1792,6 +1793,9 @@ func itemEditPolicy(byMerchant bool) bool {
 // banco para cada combinação, e a combinação que mais importa — lojista editando
 // loja com edição desligada — jamais teria teste.
 func assertCartMutable(cart *CartRow, storeToggleApplies bool, now time.Time) error {
+	if cart.PurchaseClosed {
+		return httpx.DomainError(409, httpx.CodeCartNotPayable, "esta compra foi encerrada no pedido que reúne seus carrinhos")
+	}
 	if cart.Status == "expired" {
 		return httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}

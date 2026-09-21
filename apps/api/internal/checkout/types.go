@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"livecart/apps/api/internal/cartedit"
+	"livecart/apps/api/internal/cartpricing"
 	"time"
 )
 
@@ -18,6 +19,7 @@ import (
 // "data unavailable" (older paid carts may have nothing recorded for
 // card-specific fields, since they were not persisted before this change).
 type CartForCheckoutResponse struct {
+	PurchaseClosed        bool                         `json:"purchaseClosed"`
 	ERPItemSync           *cartedit.Status             `json:"erpItemSync,omitempty"`
 	PaymentReviewRequired bool                         `json:"paymentReviewRequired"`
 	ID                    string                       `json:"id"`
@@ -121,15 +123,16 @@ type CartStoreInfo struct {
 
 // CartItemResponse represents a cart item in the checkout response
 type CartItemResponse struct {
-	ID                 string  `json:"id"`
-	ProductID          string  `json:"productId"`
-	Name               string  `json:"name"`
-	ImageURL           *string `json:"imageUrl"`
-	Keyword            *string `json:"keyword"`
-	Quantity           int     `json:"quantity"`
-	UnitPrice          int64   `json:"unitPrice"`
-	TotalPrice         int64   `json:"totalPrice"`
-	WaitlistedQuantity int     `json:"waitlistedQuantity"`
+	PriceLots          []cartpricing.Lot `json:"priceLots,omitempty"`
+	ID                 string            `json:"id"`
+	ProductID          string            `json:"productId"`
+	Name               string            `json:"name"`
+	ImageURL           *string           `json:"imageUrl"`
+	Keyword            *string           `json:"keyword"`
+	Quantity           int               `json:"quantity"`
+	UnitPrice          int64             `json:"unitPrice"`
+	TotalPrice         int64             `json:"totalPrice"`
+	WaitlistedQuantity int               `json:"waitlistedQuantity"`
 	// AvailableStock is the product.stock value at read time. The frontend
 	// combines it with MaxQuantityPerItem (cart-level cap) to disable the +
 	// button when the buyer would exceed either limit.
@@ -361,6 +364,7 @@ type WaitlistItemDetails struct {
 
 // CartDetails contains the cart data with event/store info
 type CartDetails struct {
+	PurchaseClosed          bool `json:"purchaseClosed"`
 	PaymentReviewRequired   bool
 	ID                      string
 	EventID                 string
@@ -403,6 +407,7 @@ type CartDetails struct {
 
 // CartItemDetails contains a cart item with product info
 type CartItemDetails struct {
+	PriceLots          []cartpricing.Lot `json:"priceLots,omitempty"`
 	ID                 string
 	CartID             string
 	ProductID          string
@@ -670,6 +675,7 @@ type SelectShippingMethodOutput struct {
 
 // CartRow represents a cart row from the database
 type CartRow struct {
+	PurchaseClosed        bool `json:"purchaseClosed"`
 	PaymentReviewRequired bool
 	ERPOrderStatus        string
 	ID                    string
@@ -725,6 +731,9 @@ type CartRow struct {
 
 // CartItemRow represents a cart item row from the database
 type CartItemRow struct {
+	OriginalItem       []byte
+	OriginalLots       []byte
+	PriceLots          []cartpricing.Lot `json:"priceLots,omitempty"`
 	ID                 string
 	CartID             string
 	ProductID          string

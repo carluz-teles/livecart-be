@@ -1668,6 +1668,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			return integrationSvc.RunScheduledPublish(ctx, p.JobID)
 		})
 
+		eventsServer.Register(events.WaitlistQueued, integrationSvc.ReactWaitlistQueued)
+		eventsServer.Register(events.StockReleased, integrationSvc.ReactStockReleased)
+
 		eventsServer.Register(events.ERPWebhookProcess, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
@@ -1851,7 +1854,7 @@ func eventCloseTaskID(eventID string) string { return "event-close:" + eventID }
 type waitlistCloseScheduler struct{ client *events.Client }
 
 func (s waitlistCloseScheduler) ScheduleEventWaitlistClose(ctx context.Context, eventID string, at time.Time) error {
-	return s.client.Schedule(ctx, at, events.EventWaitlistClose, "event-waitlist-close:"+eventID, struct {
+	return s.client.Schedule(ctx, at, events.EventWaitlistClose, fmt.Sprintf("event-waitlist-close:%s:%d", eventID, at.UnixMilli()), struct {
 		EventID string `json:"event_id"`
 	}{EventID: eventID})
 }

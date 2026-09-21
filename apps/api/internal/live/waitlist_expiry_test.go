@@ -74,6 +74,10 @@ func TestQuemEstaNaFilaGanhaPrazoMaiorAoFecharOEvento(t *testing.T) {
 		t.Fatalf("seed item: %v", err)
 	}
 	for i, c := range []string{naFila1, naFila2} {
+		if _, err := testPool.Exec(ctx, `INSERT INTO cart_items(cart_id, product_id, quantity, waitlisted_quantity, unit_price)
+		    VALUES ($1, $2, 1, 1, 5000)`, c, productID); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := testPool.Exec(ctx,
 			`INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle, quantity, position, status, cart_id)
 			 VALUES ($1::uuid,$2::uuid,$4::text,'@'||$4::text,1,$5::int,'waiting',$3::uuid)`,
@@ -84,6 +88,9 @@ func TestQuemEstaNaFilaGanhaPrazoMaiorAoFecharOEvento(t *testing.T) {
 	}
 
 	// Encerrar o evento é o que arma o prazo de todos.
+	if _, err := testRepo.EndEvent(context.Background(), eventID, storeID); err != nil {
+		t.Fatalf("EndEvent: %v", err)
+	}
 	finalized, err := testRepo.FinalizeCartsByEvent(ctx, eventID)
 	if err != nil {
 		t.Fatalf("FinalizeCartsByEvent: %v", err)

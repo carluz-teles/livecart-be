@@ -80,13 +80,33 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 	} else if !errors.Is(e, pgx.ErrNoRows) {
 		return result, e
 	}
-	var payable bool
-	if err := tx.QueryRow(ctx, `SELECT status NOT IN ('cancelled','expired') AND COALESCE(payment_status,'pending') NOT IN ('paid','refunded') AND erp_order_accepts_items(erp_order_status) FROM carts WHERE id=$1 FOR UPDATE`, cart.ID).Scan(&payable); err != nil {
+	// Serialize admissions and promotions by product before locking the cart.
+	// The same lock prevents a new buyer from overtaking an older waiting lot.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "waitlist_product:"+input.ProductID); err != nil {
 		return result, err
 	}
-	if !payable {
-		return result, fmt.Errorf("cart changed before accepting item")
+	var ownerCartID string
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1`, cart.ID).Scan(&ownerCartID); err != nil {
+		return result, err
 	}
+	cartIDs := []string{ownerCartID}
+	if ownerCartID != cart.ID {
+		cartIDs = append(cartIDs, cart.ID)
+	}
+	for _, id := range cartIDs {
+		var payable bool
+		var currentOwner string
+		if err = tx.QueryRow(ctx, `SELECT status IN ('active','checkout')
+            AND COALESCE(payment_status,'pending') NOT IN ('paid','refunded')
+            AND NOT payment_review_required AND NOT purchase_closed AND erp_order_accepts_items(erp_order_status),
+            COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1 FOR UPDATE`, id).Scan(&payable, &currentOwner); err != nil {
+			return result, err
+		}
+		if !payable || currentOwner != ownerCartID {
+			return result, fmt.Errorf("cart changed before accepting item")
+		}
+	}
+
 	var stock, maximum, current int
 	if err = tx.QueryRow(ctx, `SELECT p.stock,COALESCE(s.cart_max_quantity_per_item,0)
         FROM products p JOIN stores s ON s.id=p.store_id
@@ -106,18 +126,23 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 		return result, nil
 	}
 	available := min(quantity, max(0, stock))
-	waiting := quantity - available
-	var alreadyWaiting bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM waitlist_items WHERE event_id=$1 AND product_id=$2 AND platform_user_id=$3 AND status='waiting')`, input.EventID, input.ProductID, input.PlatformUserID).Scan(&alreadyWaiting); err != nil {
+	var hasOlderWaiting bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM waitlist_items wi
+        JOIN carts c ON c.id=wi.cart_id JOIN live_events e ON e.id=wi.event_id
+        LEFT JOIN carts host ON host.id=c.joined_to_cart_id
+        WHERE wi.product_id=$1 AND e.store_id=$2 AND wi.status='waiting' AND wi.quantity>0
+          AND c.status IN ('active','checkout')
+          AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
+          AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+          AND (host.id IS NULL OR (host.status IN ('active','checkout')
+            AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
+            AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now()))))`, input.ProductID, input.StoreID).Scan(&hasOlderWaiting); err != nil {
 		return result, err
 	}
-	if alreadyWaiting {
-		waiting = 0
+	if hasOlderWaiting {
+		available = 0
 	}
-	if available+waiting == 0 {
-		result.SkipReason = "already_waitlisted"
-		return result, nil
-	}
+	waiting := quantity - available
 	if available > 0 {
 		if _, err = tx.Exec(ctx, `UPDATE products SET stock=stock-$2,erp_seq=erp_seq+1,updated_at=now() WHERE id=$1`, input.ProductID, available); err != nil {
 			return result, err
@@ -152,9 +177,9 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 		}
 	}
 	if waiting > 0 {
-		_, err = tx.Exec(ctx, `INSERT INTO waitlist_items(event_id,product_id,platform_user_id,platform_handle,quantity,position,cart_id)
-            VALUES ($1,$2,$3,$4,$5,(SELECT COALESCE(MAX(position),0)+1 FROM waitlist_items WHERE event_id=$1 AND product_id=$2),$6)`,
-			input.EventID, input.ProductID, input.PlatformUserID, input.PlatformHandle, waiting, cart.ID)
+		_, err = tx.Exec(ctx, `INSERT INTO waitlist_items(event_id,product_id,platform_user_id,platform_handle,quantity,position,cart_id,unit_price,source_command)
+            VALUES ($1,$2,$3,$4,$5,(SELECT COALESCE(MAX(position),0)+1 FROM waitlist_items WHERE event_id=$1 AND product_id=$2),$6,$7,NULLIF($8,''))`,
+			input.EventID, input.ProductID, input.PlatformUserID, input.PlatformHandle, waiting, cart.ID, input.ProductPrice, commentID)
 		if err != nil {
 			return result, err
 		}
@@ -175,6 +200,17 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 	if err = events.Emit(ctx, qtx, events.Envelope{Name: events.CartItemAdded, Source: events.SourceInternal,
 		DedupKey: fmt.Sprintf("comment.item:%s:%s", commentID, input.ProductID), Payload: payload}); err != nil {
 		return result, err
+	}
+	if waiting > 0 {
+		if err = events.EmitInternal(ctx, qtx, events.WaitlistQueued,
+			fmt.Sprintf("waitlist.queued:%s:%s", commentID, input.ProductID), struct {
+				StoreID   string `json:"store_id"`
+				EventID   string `json:"event_id"`
+				ProductID string `json:"product_id"`
+				CartID    string `json:"cart_id"`
+			}{StoreID: input.StoreID, EventID: input.EventID, ProductID: input.ProductID, CartID: cart.ID}); err != nil {
+			return result, err
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return result, err

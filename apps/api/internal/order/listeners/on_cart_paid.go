@@ -125,29 +125,27 @@ func (l *Listener) createPaidOrder(
 		return fmt.Errorf("order OnCartPaid: loading cart items: %w", err)
 	}
 
-	// Log de atribuição (RN-12), agrupado por produto. É o que permite repartir
-	// a quantidade final de cada item entre as transmissões que a venderam —
-	// sem ele o pedido herdaria o first-touch de cart_items e "quanto a live de
-	// terça faturou" seria sempre creditado à primeira transmissão.
-	//
-	// Falha aqui NÃO derruba o selamento: um pedido sem atribuição é muito
-	// melhor que uma venda paga que não vira pedido. Cai para uma linha por
-	// produto com session_id NULL, que é exatamente o comportamento anterior.
-	additionsByProduct := map[uuid.UUID][]live.CartItemAddition{}
-	if additions, aerr := l.queries.ListCartItemEventsForCart(ctx, cid); aerr != nil {
-		log.Warn("OnCartPaid: log de atribuicao indisponivel, selando sem sessao", zap.Error(aerr))
-	} else {
+	// Only the legacy aggregate lots need log-based allocation. Their first-touch
+	// session is not evidence that all units came from that transmission.
+	legacyAdditions := make(map[string][]live.CartItemAddition)
+	needsLegacy := false
+	for _, item := range items {
+		needsLegacy = needsLegacy || item.AttributionFromLog
+	}
+	if needsLegacy {
+		additions, err := l.queries.ListCartItemEventsForCart(ctx, cid)
+		if err != nil {
+			return fmt.Errorf("order OnCartPaid: loading legacy attribution: %w", err)
+		}
 		for _, a := range additions {
-			var sessionID string
+			sessionID := ""
 			if a.SessionID.Valid {
 				sessionID = uuidStr(a.SessionID)
 			}
-			additionsByProduct[a.ProductID.Bytes] = append(additionsByProduct[a.ProductID.Bytes],
-				live.CartItemAddition{
-					SessionID: sessionID,
-					Quantity:  int(a.Quantity),
-					UnitPrice: a.UnitPrice,
-				})
+			key := uuidStr(a.ProductID)
+			legacyAdditions[key] = append(legacyAdditions[key], live.CartItemAddition{
+				SessionID: sessionID, Quantity: int(a.Quantity), UnitPrice: a.UnitPrice,
+			})
 		}
 	}
 
@@ -189,40 +187,28 @@ func (l *Listener) createPaidOrder(
 	}
 
 	for _, item := range items {
-		// A quantidade do carrinho é a verdade; o log só diz de ONDE ela veio.
-		// AllocateBySession garante que a soma das linhas geradas é exatamente
-		// item.Quantity — é isso que faz a receita por sessão fechar com o
-		// total do pedido (RN-29).
-		allocations := live.AllocateBySession(int(item.Quantity), additionsByProduct[item.ProductID.Bytes])
-		if len(allocations) == 0 {
-			// Sem log e sem quantidade não há o que selar; com quantidade mas
-			// sem log o alocador já devolve uma linha sem sessão.
-			continue
+		sessionID := ""
+		if item.SessionID.Valid {
+			sessionID = uuidStr(item.SessionID)
 		}
-
-		for _, alloc := range allocations {
-			var sessionID pgtype.UUID
-			if alloc.SessionID != "" {
-				parsed, perr := uuid.Parse(alloc.SessionID)
-				if perr != nil {
-					return fmt.Errorf("order OnCartPaid: session id invalido %q: %w", alloc.SessionID, perr)
+		allocations := []live.SessionAllocation{{SessionID: sessionID, Quantity: int(item.Quantity), UnitPrice: item.UnitPrice}}
+		if item.AttributionFromLog {
+			allocations = live.AllocateBySession(int(item.Quantity), legacyAdditions[uuidStr(item.ProductID)])
+		}
+		for _, allocation := range allocations {
+			var origin pgtype.UUID
+			if allocation.SessionID != "" {
+				parsed, err := parseUUID(allocation.SessionID)
+				if err != nil {
+					return err
 				}
-				sessionID = pgtype.UUID{Bytes: parsed, Valid: true}
+				origin = parsed
 			}
-
 			if err := qtx.InsertOrderItem(ctx, sqlc.InsertOrderItemParams{
-				OrderID:     orderRow.ID,
-				ProductID:   item.ProductID,
-				ProductName: item.ProductName,
-				Quantity:    int32(alloc.Quantity),
-				// O preço do pedido é o do carrinho no pagamento. O do log
-				// serve só para separar linhas quando o preço mudou entre as
-				// adições; usá-lo aqui mudaria o total do pedido.
-				UnitPrice: item.UnitPrice,
-				SessionID: sessionID,
+				OrderID: orderRow.ID, ProductID: item.ProductID, ProductName: item.ProductName,
+				Quantity: int32(allocation.Quantity), UnitPrice: item.UnitPrice, SessionID: origin,
 			}); err != nil {
-				return fmt.Errorf("order OnCartPaid: insert order_item product=%s: %w",
-					uuidStr(item.ProductID), err)
+				return fmt.Errorf("order OnCartPaid: insert order_item product=%s: %w", uuidStr(item.ProductID), err)
 			}
 		}
 	}
