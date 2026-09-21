@@ -82,23 +82,23 @@ func TestFilaNaoExpiraComEventoAberto(t *testing.T) {
 
 // Contraprova: com o evento ENCERRADO, o TTL vale e a promoção vencida expira
 // normalmente (é o período de recuperação pós-fechamento).
-func TestFilaExpiraComEventoEncerrado(t *testing.T) {
+func TestFilaPromovidaNaoExpiraSeparadamenteComEventoEncerrado(t *testing.T) {
 	requireDB(t)
 	_, _, cartID := seedPromocaoVencida(t, "ended", time.Now().UTC().Add(-24*time.Hour))
 
-	if !idsExpirados(t)[cartID] {
-		t.Fatal("promoção vencida de EVENTO ENCERRADO NÃO expirou — a fila precisa andar no pós-fechamento")
+	if idsExpirados(t)[cartID] {
+		t.Fatal("produto promovido expirou separado do carrinho após o evento")
 	}
 }
 
 // Borda: evento ainda 'active' no status mas cujo ends_at JÁ passou (janela
 // entre o fim e o sweep que marca 'ended'). O TTL vale — o evento acabou de
 // fato, mesmo que o rótulo ainda não tenha sido atualizado.
-func TestFilaExpiraQuandoEndsAtJaPassouMesmoStatusAtivo(t *testing.T) {
+func TestFilaPromovidaNaoExpiraSeparadamenteAposEndsAt(t *testing.T) {
 	requireDB(t)
 	_, _, cartID := seedPromocaoVencida(t, "active", time.Now().UTC().Add(-10*time.Minute))
 
-	if !idsExpirados(t)[cartID] {
-		t.Fatal("evento com ends_at no passado deve permitir expiração da fila mesmo com status ainda 'active'")
+	if idsExpirados(t)[cartID] {
+		t.Fatal("produto promovido não possui TTL separado, mesmo depois do evento")
 	}
 }

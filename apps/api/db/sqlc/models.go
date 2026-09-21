@@ -141,6 +141,13 @@ type Cart struct {
 	ErpItemsRetryAt       pgtype.Timestamptz `json:"erp_items_retry_at"`
 	PaymentReviewRequired bool               `json:"payment_review_required"`
 	PixCancelLeaseUntil   pgtype.Timestamptz `json:"pix_cancel_lease_until"`
+	// Whether stock was still awaited at E. NULL means the legacy history cannot prove eligibility.
+	WaitlistExtraEligible pgtype.Bool `json:"waitlist_extra_eligible"`
+	// Existing deadline at migration, used only when historical E/eligibility cannot be reconstructed. Never an invented event close.
+	DeadlineConfigBaseAt   pgtype.Timestamptz `json:"deadline_config_base_at"`
+	DeadlineConfigXMinutes pgtype.Int4        `json:"deadline_config_x_minutes"`
+	DeadlineConfigYMinutes pgtype.Int4        `json:"deadline_config_y_minutes"`
+	PurchaseClosed         bool               `json:"purchase_closed"`
 }
 
 type CartErpEdit struct {
@@ -201,6 +208,18 @@ type CartItemEvent struct {
 	PlatformCommentID  pgtype.Text        `json:"platform_comment_id"`
 	WaitlistedQuantity int32              `json:"waitlisted_quantity"`
 	IsNewCart          bool               `json:"is_new_cart"`
+}
+
+type CartItemPriceLot struct {
+	ID                 pgtype.UUID        `json:"id"`
+	Sequence           int64              `json:"sequence"`
+	CartItemID         pgtype.UUID        `json:"cart_item_id"`
+	Quantity           int32              `json:"quantity"`
+	WaitlistedQuantity int32              `json:"waitlisted_quantity"`
+	UnitPrice          int64              `json:"unit_price"`
+	SessionID          pgtype.UUID        `json:"session_id"`
+	AttributionFromLog bool               `json:"attribution_from_log"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 }
 
 // Append-only log of cart item mutations during checkout (buyer or merchant driven).
@@ -520,7 +539,7 @@ type LiveEvent struct {
 	FreeShipping bool `json:"free_shipping"`
 	// Discount percent applied at checkout when the buyer pays with Pix (0-100). 0 disables the feature.
 	PixDiscountPercent int32 `json:"pix_discount_percent"`
-	// Minutos extras que um cliente promovido da waitlist (status=notified) tem para finalizar o checkout antes de devolver o estoque para o próximo da fila.
+	// Additional cart deadline Y, in minutes (0..43200), granted to carts awaiting stock at commercial close. Never an item TTL.
 	WaitlistNotifiedTtlMinutes int32 `json:"waitlist_notified_ttl_minutes"`
 	// D5/RN-05: TETO da campanha, obrigatorio. E ele que garante que nenhum carrinho fica sem prazo — durante o evento expires_at fica NULL por definicao (RN-04) e o relogio so comeca quando a janela fecha.
 	EndsAt pgtype.Timestamptz `json:"ends_at"`
@@ -530,6 +549,8 @@ type LiveEvent struct {
 	StartsAt pgtype.Timestamptz `json:"starts_at"`
 	// Optional catalog shown on the buyer catalog page for this event. NULL = no catalog associated.
 	CatalogID pgtype.UUID `json:"catalog_id"`
+	// Immutable commercial close E; scheduled close uses ends_at even when its worker runs late. NULL on legacy events without evidence.
+	CommercialClosedAt pgtype.Timestamptz `json:"commercial_closed_at"`
 }
 
 type LiveSession struct {
@@ -1081,6 +1102,13 @@ type WaitlistItem struct {
 	CartID             pgtype.UUID        `json:"cart_id"`
 	NotificationSentAt pgtype.Timestamptz `json:"notification_sent_at"`
 	CancelledAt        pgtype.Timestamptz `json:"cancelled_at"`
+	UnitPrice          int64              `json:"unit_price"`
+	OriginalQuantity   int32              `json:"original_quantity"`
+	FulfilledQuantity  int32              `json:"fulfilled_quantity"`
+	CancelledQuantity  int32              `json:"cancelled_quantity"`
+	SourceCommand      pgtype.Text        `json:"source_command"`
+	QueueSequence      pgtype.Int8        `json:"queue_sequence"`
+	PriceLotID         pgtype.UUID        `json:"price_lot_id"`
 }
 
 type WebhookEvent struct {

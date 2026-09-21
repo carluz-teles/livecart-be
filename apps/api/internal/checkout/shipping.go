@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"livecart/apps/api/internal/cartpricing"
 	"time"
 
 	"github.com/google/uuid"
@@ -129,8 +130,8 @@ func (r *Repository) GetShippingContextByToken(ctx context.Context, pool *pgxpoo
 			COALESCE(p.sku, ''),
 			COALESCE(p.keyword, ''),
 			p.name,
-			(ci.quantity - COALESCE(ci.waitlisted_quantity, 0)) AS available_qty,
-			COALESCE(ci.unit_price, 0),
+			(pl.quantity - pl.waitlisted_quantity) AS available_qty,
+			pl.unit_price,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -138,9 +139,10 @@ func (r *Repository) GetShippingContextByToken(ctx context.Context, pool *pgxpoo
 			COALESCE(p.package_format, 'box'),
 			COALESCE(p.insurance_value_cents, p.price, 0)
 		FROM cart_items ci
+ JOIN cart_item_price_lots pl ON pl.cart_item_id=ci.id AND pl.quantity>pl.waitlisted_quantity
 		JOIN products p ON p.id = ci.product_id
 		WHERE ci.cart_id = $1
-		ORDER BY ci.id
+		ORDER BY ci.id,pl.sequence
 	`
 	cartUID, err := uuid.Parse(ctxOut.CartID)
 	if err != nil {
@@ -717,7 +719,7 @@ func buildSummary(items []CartItemRow, sel *CartShippingSelection, couponDiscoun
 	for _, it := range items {
 		available := it.Quantity - it.WaitlistedQuantity
 		if available > 0 {
-			subtotal += it.UnitPrice * int64(available)
+			subtotal += cartpricing.Available(it.PriceLots, it.Quantity, it.WaitlistedQuantity, it.UnitPrice)
 			totalItems += available
 		}
 	}

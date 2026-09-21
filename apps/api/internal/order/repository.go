@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"livecart/apps/api/internal/cartpricing"
 	"strings"
 	"time"
 
@@ -444,7 +445,8 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
 			COALESCE(p.length_cm, 0),
-			COALESCE(p.package_format, 'box')
+			COALESCE(p.package_format, 'box'),
+ '[]'::jsonb AS price_lots
 		FROM order_items oi
 		JOIN orders o   ON o.id = oi.order_id
 		JOIN products p ON p.id = oi.product_id
@@ -468,7 +470,8 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
 			COALESCE(p.length_cm, 0),
-			COALESCE(p.package_format, 'box')
+			COALESCE(p.package_format, 'box'),
+ cart_item_price_lots_json(ci.id) AS price_lots
 		FROM cart_items ci
 		JOIN products p ON p.id = ci.product_id
 		WHERE ci.cart_id = $1
@@ -484,6 +487,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 	var items []OrderItemRow
 	for rows.Next() {
 		var item OrderItemRow
+		var priceLots []byte
 		err := rows.Scan(
 			&item.ID,
 			&item.CartID,
@@ -501,9 +505,14 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			&item.WidthCm,
 			&item.LengthCm,
 			&item.PackageFormat,
+			&priceLots,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning order item row: %w", err)
+		}
+		item.PriceLots, err = cartpricing.Decode(priceLots)
+		if err != nil {
+			return nil, fmt.Errorf("decoding order prices: %w", err)
 		}
 		items = append(items, item)
 	}
@@ -1212,16 +1221,14 @@ func (r *Repository) ListActiveWaitlist(ctx context.Context, cartID string) ([]O
 			ProductName: row.ProductName,
 			Keyword:     row.ProductKeyword,
 			Quantity:    int(row.Quantity),
-			Position:    int(row.Position),
+			Position:    int(row.QueuePosition),
 			Status:      row.Status,
 		}
 		if row.ProductImageUrl.Valid {
 			img := row.ProductImageUrl.String
 			item.ProductImage = &img
 		}
-		if row.ProductPrice.Valid {
-			item.UnitPrice = row.ProductPrice.Int64
-		}
+		item.UnitPrice = row.ProductPrice
 		if row.CreatedAt.Valid {
 			item.CreatedAt = row.CreatedAt.Time
 		}
@@ -1287,7 +1294,7 @@ func (r *Repository) GetUpsellSummary(ctx context.Context, orderID string) (*Ord
 			COALESCE(c.initial_subtotal_cents, 0)::bigint                                AS initial_subtotal_cents,
 			c.initial_snapshot_taken_at,
 			COALESCE((
-				SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+				SELECT SUM(cart_item_available_total(ci.id))
 				FROM cart_items ci
 				WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
 			), 0)::bigint                                                                AS final_subtotal_cents,

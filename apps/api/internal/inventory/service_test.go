@@ -23,6 +23,9 @@ import (
 // fakeRepo implementa inventory.InventoryRepository por inteiro (B3a + B3b),
 // gravando as chamadas e devolvendo valores/erros configuráveis.
 type fakeRepo struct {
+	promotions   []*inventory.WaitlistPromotion
+	promotionErr error
+
 	// B3a
 	listRows   []inventory.ListActiveByCartRow
 	listErr    error
@@ -249,200 +252,74 @@ func TestService_ListActiveWaitlistByCart(t *testing.T) {
 	})
 }
 
-func TestService_CancelWaitlistItem(t *testing.T) {
-	t.Run("notified with cart reverses reservation and promotes queue", func(t *testing.T) {
-		repo := &fakeRepo{
-			item: &inventory.WaitlistItemRow{Status: "notified", ProductID: "p1", Quantity: 3, EventID: "e1"},
-			cart: &inventory.CartRef{StoreID: "s1", PlatformHandle: "buyer"},
-			// promotion after cancel finds an empty queue → no-op
-			claim: nil,
-		}
-		collab := &fakeCollab{}
-		svc := newTestService(repo, collab)
-
-		changed, err := svc.CancelWaitlistItem(context.Background(), "wl-1", "cart-1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !changed {
-			t.Fatalf("changed = false, want true")
-		}
-		if repo.cancelCalls != 1 || repo.decCalls != 1 {
-			t.Fatalf("cancelCalls=%d decCalls=%d, want 1 and 1", repo.cancelCalls, repo.decCalls)
-		}
-		if collab.adjustCalls != 1 || collab.adjustDelta != -3 {
-			t.Fatalf("adjustCalls=%d delta=%d, want 1 and -3", collab.adjustCalls, collab.adjustDelta)
-		}
-	})
-
-	t.Run("waiting only cancels, no stock movement", func(t *testing.T) {
-		repo := &fakeRepo{item: &inventory.WaitlistItemRow{Status: "waiting", ProductID: "p1", Quantity: 1}}
-		collab := &fakeCollab{}
-		svc := newTestService(repo, collab)
-
-		changed, err := svc.CancelWaitlistItem(context.Background(), "wl-1", "cart-1")
-		if err != nil || !changed {
-			t.Fatalf("changed=%v err=%v, want true nil", changed, err)
-		}
-		if repo.cancelCalls != 1 || repo.decCalls != 0 || collab.adjustCalls != 0 {
-			t.Fatalf("unexpected side effects: cancel=%d dec=%d adjust=%d",
-				repo.cancelCalls, repo.decCalls, collab.adjustCalls)
-		}
-	})
-
-	t.Run("missing item is a no-op", func(t *testing.T) {
-		repo := &fakeRepo{item: nil}
-		svc := newTestService(repo, &fakeCollab{})
-
-		changed, err := svc.CancelWaitlistItem(context.Background(), "wl-1", "cart-1")
-		if err != nil || changed {
-			t.Fatalf("changed=%v err=%v, want false nil", changed, err)
-		}
-		if repo.cancelCalls != 0 {
-			t.Fatalf("cancelCalls=%d, want 0 (nothing to cancel)", repo.cancelCalls)
-		}
-	})
-
-	t.Run("load error is wrapped and propagated", func(t *testing.T) {
-		want := errors.New("db down")
-		repo := &fakeRepo{getItemErr: want}
-		svc := newTestService(repo, &fakeCollab{})
-
-		changed, err := svc.CancelWaitlistItem(context.Background(), "wl-1", "cart-1")
-		if changed {
-			t.Fatalf("changed = true, want false")
-		}
-		if !errors.Is(err, want) {
-			t.Fatalf("err = %v, want wrap of %v", err, want)
-		}
-	})
+func (r *fakeRepo) PromoteNextWaitlistEntry(context.Context, string, string) (*inventory.WaitlistPromotion, error) {
+	if r.promotionErr != nil {
+		return nil, r.promotionErr
+	}
+	if len(r.promotions) == 0 {
+		return nil, nil
+	}
+	next := r.promotions[0]
+	r.promotions = r.promotions[1:]
+	return next, nil
+}
+func (r *fakeRepo) CancelWaitingRequest(_ context.Context, _ string, cartID string) (bool, error) {
+	if r.getItemErr != nil {
+		return false, r.getItemErr
+	}
+	if r.cancelErr != nil {
+		return false, r.cancelErr
+	}
+	if r.item == nil || r.item.Status != "waiting" {
+		return false, nil
+	}
+	r.cancelCalls++
+	if r.waitlistedDecrements == nil {
+		r.waitlistedDecrements = map[string]int{}
+	}
+	r.waitlistedDecrements[cartID+"|"+r.item.ProductID] += r.item.Quantity
+	return true, nil
 }
 
-// baseClaim returns a fully-populated claimed row for the promotion scenarios.
-func baseClaim(qty int) *inventory.WaitlistItemRow {
-	return &inventory.WaitlistItemRow{
-		ID: "wl-1", EventID: "e1", ProductID: "p1", CartID: "cart-1",
-		PlatformUserID: "u1", PlatformHandle: "buyer", Quantity: qty, Status: "notified",
+func TestService_CancelWaitlistItem(t *testing.T) {
+	for _, status := range []string{"waiting", "notified", "fulfilled", "expired", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			repo := &fakeRepo{item: &inventory.WaitlistItemRow{Status: status, Quantity: 2}}
+			collab := &fakeCollab{}
+			changed, err := newTestService(repo, collab).CancelWaitlistItem(context.Background(), "w1", "c1")
+			if err != nil || changed != (status == "waiting") {
+				t.Fatalf("changed=%v error=%v", changed, err)
+			}
+			if collab.adjustCalls != 0 || repo.decCalls != 0 {
+				t.Fatal("leaving queue changed reserved stock")
+			}
+		})
 	}
 }
 
 func TestService_ProcessWaitlistForProduct(t *testing.T) {
-	t.Run("empty queue is a no-op", func(t *testing.T) {
-		repo := &fakeRepo{claim: nil}
+	t.Run("drains committed allocations without changing deadlines or sending a false DM", func(t *testing.T) {
+		repo := &fakeRepo{promotions: []*inventory.WaitlistPromotion{
+			{CartID: "first", EventID: "old-event", Quantity: 1, UnitPrice: 1000},
+			{CartID: "second", EventID: "new-event", Quantity: 2, UnitPrice: 2000},
+		}}
 		collab := &fakeCollab{}
-		newTestService(repo, collab).ProcessWaitlistForProduct(context.Background(), "e1", "p1", "s1")
-
-		if repo.lockCalls != 0 || repo.emitNotified != 0 {
-			t.Fatalf("lockCalls=%d emitNotified=%d, want 0 0", repo.lockCalls, repo.emitNotified)
+		err := newTestService(repo, collab).ProcessWaitlistProduct(context.Background(), "s1", "p1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if collab.reserveCalls != 2 {
+			t.Fatalf("ERP calls=%d want2", collab.reserveCalls)
+		}
+		if repo.extendCalls != 0 || collab.scheduleN != 0 || collab.notifyN != 0 {
+			t.Fatal("promotion changed deadline or claimed a notification")
 		}
 	})
-
-	t.Run("stock gate miss reverts WITHOUT touching the lock", func(t *testing.T) {
-		repo := &fakeRepo{claim: baseClaim(2), taken: 0}
-		collab := &fakeCollab{}
-		newTestService(repo, collab).ProcessWaitlistForProduct(context.Background(), "e1", "p1", "s1")
-
-		if repo.lockCalls != 0 {
-			t.Fatalf("lockCalls=%d, want 0 (gate must run before the lock)", repo.lockCalls)
-		}
-		if repo.revertCalls != 1 || repo.incrementCalls != 0 {
-			t.Fatalf("revertCalls=%d incrementCalls=%d, want 1 0 (nothing was taken)", repo.revertCalls, repo.incrementCalls)
-		}
-		if repo.emitNotified != 0 {
-			t.Fatalf("emitNotified=%d, want 0", repo.emitNotified)
-		}
-	})
-
-	t.Run("lock contention returns the unit and reverts the claim", func(t *testing.T) {
-		repo := &fakeRepo{claim: baseClaim(1), taken: 1, lockAcquired: false}
-		collab := &fakeCollab{}
-		newTestService(repo, collab).ProcessWaitlistForProduct(context.Background(), "e1", "p1", "s1")
-
-		if repo.lockCalls == 0 {
-			t.Fatalf("lockCalls=0, want the retry to have attempted the lock")
-		}
-		if repo.incrementCalls != 1 || repo.revertCalls != 1 {
-			t.Fatalf("incrementCalls=%d revertCalls=%d, want 1 1 (unit returned, buyer kept)", repo.incrementCalls, repo.revertCalls)
-		}
-		if repo.emitNotified != 0 || collab.notifyN != 0 {
-			t.Fatalf("emitNotified=%d notifyN=%d, want 0 0 (no promotion)", repo.emitNotified, collab.notifyN)
-		}
-	})
-
-	t.Run("terminal cart under the lock defers the buyer", func(t *testing.T) {
-		repo := &fakeRepo{
-			claim: baseClaim(1), taken: 1, lockAcquired: true,
-			snap: &inventory.CartExpirySnapshot{Status: "active", PaymentStatus: "paid"}, // terminal
-		}
-		collab := &fakeCollab{}
-		newTestService(repo, collab).ProcessWaitlistForProduct(context.Background(), "e1", "p1", "s1")
-
-		if repo.incrementCalls != 1 || repo.revertCalls != 1 {
-			t.Fatalf("incrementCalls=%d revertCalls=%d, want 1 1 (deferred, unit returned)", repo.incrementCalls, repo.revertCalls)
-		}
-		if repo.emitNotified != 0 {
-			t.Fatalf("emitNotified=%d, want 0 (no promotion on terminal cart)", repo.emitNotified)
-		}
-	})
-
-	t.Run("full promotion emits NoteReserved+EmitWaitlistNotified exactly once", func(t *testing.T) {
-		repo := &fakeRepo{
-			claim: baseClaim(2), taken: 2, lockAcquired: true,
-			snap:    &inventory.CartExpirySnapshot{Status: "active", PaymentStatus: "pending"},
-			product: &inventory.ProductRef{Price: 1000, Name: "Camisa", Keyword: "cam"},
-			found:   true,
-		}
-		collab := &fakeCollab{}
-		newTestService(repo, collab).ProcessWaitlistForProduct(context.Background(), "e1", "p1", "s1")
-
-		if repo.emitNotified != 1 {
-			t.Fatalf("emitNotified=%d, want 1", repo.emitNotified)
-		}
-		if repo.incrementCalls != 0 || repo.revertCalls != 0 {
-			t.Fatalf("incrementCalls=%d revertCalls=%d, want 0 0 (no rollback on success)", repo.incrementCalls, repo.revertCalls)
-		}
-		if repo.requeueCalls != 0 {
-			t.Fatalf("requeueCalls=%d, want 0 (full promotion)", repo.requeueCalls)
-		}
-		if collab.reserveCalls != 1 || collab.scheduleN != 1 || collab.notifyN != 1 {
-			t.Fatalf("reserve=%d schedule=%d notify=%d, want 1 1 1", collab.reserveCalls, collab.scheduleN, collab.notifyN)
-		}
-	})
-
-	t.Run("partial promotion requeues the remainder", func(t *testing.T) {
-		repo := &fakeRepo{
-			claim: baseClaim(3), taken: 2, lockAcquired: true,
-			snap:    &inventory.CartExpirySnapshot{Status: "active", PaymentStatus: "pending"},
-			product: &inventory.ProductRef{Price: 1000, Name: "Camisa", Keyword: "cam"},
-			found:   true,
-		}
-		collab := &fakeCollab{}
-		newTestService(repo, collab).ProcessWaitlistForProduct(context.Background(), "e1", "p1", "s1")
-
-		if repo.requeueCalls != 1 || repo.requeueRem != 1 {
-			t.Fatalf("requeueCalls=%d requeueRem=%d, want 1 and 1", repo.requeueCalls, repo.requeueRem)
-		}
-		if repo.emitNotified != 1 {
-			t.Fatalf("emitNotified=%d, want 1", repo.emitNotified)
-		}
-	})
-
-	t.Run("missing cart item with no live service reverts defensively", func(t *testing.T) {
-		repo := &fakeRepo{
-			claim: baseClaim(1), taken: 1, lockAcquired: true,
-			snap:    &inventory.CartExpirySnapshot{Status: "active", PaymentStatus: "pending"},
-			product: &inventory.ProductRef{Price: 1000, Name: "Camisa", Keyword: "cam"},
-			found:   false, // cart item was deleted → fallback path
-		}
-		collab := &fakeCollab{}
-		// newTestService injects live=nil → the defensive nil-guard must revert.
-		newTestService(repo, collab).ProcessWaitlistForProduct(context.Background(), "e1", "p1", "s1")
-
-		if repo.incrementCalls != 1 || repo.revertCalls != 1 {
-			t.Fatalf("incrementCalls=%d revertCalls=%d, want 1 1 (defensive revert)", repo.incrementCalls, repo.revertCalls)
-		}
-		if repo.emitNotified != 0 || collab.notifyN != 0 {
-			t.Fatalf("emitNotified=%d notifyN=%d, want 0 0 (no promotion)", repo.emitNotified, collab.notifyN)
+	t.Run("durable caller gets contention errors for retry", func(t *testing.T) {
+		repo := &fakeRepo{promotionErr: inventory.ErrWaitlistPromotionDeferred}
+		err := newTestService(repo, &fakeCollab{}).ProcessWaitlistProduct(context.Background(), "s1", "p1")
+		if !errors.Is(err, inventory.ErrWaitlistPromotionDeferred) {
+			t.Fatalf("error=%v", err)
 		}
 	})
 }
@@ -468,34 +345,17 @@ func TestService_ExpireCart(t *testing.T) {
 }
 
 func TestService_ExpireNotifiedWaitlistSweep(t *testing.T) {
-	t.Run("continues after a per-item error and reports the first", func(t *testing.T) {
-		boom := errors.New("update failed")
-		repo := &fakeRepo{
-			// CartID empty → skip the cart branch, isolating the status-flip gate.
-			notifiedList: []inventory.WaitlistItemRow{
-				{ID: "a", EventID: "e1", ProductID: "p1"},
-				{ID: "b", EventID: "e1", ProductID: "p1"},
-			},
-			updateStatusErr: []error{boom, nil}, // first item fails, second succeeds
-		}
-		processed, err := newTestService(repo, &fakeCollab{}).ExpireNotifiedWaitlistSweep(context.Background())
-
-		if processed != 1 {
-			t.Fatalf("processed=%d, want 1 (second item still handled)", processed)
-		}
-		if !errors.Is(err, boom) {
-			t.Fatalf("err=%v, want wrap of %v", err, boom)
-		}
-		if repo.updateCalls != 2 {
-			t.Fatalf("updateCalls=%d, want 2 (sweep did not stop at the first error)", repo.updateCalls)
-		}
-	})
-
-	t.Run("list error is wrapped", func(t *testing.T) {
-		want := errors.New("db down")
-		repo := &fakeRepo{notifiedListErr: want}
-		if _, err := newTestService(repo, &fakeCollab{}).ExpireNotifiedWaitlistSweep(context.Background()); !errors.Is(err, want) {
-			t.Fatalf("err=%v, want %v", err, want)
-		}
-	})
+	repo := &fakeRepo{notifiedList: []inventory.WaitlistItemRow{{ID: "old", Status: "notified"}}}
+	collab := &fakeCollab{}
+	svc := newTestService(repo, collab)
+	count, err := svc.ExpireNotifiedWaitlistSweep(context.Background())
+	if err != nil || count != 0 {
+		t.Fatalf("count=%d error=%v", count, err)
+	}
+	if err := svc.ExpireNotifiedWaitlistItem(context.Background(), repo.notifiedList[0]); err != nil {
+		t.Fatal(err)
+	}
+	if repo.decCalls != 0 || repo.updateCalls != 0 || collab.adjustCalls != 0 {
+		t.Fatal("legacy expiry job mutated a promoted item")
+	}
 }

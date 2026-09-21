@@ -22,10 +22,13 @@ package live
 // OpenCartItem é a quantidade final de um produto num carrinho que entra na
 // projeção. Espelha uma linha de ListOpenCartItemsByEvent.
 type OpenCartItem struct {
-	CartID    string
-	ProductID string
-	Quantity  int
-	UnitPrice int64
+	CartID         string
+	ProductID      string
+	Quantity       int
+	UnitPrice      int64
+	PriceLot       bool
+	SessionID      string
+	SessionEventID string
 	// CartEventID é o evento ÂNCORA do carrinho. Serve de destino das unidades
 	// sem transmissão (session vazia) na atribuição por evento de origem.
 	CartEventID string
@@ -81,7 +84,7 @@ func ProjectBySession(items []OpenCartItem, additions []CartItemAdditionRow) []S
 	var order []string
 
 	for _, item := range items {
-		for _, alloc := range AllocateBySession(item.Quantity, log[cartProduct{item.CartID, item.ProductID}]) {
+		for _, alloc := range projectionAllocations(item, log[cartProduct{item.CartID, item.ProductID}]) {
 			a := bySession[alloc.SessionID]
 			if a == nil {
 				a = &acc{carts: map[string]struct{}{}}
@@ -146,11 +149,14 @@ func ProjectBySessionForEvent(items []OpenCartItem, additions []CartItemAddition
 	var order []string
 
 	for _, item := range items {
-		for _, alloc := range AllocateBySession(item.Quantity, log[cartProduct{item.CartID, item.ProductID}]) {
+		for _, alloc := range projectionAllocations(item, log[cartProduct{item.CartID, item.ProductID}]) {
 			// Evento de origem desta fatia.
 			originEvent := item.CartEventID // adição sem sessão cai no âncora
 			if alloc.SessionID != "" {
 				originEvent = sessionEvent[alloc.SessionID]
+				if item.PriceLot {
+					originEvent = item.SessionEventID
+				}
 			}
 			if originEvent != targetEventID {
 				continue // fatia de outro evento (carrinho VIP cross-evento)
@@ -178,4 +184,13 @@ func ProjectBySessionForEvent(items []OpenCartItem, additions []CartItemAddition
 		})
 	}
 	return out
+}
+
+// Price lots already encode origin and remaining quantity. Legacy pure callers
+// can still supply aggregate rows together with their addition log.
+func projectionAllocations(item OpenCartItem, additions []CartItemAddition) []SessionAllocation {
+	if item.PriceLot {
+		return []SessionAllocation{{SessionID: item.SessionID, Quantity: item.Quantity, UnitPrice: item.UnitPrice}}
+	}
+	return AllocateBySession(item.Quantity, additions)
 }

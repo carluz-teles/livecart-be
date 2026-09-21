@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"livecart/apps/api/internal/cartpricing"
 	"time"
 
 	"github.com/google/uuid"
@@ -259,7 +260,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	var totalAmount int64
 	var totalItems int
 	for i, item := range itemRows {
-		itemTotal := item.UnitPrice * int64(item.Quantity)
+		itemTotal := cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 		items[i] = OrderItemOutput{
 			ID:                 item.ID,
 			ProductID:          item.ProductID,
@@ -270,6 +271,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
 			TotalPrice:         itemTotal,
+			PriceLots:          item.PriceLots,
 			WaitlistedQuantity: item.WaitlistedQuantity,
 			PaidQuantity:       item.PaidQuantity,
 			WeightGrams:        item.WeightGrams,
@@ -278,7 +280,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 			LengthCm:           item.LengthCm,
 			PackageFormat:      item.PackageFormat,
 		}
-		totalAmount += itemTotal
+		totalAmount += cartpricing.Total(item.PriceLots, item.Quantity, item.UnitPrice)
 		totalItems += item.Quantity
 	}
 
@@ -376,14 +378,15 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	for _, item := range orderOutput.Items {
 		disponivel := item.Quantity - item.WaitlistedQuantity
 		if disponivel > 0 {
-			payable += item.UnitPrice * int64(disponivel)
+			payable += cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 		}
 		if item.WaitlistedQuantity > 0 {
-			waitlisted += item.UnitPrice * int64(item.WaitlistedQuantity)
+			waitlisted += cartpricing.Total(item.PriceLots, item.Quantity, item.UnitPrice) - cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 		}
-		pago += item.UnitPrice * int64(item.PaidQuantity)
+		covered := cartpricing.Covered(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice, item.PaidQuantity)
+		pago += covered
 		if resto := item.Quantity - item.PaidQuantity; resto > 0 {
-			aPagar += item.UnitPrice * int64(resto)
+			aPagar += cartpricing.Total(item.PriceLots, item.Quantity, item.UnitPrice) - covered
 		}
 	}
 

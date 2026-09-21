@@ -49,12 +49,7 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 		return true, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
-	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE id=$1 FOR UPDATE`, cart.ID); err != nil {
-		return true, err
-	}
-	r := NewRepository(s.repo.q.WithTx(tx))
-	cart, err = r.GetCartByToken(ctx, input.Token)
-	if err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "merchant_edit_request:"+key); err != nil {
 		return true, err
 	}
 	// A lost HTTP response must not turn an accepted edit into another addition.
@@ -68,6 +63,24 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 		return true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		return true, err
+	}
+	// Product admission uses the same serialization as global FIFO. Resolve
+	// ownership before locking; re-read the item below after the cart lock.
+	if input.ProductID == "" {
+		if err := tx.QueryRow(ctx, `SELECT product_id::text FROM cart_items WHERE id=$1 AND cart_id=$2`, input.ItemID, cart.ID).Scan(&input.ProductID); err != nil {
+			return true, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "waitlist_product:"+input.ProductID); err != nil {
+		return true, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE id=$1 FOR UPDATE`, cart.ID); err != nil {
+		return true, err
+	}
+	r := NewRepository(s.repo.q.WithTx(tx))
+	cart, err = r.GetCartByToken(ctx, input.Token)
+	if err != nil {
 		return true, err
 	}
 	var eligible bool
@@ -160,6 +173,7 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	after := input.Quantity
 	switch operation {
 	case "add":
+		price = cfg.UnitPrice
 		if !cfg.Active {
 			return true, httpx.DomainError(422, httpx.CodeValidationFailed, "produto não está ativo")
 		}
@@ -189,6 +203,18 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	retainDelta := -delta
 	reserved := 0
 	if delta > 0 {
+		var olderWaiting bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM waitlist_items wi JOIN carts c ON c.id=wi.cart_id LEFT JOIN carts host ON host.id=c.joined_to_cart_id
+           WHERE wi.product_id=$1 AND wi.status='waiting' AND c.status IN ('active','checkout')
+             AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
+             AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+ AND (host.id IS NULL OR (host.status IN ('active','checkout') AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded' AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now()))))`, input.ProductID).Scan(&olderWaiting); err != nil {
+			return true, err
+		}
+		if olderWaiting {
+			return true, httpx.DomainError(409, httpx.CodeStockInsufficient, "a reposição está sendo destinada aos clientes na fila")
+		}
+
 		reused := min(retained, delta)
 		retainDelta = -reused
 		reserved = delta - reused
@@ -210,7 +236,13 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 			return true, err
 		}
 	} else if item != nil {
-		ok, err := r.SetCartItemSplitIfUnchanged(ctx, item.ID, before, after, waitAfter)
+		var ok bool
+		var err error
+		if operation == "add" {
+			ok, err = r.AddCartItemQuantityAtPrice(ctx, item.ID, before, input.Quantity, price)
+		} else {
+			ok, err = r.SetCartItemSplitIfUnchanged(ctx, item.ID, before, after, waitAfter)
+		}
 		if err != nil {
 			return true, err
 		}
@@ -225,11 +257,6 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	if _, err := tx.Exec(ctx, `UPDATE cart_items SET erp_confirmed_quantity=COALESCE(erp_confirmed_quantity,$3),
         erp_pending_since=COALESCE(erp_pending_since,now()) WHERE cart_id=$1 AND product_id=$2`, cart.ID, input.ProductID, before-waiting); err != nil {
 		return true, err
-	}
-	if waitAfter < waiting {
-		if _, err := tx.Exec(ctx, `UPDATE waitlist_items SET status='cancelled' WHERE cart_id=$1 AND product_id=$2 AND status IN ('waiting','notified')`, cart.ID, input.ProductID); err != nil {
-			return true, err
-		}
 	}
 	var revision int64
 	if err := tx.QueryRow(ctx, `UPDATE cart_erp_edits SET revision=revision+1,

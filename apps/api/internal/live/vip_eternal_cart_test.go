@@ -118,6 +118,9 @@ func TestFinalizeSkipsEternalCart(t *testing.T) {
 	}
 
 	// Fecha o evento.
+	if _, err := testRepo.EndEvent(context.Background(), eventID, storeID); err != nil {
+		t.Fatalf("EndEvent: %v", err)
+	}
 	if _, err := testRepo.FinalizeCartsByEvent(context.Background(), eventID); err != nil {
 		t.Fatalf("FinalizeCartsByEvent: %v", err)
 	}

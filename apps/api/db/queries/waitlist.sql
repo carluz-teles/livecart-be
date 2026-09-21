@@ -41,45 +41,33 @@ ORDER BY position ASC;
 -- name: GetWaitlistItemByEventUserProduct :one
 SELECT * FROM waitlist_items
 WHERE event_id = $1 AND platform_user_id = $2 AND product_id = $3
-  AND status IN ('waiting', 'notified');
+  AND status IN ('waiting', 'notified')
+ORDER BY created_at,queue_sequence LIMIT 1;
 
 -- name: ExpireWaitlistByEvent :many
--- RN-32 — no fim do evento + carência, o item de fila NÃO ATENDIDO morre.
---
--- Sem isto o carrinho do waitlister é ETERNO. O guard do ExpireCart se abstém
--- de expirar qualquer carrinho com item 'waiting', e o ramo 'waiting' não tem
--- prazo nenhum: enquanto o item estiver na fila o carrinho inteiro é
--- inexpirável, segurando o estoque reservado dos seus itens NÃO-waitlisted. E
--- como não existe mais sweep de carrinhos, a task cart.expire dispara uma vez,
--- encontra 0 rows e encerra — nada mais a re-arma, exceto uma promoção que por
--- definição não vem (o carrinho da frente foi PAGO em vez de expirar).
---
--- O predicado é mais estreito do que o desta query antes desta mudança. Ela
--- existia desde a 000026 sem nenhum chamador Go, com
--- `status IN ('waiting','notified')` — matando também quem acabou de ser
--- promovido e ainda está DENTRO da janela de TTL válida, o que o PRD proíbe
--- explicitamente. Quem está 'notified' com janela futura tem o expires_at do
--- carrinho estendido e é governado pelo próprio cart.expire: quando a janela
--- vencer, o guard do ExpireCart deixa de vetar e o carrinho expira sozinho.
---
--- Devolve os cart_id afetados para o chamador RE-ARMAR cart.expire neles: o
--- prazo deles já venceu enquanto o guard vetava, então sem o re-arm eles
--- continuariam vivos mesmo com a fila morta.
---
--- Devolve tambem quem era o comprador e qual produto ele esperava: e a
--- materia-prima da DM de "nao consegui liberar" (RN-28, gatilho 5). Sem esses
--- campos o encerramento da fila era mudo — o carrinho voltava a poder expirar e
--- o comprador so descobria pelo silencio. O CTE existe porque RETURNING nao
--- faz JOIN, e o nome do produto e a frase inteira da mensagem.
-WITH expired AS (
-    UPDATE waitlist_items
-    SET status = 'expired'
-    WHERE waitlist_items.event_id = $1
-      AND (
-          status = 'waiting'
-          OR (status = 'notified' AND expires_at IS NOT NULL AND expires_at <= now())
+-- The cart owns the only deadline. Lock carts before changing their waiting
+-- balances, using the same order as payment, promotion and cart expiration.
+WITH due_carts AS MATERIALIZED (
+    SELECT c.id FROM carts c
+    WHERE c.status IN ('active', 'checkout', 'expired')
+      AND NOT c.never_expires
+      AND NOT c.payment_review_required
+      AND c.payment_status IS DISTINCT FROM 'paid'
+      AND c.payment_status IS DISTINCT FROM 'refunded'
+      AND c.expires_at <= now()
+      AND EXISTS (
+          SELECT 1 FROM waitlist_items wi
+          WHERE wi.cart_id = c.id AND wi.event_id = $1 AND wi.status = 'waiting'
       )
-    RETURNING id, cart_id, platform_user_id, platform_handle, product_id
+    ORDER BY c.id
+    FOR UPDATE OF c
+), expired AS (
+    UPDATE waitlist_items wi
+    SET status = 'expired', cancelled_at = COALESCE(wi.cancelled_at, now()),
+        cancelled_quantity = wi.cancelled_quantity + wi.quantity, quantity = 0
+    FROM due_carts c
+    WHERE wi.cart_id = c.id AND wi.event_id = $1 AND wi.status = 'waiting'
+    RETURNING wi.id, wi.cart_id, wi.platform_user_id, wi.platform_handle, wi.product_id
 )
 SELECT
     e.cart_id,
@@ -92,23 +80,8 @@ JOIN products p ON p.id = e.product_id
 LEFT JOIN carts c ON c.id = e.cart_id;
 
 -- name: ListExpiredNotifiedWaitlistItems :many
--- RN-04: NADA expira dentro de um evento ABERTO. A promoção da fila ganha um
--- TTL (waitlist_notified_ttl) que só vale DEPOIS que o evento fecha — o
--- período de recuperação, onde o estoque escasso precisa girar. Enquanto o
--- evento roda, a promovida segura a unidade como qualquer carrinho (que também
--- não expira sob a RN-04); a fila só anda no fechamento.
---
--- Sem o filtro de evento abaixo, o sweep lazy expirava promoções no MEIO de um
--- evento aberto (20/08/2026, produto 1130): a promoção da @tatiani venceu o TTL
--- de 1h às 18:22 com o evento fechando só no dia seguinte, e a cadeia
--- expiração → devolve-estoque-local → promove-próximo propagou uma unidade
--- fantasma pela fila (a @andrea foi promovida sobre estoque que não existia).
--- Evento aberto = nada expira. Ponto.
-SELECT wi.* FROM waitlist_items wi
-JOIN live_events e ON e.id = wi.event_id
-WHERE wi.status = 'notified'
-  AND wi.expires_at IS NOT NULL AND wi.expires_at < now()
-  AND (e.status = 'ended' OR (e.ends_at IS NOT NULL AND e.ends_at < now()));
+-- Backward-compatible reader: promoted units have no independent deadline.
+SELECT wi.* FROM waitlist_items wi WHERE FALSE;
 
 -- name: CountWaitingByProduct :one
 SELECT COUNT(*)::int FROM waitlist_items
@@ -130,17 +103,29 @@ FROM waitlist_items
 WHERE product_id = $1 AND status = 'waiting';
 
 -- name: ListActiveByCart :many
--- Itens em fila (waiting/notified) vinculados ao carrinho do cliente —
--- alimenta a seção de waitlist no /cart/:token.
-SELECT wi.*,
-       p.name      AS product_name,
-       p.keyword   AS product_keyword,
-       p.image_url AS product_image_url,
-       p.price     AS product_price
-FROM waitlist_items wi
-JOIN products p ON p.id = wi.product_id
-WHERE wi.cart_id = $1 AND wi.status IN ('waiting','notified')
-ORDER BY wi.created_at;
+-- Position means eligible requests ahead in the product's store-wide FIFO,
+-- not the historical counter of one event. Paid/expired hosts do not count.
+WITH queued AS (
+    SELECT wi.id,(row_number() OVER(PARTITION BY wi.product_id ORDER BY wi.created_at,wi.queue_sequence))::int AS queue_position
+    FROM waitlist_items wi JOIN carts c ON c.id=wi.cart_id
+    JOIN live_events e ON e.id=c.event_id JOIN products p ON p.id=wi.product_id
+    LEFT JOIN carts host ON host.id=c.joined_to_cart_id
+    WHERE wi.status='waiting' AND wi.quantity>0 AND p.store_id=e.store_id
+      AND NOT c.purchase_closed AND c.status IN ('active','checkout')
+      AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
+      AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+      AND (host.id IS NULL OR (host.status IN ('active','checkout')
+        AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
+        AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now())))
+      AND wi.product_id IN (SELECT own.product_id FROM waitlist_items own WHERE own.cart_id=$1 AND own.status='waiting')
+)
+SELECT wi.*,queued.queue_position,
+       p.name AS product_name,p.keyword AS product_keyword,p.image_url AS product_image_url,
+       wi.unit_price AS product_price
+FROM waitlist_items wi JOIN queued ON queued.id=wi.id
+JOIN products p ON p.id=wi.product_id
+WHERE wi.cart_id=$1
+ORDER BY wi.created_at,wi.queue_sequence;
 
 -- name: CancelWaitlistItem :exec
 -- cart_id no WHERE garante ownership (cliente só consegue cancelar itens

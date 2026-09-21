@@ -55,6 +55,9 @@ func TestFinalizeCartsSkipsPaidCart(t *testing.T) {
 	openCart := newCart(n+"-open", "pending")
 	paidCart := newCart(n+"-paid", "paid")
 
+	if _, err := testRepo.EndEvent(context.Background(), eventID, storeID); err != nil {
+		t.Fatalf("EndEvent: %v", err)
+	}
 	count, err := testRepo.FinalizeCartsByEvent(ctx, eventID)
 	if err != nil {
 		t.Fatalf("FinalizeCartsByEvent: %v", err)
@@ -138,6 +141,9 @@ func TestFinalizeCartsPicksShortOrExtendedDeadline(t *testing.T) {
 				t.Fatalf("seed cart: %v", err)
 			}
 
+			if _, err := testRepo.EndEvent(context.Background(), eventID, storeID); err != nil {
+				t.Fatalf("EndEvent: %v", err)
+			}
 			if _, err := testRepo.FinalizeCartsByEvent(ctx, eventID); err != nil {
 				t.Fatalf("FinalizeCartsByEvent: %v", err)
 			}

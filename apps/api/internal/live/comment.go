@@ -987,34 +987,12 @@ func (s *Service) processarItemDoComentario(
 		}
 	}
 
-	// Handle waitlist gating: if user already has a row, skip the waitlist
-	// portion (we don't double-queue) and either return early or fall back
-	// to adding only the available portion to the cart.
-	createWaitlistRow := false
+	// A new request gets its own FIFO position even if this buyer already waits.
+	// Production uses ApplyCommentItem's atomic command idempotency above.
+	createWaitlistRow := waitlistQty > 0
 	var waitlistPosition int
-	if waitlistQty > 0 {
-		alreadyWaiting, _ := s.ingestRepo.GetWaitlistItemByEventUserProduct(ctx, event.ID, input.UserID, product.ID)
-		if alreadyWaiting {
-			logger.From(ctx, s.logger).Info("user already on waitlist, ignoring waitlist portion",
-				zap.String("username", input.Username),
-				zap.String("product_id", product.ID),
-				zap.Int("waitlist_qty", waitlistQty),
-			)
-			if availableQty == 0 {
-				if commentID != "" {
-					_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, quantidade, "already_waitlisted")
-				}
-				return nil, nil
-			}
-			waitlistQty = 0
-		} else {
-			// Defer the actual INSERT to after AddToCart so we can stamp
-			// cart_id on the row (the public checkout lists waitlist items
-			// by cart_id). Position is read here to keep ordering stable
-			// even if two intents race on the same event+product.
-			waitlistPosition, _ = s.ingestRepo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
-			createWaitlistRow = true
-		}
+	if createWaitlistRow {
+		waitlistPosition, _ = s.ingestRepo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
 	}
 
 	// Determine total quantity to add to cart

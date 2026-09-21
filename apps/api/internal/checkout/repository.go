@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"livecart/apps/api/internal/cartpricing"
 	"time"
 
 	"github.com/google/uuid"
@@ -151,6 +152,10 @@ func (r *Repository) ListCartItems(ctx context.Context, cartID string) ([]CartIt
 	items := make([]CartItemRow, len(rows))
 	for i, row := range rows {
 		items[i] = r.toCartItemRow(row)
+		items[i].PriceLots, err = cartpricing.Decode(row.PriceLots)
+		if err != nil {
+			return nil, fmt.Errorf("decoding cart item prices: %w", err)
+		}
 	}
 
 	return items, nil
@@ -457,6 +462,7 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 	}
 
 	cart := &CartRow{
+		PurchaseClosed:        row.PurchaseClosed,
 		PaymentReviewRequired: row.PaymentReviewRequired,
 		ERPOrderStatus:        row.ErpOrderStatus.String,
 		ID:                    uuid.UUID(row.ID.Bytes).String(),
@@ -558,7 +564,12 @@ func (r *Repository) GetCartItem(ctx context.Context, itemID string) (*CartItemR
 		}
 		return nil, fmt.Errorf("getting cart item: %w", err)
 	}
+	lots, err := cartpricing.Decode(row.PriceLots)
+	if err != nil {
+		return nil, fmt.Errorf("decoding cart prices: %w", err)
+	}
 	return &CartItemRow{
+		PriceLots: lots, OriginalItem: row.OriginalItem, OriginalLots: row.OriginalLots,
 		ID:                 uuid.UUID(row.ID.Bytes).String(),
 		CartID:             uuid.UUID(row.CartID.Bytes).String(),
 		ProductID:          uuid.UUID(row.ProductID.Bytes).String(),
@@ -839,7 +850,7 @@ func CalculateCartTotal(items []CartItemRow) (subtotal int64, totalItems int) {
 		// Available quantity = total quantity - waitlisted quantity
 		availableQty := item.Quantity - item.WaitlistedQuantity
 		if availableQty > 0 {
-			subtotal += item.UnitPrice * int64(availableQty)
+			subtotal += cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 			totalItems += availableQty
 		}
 	}

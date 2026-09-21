@@ -26,7 +26,7 @@ func TestRegisterHandlers_LeavesCompositionRootFactsFree(t *testing.T) {
 	// ser o gancho que arma a morte da fila não atendida. Se alguém devolver o
 	// logEvent para o registro, o servidor inteiro passa a entrar em pânico no
 	// boot por padrão duplicado — este teste é o que avisa antes.
-	for _, name := range []Name{CartCancelled, CartRefunded, OrderPaid, OrderRefunded, EventEventEnded, EventWaitlistClose, ERPWebhookProcess} {
+	for _, name := range []Name{CartCancelled, CartRefunded, OrderPaid, OrderRefunded, EventEventEnded, EventWaitlistClose, ERPWebhookProcess, WaitlistQueued, StockReleased} {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {

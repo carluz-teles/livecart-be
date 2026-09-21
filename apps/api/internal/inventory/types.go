@@ -130,3 +130,19 @@ type WaitlistNotifiedInput struct {
 	Quantity       int
 	TTL            time.Duration
 }
+
+// WaitlistPromotion is the committed allocation fact and ERP retry input.
+// Fulfilled is cumulative, so partial allocations have distinct deduplication keys.
+type WaitlistPromotion struct {
+	WaitlistItemID string `json:"waitlist_item_id"`
+	StoreID        string `json:"store_id"`
+	CartID         string `json:"cart_id"`
+	ProductID      string `json:"product_id"`
+	EventID        string `json:"event_id"`
+	PlatformHandle string `json:"platform_handle"`
+	UnitPrice      int64  `json:"unit_price"`
+	Quantity       int    `json:"quantity"`
+	Remaining      int    `json:"remaining"`
+	Fulfilled      int    `json:"fulfilled"`
+	PriceLotID     string `json:"-"`
+}

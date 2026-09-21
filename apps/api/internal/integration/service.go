@@ -5556,47 +5556,31 @@ type WaitlistCloseScheduler interface {
 // antes desta fatia).
 func (s *Service) SetWaitlistCloseScheduler(sch WaitlistCloseScheduler) { s.waitlistCloseSched = sch }
 
-// ArmEventWaitlistClose é o reator de event.ended: agenda a morte da fila não
-// atendida para "fim do evento + carência".
-//
-// A carência é o MESMO prazo que os carrinhos acabaram de receber no
-// fechamento (RN-34: curto ou estendido conforme close_cart_on_event_end).
-// Matar a fila antes disso tiraria do comprador um tempo que ele ainda tinha;
-// matar depois deixaria o carrinho vivo além do próprio prazo.
+// ArmEventWaitlistClose usa a primeira data efetivamente concedida aos
+// carrinhos que ainda aguardam estoque. Reexecutar a tarefa não reinicia X/Y.
 func (s *Service) ArmEventWaitlistClose(ctx context.Context, eventID string) error {
 	if s.waitlistCloseSched == nil {
 		return nil
 	}
-	minutes, err := s.repo.GetEventCartExpirationMinutes(ctx, eventID)
+	at, err := s.repo.GetNextEventWaitlistDeadline(ctx, eventID)
 	if err != nil {
 		return err
 	}
-	if minutes <= 0 {
-		// A 000106 impede isso (CHECK >= 15 nas duas pontas). Se acontecer,
-		// não agendar seria voltar ao carrinho eterno — 24h é o mesmo piso que
-		// a migration usou ao converter o antigo 0.
-		minutes = 1440
+	if at == nil {
+		return nil
 	}
-	at := time.Now().UTC().Add(time.Duration(minutes) * time.Minute)
-	return s.waitlistCloseSched.ScheduleEventWaitlistClose(ctx, eventID, at)
+	return s.waitlistCloseSched.ScheduleEventWaitlistClose(ctx, eventID, *at)
 }
 
-// RunEventWaitlistClose é o handler da task event.waitlist_close (RN-32).
-//
-// Encerra os itens de fila não atendidos do evento e RE-ARMA cart.expire nos
-// carrinhos que estavam bloqueados. O re-arm é a metade que faz a regra valer:
-// o prazo desses carrinhos já venceu enquanto o guard do ExpireCart vetava, e
-// a task original deles já disparou e saiu sem fazer nada — sem sweep de
-// carrinhos, nada mais os alcançaria.
-//
-// Idempotente: a segunda passada não encontra item vivo e não re-arma nada.
+// RunEventWaitlistClose encerra apenas saldos aguardando em carrinhos comuns
+// vencidos. A tarefa antiga relê os prazos e agenda novamente se eles cresceram.
 func (s *Service) RunEventWaitlistClose(ctx context.Context, eventID string) error {
 	entries, err := s.repo.ExpireEventWaitlist(ctx, eventID)
 	if err != nil {
 		return err
 	}
 	if len(entries) == 0 {
-		return nil
+		return s.ArmEventWaitlistClose(ctx, eventID)
 	}
 
 	// Um carrinho pode ter vários itens na fila: dedup para re-armar cart.expire
@@ -5634,7 +5618,7 @@ func (s *Service) RunEventWaitlistClose(ctx context.Context, eventID string) err
 				zap.String("cart_id", cartID), zap.Error(err))
 		}
 	}
-	return nil
+	return s.ArmEventWaitlistClose(ctx, eventID)
 }
 
 // notifyWaitlistUnfulfilled avisa quem esperava na fila que o produto não

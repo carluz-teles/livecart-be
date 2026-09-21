@@ -1,21 +1,8 @@
 package integration
 
-// Edição do prazo do carrinho DEPOIS do evento criado (pedido do cliente,
-// 20/08/2026: o teto de 24h virou 30 dias e mudar no evento tem de valer para
-// quem já está com o relógio correndo).
-//
-// A regra sob teste é a do live.Service.Update → applyCartExpirationChange:
-// grava o override e propaga o DELTA do prazo EFETIVO para os carrinhos
-// abertos — deslocando, nunca recalculando. Pago, terminal e RN-04 (sem
-// relógio) ficam intocados; close_cart_on_event_end desligado zera o delta
-// porque o efetivo é o prazo estendido.
-//
-// Roda no harness do pacote (Postgres real, migrations completas) porque a
-// regra É o SQL: o WHERE do ShiftOpenCartExpirations e o COALESCE do
-// GetEventCartSettings não têm como ser provados num fake.
-//
-//	docker compose up -d postgres
-//	TEST_DATABASE_URL='postgres://livecart:livecart@localhost:5432/postgres?sslmode=disable' go test ./apps/api/internal/integration/ -run PrazoDoEvento -v
+// Deadline changes recalculate from immutable commercial close E, preserving
+// every already-granted date. These fixtures close events through the real
+// repository so E, eligibility and initial deadlines are captured atomically.
 
 import (
 	"context"
@@ -64,7 +51,7 @@ func seedEventoEncerrado(t *testing.T, closeCartOnEnd bool, override *int) prazo
 		`INSERT INTO stores (name, slug, cart_expiration_minutes) VALUES ('Loja Prazo', 'prazo-'||$1, 60) RETURNING id::text`, n)
 	mustScan(&fx.eventID,
 		`INSERT INTO live_events (store_id, status, title, ends_at, close_cart_on_event_end, cart_expiration_minutes)
-		 VALUES ($1, 'ended', 'Live Prazo', now() - interval '1 hour', $2, $3) RETURNING id::text`,
+		 VALUES ($1, 'active', 'Live Prazo', now() - interval '1 hour', $2, $3) RETURNING id::text`,
 		fx.storeID, closeCartOnEnd, override)
 
 	cart := func(dst *string, suffix, status, payment string, expires any) {
@@ -73,14 +60,20 @@ func seedEventoEncerrado(t *testing.T, closeCartOnEnd bool, override *int) prazo
 			 VALUES ($1, 'u-'||$2, '@b'||$2, 'tok-'||$2, ($3)::bigint % 100000, $4, $5, $6) RETURNING id::text`,
 			fx.eventID, n+suffix, n, status, payment, expires)
 	}
-	// Aberto: encerrou há 1h com prazo de 60min → vence "agora". É exatamente o
-	// carrinho que o cliente quer resgatar ao aumentar o prazo.
-	cart(&fx.aberto, "a", "checkout", "pending", time.Now().UTC())
+	// Active carts acquire E+X during the real commercial close below.
+	cart(&fx.aberto, "a", "active", "pending", nil)
 	cart(&fx.pago, "p", "checkout", "paid", time.Now().UTC().Add(30*time.Minute))
 	cart(&fx.expirado, "e", "expired", "pending", time.Now().UTC().Add(-30*time.Minute))
 
+	repo := live.NewRepository(sqlc.New(testPool), testPool)
+	if _, err := repo.EndEvent(ctx, fx.eventID, fx.storeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.FinalizeCartsByEvent(ctx, fx.eventID); err != nil {
+		t.Fatal(err)
+	}
 	fx.espiao = &reschedulerEspiao{}
-	fx.svc = live.NewService(live.NewRepository(sqlc.New(testPool), testPool), zap.NewNop())
+	fx.svc = live.NewService(repo, zap.NewNop())
 	fx.svc.SetCartExpiryRescheduler(fx.espiao)
 	return fx
 }
@@ -142,19 +135,21 @@ func TestPrazoDoEventoAumentoPropagaParaOsAbertos(t *testing.T) {
 	}
 }
 
-// Encurtar também propaga — inclusive para o passado: o cart.expire re-armado
-// dispara na hora e o guard decide, como em qualquer vencimento.
-func TestPrazoDoEventoEncurtarPuxaAJanelaParaTras(t *testing.T) {
+// A reduction changes configuration but preserves the previously granted date.
+// Restoring the same setting afterwards cannot add those minutes a second time.
+func TestPrazoDoEventoReduzirPreservaDataConcedida(t *testing.T) {
 	requireDB(t)
 	override := 1440
 	fx := seedEventoEncerrado(t, true, &override)
 	antes := expiraEm(t, fx.aberto)
-
-	atualizaPrazo(t, fx, 60)
-
-	delta := expiraEm(t, fx.aberto).Sub(*antes)
-	if want := -time.Duration(1440-60) * time.Minute; delta != want {
-		t.Errorf("deslocou %v; esperava %v", delta, want)
+	for _, value := range []int{60, 1440} {
+		atualizaPrazo(t, fx, value)
+		if !expiraEm(t, fx.aberto).Equal(*antes) {
+			t.Fatalf("configuration %d changed granted deadline %v to %v", value, antes, expiraEm(t, fx.aberto))
+		}
+	}
+	if len(fx.espiao.movidos) != 0 {
+		t.Fatalf("unchanged deadline rearmed tasks: %v", fx.espiao.movidos)
 	}
 }
 

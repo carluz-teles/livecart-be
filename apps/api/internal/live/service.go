@@ -896,19 +896,9 @@ func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput
 		}
 	}
 
-	// RN-10: janela extra do promovido da fila. O repo faz o clamp para 5..240,
-	// espelhando o CHECK da 000073.
-	if input.WaitlistNotifiedTTLMinutes != nil {
-		if err := s.repo.SetWaitlistNotifiedTTLMinutes(ctx, event.ID, input.StoreID, *input.WaitlistNotifiedTTLMinutes); err != nil {
-			return LiveOutput{}, err
-		}
-	}
-
-	// Prazo do carrinho, editável depois de criado — COM propagação (pedido do
-	// cliente, 20/08/2026: o teto virou 30 dias e mudar no evento tem de valer
-	// para quem já está com o relógio correndo).
-	if input.CartExpirationMinutes != nil {
-		if err := s.applyCartExpirationChange(ctx, event.ID, input.StoreID, *input.CartExpirationMinutes); err != nil {
+	if input.CartExpirationMinutes != nil || input.WaitlistNotifiedTTLMinutes != nil {
+		if err := s.applyDeadlineSettings(ctx, event.ID, input.StoreID,
+			input.CartExpirationMinutes, input.WaitlistNotifiedTTLMinutes); err != nil {
 			return LiveOutput{}, err
 		}
 	}
@@ -917,52 +907,22 @@ func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput
 	return s.GetByID(ctx, event.ID, input.StoreID)
 }
 
-// applyCartExpirationChange grava o override de prazo do evento e propaga a
-// diferença para os carrinhos abertos.
-//
-// A propagação é por DELTA do prazo EFETIVO (fonte única GetEventCartSettings,
-// antes x depois), não por recálculo: deslocar preserva as extensões
-// individuais (prazo extra da fila no finalize, RN-10) e faz as duas pontas
-// certas de graça —
-//   - evento ATIVO: RN-04 mantém expires_at NULL, o shift não acha ninguém e o
-//     valor novo vale sozinho no fechamento;
-//   - close_cart_on_event_end desligado: o efetivo é o prazo ESTENDIDO, o
-//     delta dá zero e nenhum carrinho se move por uma configuração que não
-//     rege o relógio deles.
-func (s *Service) applyCartExpirationChange(ctx context.Context, eventID, storeID string, minutes int) error {
-	before, err := s.repo.GetEffectiveCartExpirationMinutes(ctx, eventID)
+// applyDeadlineSettings preserves previously granted dates while propagating
+// increases of X/Y. Frozen eligibility survives fulfillment and cancellation.
+func (s *Service) applyDeadlineSettings(ctx context.Context, eventID, storeID string, x, y *int) error {
+	ids, err := s.repo.ApplyEventDeadlineSettings(ctx, eventID, storeID, x, y)
 	if err != nil {
 		return err
 	}
-	if err := s.repo.SetCartExpirationMinutes(ctx, eventID, storeID, minutes); err != nil {
-		return err
-	}
-	after, err := s.repo.GetEffectiveCartExpirationMinutes(ctx, eventID)
-	if err != nil {
-		return err
-	}
-	delta := after - before
-	if delta == 0 {
-		return nil
-	}
+	logger.From(ctx, s.logger).Info("event deadline settings updated",
+		zap.String("event_id", eventID), zap.Int("carts_extended", len(ids)))
 
-	ids, err := s.repo.ShiftOpenCartExpirations(ctx, eventID, delta)
-	if err != nil {
-		return err
-	}
-	logger.From(ctx, s.logger).Info("event cart expiration changed; open carts shifted",
-		zap.String("event_id", eventID),
-		zap.Int("delta_minutes", delta),
-		zap.Int("carts_shifted", len(ids)),
-	)
-
-	// Re-armar é conforto, não corretude: cart.expire é guard-first. Janela
-	// maior → a task antiga dispara e SE re-arma; janela menor → mover antecipa
-	// um desfecho já decidido. Por isso best-effort, nunca erro para o lojista.
+	// The same scheduling is also in the transactional outbox. This immediate
+	// attempt reduces latency; a failure is recovered by the event consumer.
 	if s.cartExpiryRescheduler != nil {
 		for _, id := range ids {
 			if err := s.cartExpiryRescheduler.RescheduleExpiry(ctx, id); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to move cart.expire after expiration change",
+				logger.From(ctx, s.logger).Warn("failed to move cart.expire after deadline change",
 					zap.String("cart_id", id), zap.Error(err))
 			}
 		}
