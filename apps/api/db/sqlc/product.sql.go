@@ -181,12 +181,12 @@ WITH before AS (
     SELECT stock AS s FROM products WHERE id = $2 FOR UPDATE
 )
 UPDATE products p
-SET stock = p.stock - LEAST(before.s, $1::int),
+SET stock = p.stock - LEAST(GREATEST(before.s,0), GREATEST($1::int,0)),
     erp_seq = p.erp_seq + 1,
     updated_at = now()
 FROM before
 WHERE p.id = $2
-RETURNING LEAST(before.s, $1::int)::int AS taken
+RETURNING LEAST(GREATEST(before.s,0), GREATEST($1::int,0))::int AS taken
 `
 
 type DecrementProductStockUpToParams struct {

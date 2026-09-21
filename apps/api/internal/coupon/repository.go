@@ -264,7 +264,7 @@ func (r *Repository) LoadCartForCouponTx(
 			c.status,
 			c.payment_status,
 			COALESCE((
-				SELECT SUM(ci.unit_price * GREATEST(ci.quantity - ci.waitlisted_quantity, 0))::BIGINT
+				SELECT SUM(cart_item_available_total(ci.id))::BIGINT
 				FROM cart_items ci
 				WHERE ci.cart_id = c.id
 			), 0) AS subtotal_cents,
@@ -552,7 +552,7 @@ func (r *Repository) GetCartShippingCostCents(ctx context.Context, cartID string
 // sees the same number ApplyToCart originally compared against.
 func (r *Repository) GetCartSubtotalCents(ctx context.Context, cartID string) (int64, error) {
 	const q = `
-		SELECT COALESCE(SUM(ci.unit_price * GREATEST(ci.quantity - ci.waitlisted_quantity, 0))::BIGINT, 0)
+		SELECT COALESCE(SUM(cart_item_available_total(ci.id))::BIGINT, 0)
 		FROM cart_items ci
 		WHERE ci.cart_id = $1
 	`

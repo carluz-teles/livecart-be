@@ -83,9 +83,7 @@ inserted AS (
 )
 UPDATE carts
 SET initial_snapshot_taken_at = now(),
-    initial_subtotal_cents = COALESCE((
-        SELECT SUM(quantity * unit_price) FROM inserted
-    ), 0)
+    initial_subtotal_cents = cart_available_total_cents(carts.id)
 WHERE carts.id IN (SELECT s.id FROM should_snapshot s);
 
 -- name: ListCartInitialItems :many
@@ -119,7 +117,7 @@ WITH per_cart AS (
         c.id AS cart_id,
         COALESCE(c.initial_subtotal_cents, 0) AS initial_cents,
         COALESCE((
-            SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+            SELECT SUM(cart_item_available_total(ci.id))
             FROM cart_items ci
             WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
         ), 0)::bigint AS final_cents,
@@ -187,7 +185,7 @@ SELECT
     c.expires_at,
     COALESCE(c.initial_subtotal_cents, 0)::bigint AS initial_subtotal_cents,
     COALESCE((
-        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+        SELECT SUM(cart_item_available_total(ci.id))
         FROM cart_items ci
         WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
     ), 0)::bigint AS current_subtotal_cents,
@@ -213,7 +211,7 @@ SELECT
     COALESCE(c.initial_subtotal_cents, 0)::bigint AS initial_subtotal_cents,
     c.initial_snapshot_taken_at,
     COALESCE((
-        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+        SELECT SUM(cart_item_available_total(ci.id))
         FROM cart_items ci
         WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
     ), 0)::bigint AS final_subtotal_cents,
@@ -222,3 +220,33 @@ SELECT
     ), 0)::int AS mutation_count
 FROM carts c
 WHERE c.id = $1;
+
+-- name: AddCartItemQuantityAtPrice :execrows
+-- An explicit new addition captures today's price for only the added units.
+-- Serialize with payment and reject a stale quantity before recording context.
+WITH mutable_cart AS MATERIALIZED (
+    SELECT c.id FROM carts c
+    WHERE c.id = (SELECT ci.cart_id FROM cart_items ci WHERE ci.id = sqlc.arg(item_id))
+      AND c.status IN ('active', 'checkout')
+      AND NOT c.purchase_closed
+      AND c.payment_status IS DISTINCT FROM 'paid'
+      AND c.payment_status IS DISTINCT FROM 'refunded'
+      AND NOT c.payment_review_required
+      AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at > now())
+    FOR UPDATE OF c
+), target AS MATERIALIZED (
+    SELECT ci.id, ci.cart_id, ci.product_id
+    FROM cart_items ci JOIN mutable_cart c ON c.id = ci.cart_id
+    WHERE ci.id = sqlc.arg(item_id) AND ci.quantity = sqlc.arg(expected_quantity)::int
+    FOR UPDATE OF ci
+), priced AS MATERIALIZED (
+    SELECT t.id, cart_item_request_price(t.cart_id, t.product_id,
+        sqlc.arg(unit_price)::bigint, NULL::uuid) AS requested_price
+    FROM target t
+)
+UPDATE cart_items ci
+SET quantity = ci.quantity + sqlc.arg(added_quantity)::int
+FROM priced p
+WHERE ci.id = p.id AND p.requested_price >= 0
+  AND ci.quantity = sqlc.arg(expected_quantity)::int
+  AND sqlc.arg(added_quantity)::int > 0;

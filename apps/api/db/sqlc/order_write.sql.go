@@ -13,7 +13,7 @@ import (
 )
 
 const getCartByOrderLogisticsTrackingToken = `-- name: GetCartByOrderLogisticsTrackingToken :one
-SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id, c.paid_amount_cents, c.cancellation_reverted_reason, c.joined_to_cart_id, c.joined_at, c.erp_order_status, c.erp_order_status_at, c.erp_order_number, c.erp_op_resting_state, c.erp_items_retry_at, c.payment_review_required, c.pix_cancel_lease_until FROM carts c
+SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id, c.paid_amount_cents, c.cancellation_reverted_reason, c.joined_to_cart_id, c.joined_at, c.erp_order_status, c.erp_order_status_at, c.erp_order_number, c.erp_op_resting_state, c.erp_items_retry_at, c.payment_review_required, c.pix_cancel_lease_until, c.waitlist_extra_eligible, c.deadline_config_base_at, c.deadline_config_x_minutes, c.deadline_config_y_minutes, c.purchase_closed FROM carts c
 JOIN orders o ON o.cart_id = c.id
 JOIN order_logistics ol ON ol.order_id = o.id
 WHERE ol.tracking_token = $1
@@ -95,29 +95,41 @@ func (q *Queries) GetCartByOrderLogisticsTrackingToken(ctx context.Context, trac
 		&i.ErpItemsRetryAt,
 		&i.PaymentReviewRequired,
 		&i.PixCancelLeaseUntil,
+		&i.WaitlistExtraEligible,
+		&i.DeadlineConfigBaseAt,
+		&i.DeadlineConfigXMinutes,
+		&i.DeadlineConfigYMinutes,
+		&i.PurchaseClosed,
 	)
 	return i, err
 }
 
 const getCartItemsForOrderMaterialization = `-- name: GetCartItemsForOrderMaterialization :many
-SELECT
-    ci.product_id,
-    p.name  AS product_name,
-    ci.quantity::int    AS quantity,
-    COALESCE(ci.unit_price, 0)::bigint AS unit_price
+SELECT ci.product_id, p.name AS product_name,
+       SUM(l.quantity - l.waitlisted_quantity)::int AS quantity,
+       l.unit_price::bigint AS unit_price,
+       (CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE l.session_id END)::uuid AS session_id,
+       l.attribution_from_log
 FROM cart_items ci
+JOIN cart_item_price_lots l ON l.cart_item_id = ci.id
 JOIN products p ON p.id = ci.product_id
-WHERE ci.cart_id = $1
+WHERE ci.cart_id = $1 AND l.quantity > l.waitlisted_quantity
+GROUP BY ci.product_id, p.name, l.unit_price, l.attribution_from_log,
+         CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE l.session_id END
+ORDER BY ci.product_id, l.unit_price
 `
 
 type GetCartItemsForOrderMaterializationRow struct {
-	ProductID   pgtype.UUID `json:"product_id"`
-	ProductName string      `json:"product_name"`
-	Quantity    int32       `json:"quantity"`
-	UnitPrice   int64       `json:"unit_price"`
+	ProductID          pgtype.UUID `json:"product_id"`
+	ProductName        string      `json:"product_name"`
+	Quantity           int32       `json:"quantity"`
+	UnitPrice          int64       `json:"unit_price"`
+	SessionID          pgtype.UUID `json:"session_id"`
+	AttributionFromLog bool        `json:"attribution_from_log"`
 }
 
-// Retorna os itens do cart com o nome do produto denormalizado (snapshot).
+// Seal allocated units at their agreed price. Legacy aggregate lots retain the
+// historical session-allocation log; modern lots carry precise request origin.
 func (q *Queries) GetCartItemsForOrderMaterialization(ctx context.Context, cartID pgtype.UUID) ([]GetCartItemsForOrderMaterializationRow, error) {
 	rows, err := q.db.Query(ctx, getCartItemsForOrderMaterialization, cartID)
 	if err != nil {
@@ -132,6 +144,8 @@ func (q *Queries) GetCartItemsForOrderMaterialization(ctx context.Context, cartI
 			&i.ProductName,
 			&i.Quantity,
 			&i.UnitPrice,
+			&i.SessionID,
+			&i.AttributionFromLog,
 		); err != nil {
 			return nil, err
 		}

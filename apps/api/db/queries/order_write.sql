@@ -96,15 +96,20 @@ INSERT INTO order_logistics (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
 
 -- name: GetCartItemsForOrderMaterialization :many
--- Retorna os itens do cart com o nome do produto denormalizado (snapshot).
-SELECT
-    ci.product_id,
-    p.name  AS product_name,
-    ci.quantity::int    AS quantity,
-    COALESCE(ci.unit_price, 0)::bigint AS unit_price
+-- Seal allocated units at their agreed price. Legacy aggregate lots retain the
+-- historical session-allocation log; modern lots carry precise request origin.
+SELECT ci.product_id, p.name AS product_name,
+       SUM(l.quantity - l.waitlisted_quantity)::int AS quantity,
+       l.unit_price::bigint AS unit_price,
+       (CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE l.session_id END)::uuid AS session_id,
+       l.attribution_from_log
 FROM cart_items ci
+JOIN cart_item_price_lots l ON l.cart_item_id = ci.id
 JOIN products p ON p.id = ci.product_id
-WHERE ci.cart_id = $1;
+WHERE ci.cart_id = $1 AND l.quantity > l.waitlisted_quantity
+GROUP BY ci.product_id, p.name, l.unit_price, l.attribution_from_log,
+         CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE l.session_id END
+ORDER BY ci.product_id, l.unit_price;
 
 -- name: GetPaidCartsWithoutOrder :many
 -- Backfill: carts pagas que ainda não têm Order materializada.

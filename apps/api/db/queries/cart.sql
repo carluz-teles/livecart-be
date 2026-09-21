@@ -43,6 +43,7 @@ WHERE store_id = $1 AND platform_handle = $2
   AND never_expires
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT purchase_closed
   AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 LIMIT 1
@@ -88,31 +89,14 @@ SELECT id, status, created_at, erp_order_state, external_order_id FROM carts
 WHERE store_id = $1 AND platform_handle = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT purchase_closed
   AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 FOR UPDATE;
 
 -- name: AbsorbCartItemsIntoCart :exec
--- Move os itens de UM carrinho de origem para o destino. O mesmo produto nos
--- dois soma quantidade (é o mesmo comprador querendo mais daquilo), e o preço
--- que fica é o do destino — o carrinho vivo é o mais recente, e é o preço dele
--- que o comprador está vendo na tela. O histórico de cada adição, com o preço
--- praticado na hora, continua íntegro em cart_item_events.
---
--- session_id viaja junto na linha nova: é a atribuição de primeiro toque, e é
--- o que mantém a métrica por evento de origem correta depois da fusão.
--- paid_quantity viaja junto, e isso não é detalhe: uma unidade PAGA que chegue
--- ao destino sem a marca vira "a pagar" na hora, e o pedido no ERP passaria a
--- cobrar de novo o que a compradora já pagou. Foi o furo que a junção manual
--- revelou — a fusão do VIP não o exibia porque só junta carrinho não pago.
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity)
-SELECT sqlc.arg(dest_cart_id), s.product_id, s.quantity, s.unit_price, s.waitlisted_quantity, s.session_id, s.paid_quantity
-FROM cart_items s
-WHERE s.cart_id = sqlc.arg(source_cart_id)
-ON CONFLICT (cart_id, product_id) DO UPDATE
-SET quantity            = cart_items.quantity + EXCLUDED.quantity,
-    waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity,
-    paid_quantity       = cart_items.paid_quantity + EXCLUDED.paid_quantity;
+-- Preserve the agreed price and source session of every moved addition.
+SELECT absorb_cart_price_lots(sqlc.arg(dest_cart_id)::uuid,sqlc.arg(source_cart_id)::uuid);
 
 -- name: MovePaymentsToCart :exec
 -- Leva o extrato de cobranças junto com os itens.
@@ -249,6 +233,7 @@ SELECT * FROM carts
 WHERE event_id = $1 AND platform_user_id = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT purchase_closed
   AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 LIMIT 1;
@@ -281,43 +266,16 @@ WHERE ci.cart_id = $1;
 UPDATE carts SET status = $2 WHERE id = $1 RETURNING *;
 
 -- name: ExpireCart :one
--- Flip idempotente e guard-first do worker de expiração. O guard vive DENTRO do
--- UPDATE para fechar a corrida com o webhook de pagamento: se alguém pagou ou o
--- cart já foi expirado/cancelado no intervalo, 0 rows retornam e o caller ABORTA
--- sem devolver estoque nem tocar o ERP. Marcar 'expired' é a PRIMEIRA ação (no
--- mesmo tx da devolução de estoque local) — a ação irreversível de ERP só roda
--- depois que o cart está comprovadamente 'expired'.
---
--- Sem o sweep (expiração 100% via schedule asynq), holder e waitlister do mesmo
--- produto ganham o MESMO expires_at no finalize → duas tasks cart.expire disparam
--- concorrentes. Dois guards adicionais fecham essa corrida:
---   (a) expires_at < now(): um cart com janela ESTENDIDA no futuro (promovido da
---       fila) não pode ser expirado por uma task com snapshot velho — o WHERE
---       relê o valor commitado, então a extensão vence a task antiga (MVCC).
---   (b) NOT EXISTS(...): o ciclo de vida de um cart de waitlister é governado
---       PELA FILA, não pelo próprio timer. Abstém-se enquanto o item está
---       'waiting' (na fila) OU 'notified' dentro da janela de promoção ainda
---       vigente (wi.expires_at > now(), gravada ATOMICAMENTE no claim). Isso
---       cobre a sub-janela entre o claim (waiting→notified) e o lock do promotor:
---       no instante em que o item vira 'notified' sua janela já é futura, então
---       a task do próprio waitlister se abstém — nunca deixa um cart
---       notified+expired segurando estoque vazado. Um 'notified' com janela já
---       VENCIDA (não pagou no prazo estendido) volta a ser elegível → expira.
--- 0 rows → não-elegível; o caller (ExpireCartAndReleaseStock) trata como skip.
+-- The cart deadline governs all units, including promoted units and pending
+-- quantities. Recheck the current deadline/payment state on every task retry.
 UPDATE carts
 SET status = 'expired', cancelled_reason = 'expired'
 WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
   AND NOT payment_review_required
-  AND NOT never_expires   -- VIP: carrinho eterno nunca expira (defesa explícita; expires_at NULL já barraria)
-  AND expires_at < now()
-  AND NOT EXISTS (
-      SELECT 1 FROM waitlist_items wi
-      WHERE wi.cart_id = carts.id
-        AND (wi.status = 'waiting'
-             OR (wi.status = 'notified' AND wi.expires_at > now()))
-  )
+  AND NOT never_expires
+  AND expires_at <= now()
 RETURNING *;
 
 -- name: CancelCart :one
@@ -470,7 +428,9 @@ RETURNING *;
 -- session_id is first-touch: kept from the original add (COALESCE), so
 -- re-adds in later sessions accumulate quantity under the first session.
 INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES (sqlc.arg(cart_id)::uuid, sqlc.arg(product_id)::uuid, sqlc.narg(quantity)::int,
+ cart_item_request_price(sqlc.arg(cart_id)::uuid,sqlc.arg(product_id)::uuid,sqlc.narg(unit_price)::bigint,sqlc.narg(session_id)::uuid),
+ sqlc.arg(waitlisted_quantity)::int, sqlc.narg(session_id)::uuid)
 ON CONFLICT (cart_id, product_id)
 DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
              waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity,
@@ -495,7 +455,7 @@ WHERE cart_id = $1
 ORDER BY product_id, created_at, id;
 
 -- name: ListCartItems :many
-SELECT ci.*, p.name AS product_name, p.image_url AS product_image_url
+SELECT ci.*, cart_item_price_lots_json(ci.id) AS price_lots, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1;
@@ -515,79 +475,62 @@ WHERE ci.cart_id = $1;
 -- o log pelo MESMO AllocateBySession do selamento).
 
 -- name: FinalizeCartsByEvent :many
--- RN-06: ao encerrar o EVENTO, o carrinho sai de 'active' ("pode pagar, sem
--- prazo") para 'checkout' ("prazo correndo") e ganha expires_at. Encerrar uma
--- SESSÃO não passa por aqui — sessão não mexe em carrinho.
---
--- O carrinho PAGO não transiciona (A10). Antes, o filtro de payment_status
--- incidia só no CASE do expires_at, nunca no WHERE: o carrinho pago virava
--- 'checkout' — que no vocabulário novo significa "prazo correndo" — e ainda
--- gerava um cart.checkout_armed inútil, que virava um ScheduleExpiry no-op.
--- Com a decisão 7 (pagar durante o evento), isso deixou de ser detalhe.
---
--- O prazo NÃO é resolvido aqui: chega pronto em $2, vindo de
--- GetEventCartSettings — a fonte única que já aplica a RN-34 (curto x
--- estendido, conforme close_cart_on_event_end) e o fallback para a loja. O
--- COALESCE inline que existia aqui era a terceira cópia da mesma regra.
---
--- QUEM ESTÁ NA FILA GANHA O PRAZO EXTRA DO EVENTO.
---
--- Todo carrinho recebia o MESMO expires_at — um UPDATE, um now() — então os
--- três vencidos em 04/08 tinham 18:38:51.703178 idêntico ao microssegundo. Quem
--- esperava um produto morria no mesmo instante de quem o segurava, e a promoção
--- da fila não tinha intervalo nenhum para acontecer: as três linhas terminaram
--- 'expired' com notified_at NULL. Ninguém foi avisado.
---
--- O extra é `waitlist_notified_ttl_minutes` do EVENTO — a mesma configuração
--- que o lojista já preenche para responder "quanto tempo A MAIS quem espera
--- tem". Não é número novo nem regra nova: é a regra dele, aplicada onde
--- finalmente importa. Sem isso ela só valia depois da promoção, e a promoção
--- nunca chegava.
---
--- O critério é ter item AGUARDANDO ou PROMOVIDO com janela viva. Item já
--- 'expired' ou 'fulfilled' não estende nada — quem não espera mais não precisa
--- de prazo maior.
---
--- Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
+-- Eligibility is frozen atomically with commercial close, not re-read from a
+-- queue which may already have been fulfilled by the time this task executes.
 UPDATE carts c
 SET status = 'checkout',
-    expires_at = now() + make_interval(mins =>
+    expires_at = GREATEST(c.expires_at, e.commercial_closed_at + make_interval(mins =>
         sqlc.arg(expiration_minutes)::int
-        + CASE WHEN EXISTS (
-              SELECT 1 FROM waitlist_items wi
-              WHERE wi.cart_id = c.id
-                AND (wi.status = 'waiting'
-                     OR (wi.status = 'notified' AND wi.expires_at > now()))
-          ) THEN sqlc.arg(waitlist_extra_minutes)::int ELSE 0 END)
-WHERE c.event_id = $1
+        + CASE WHEN c.waitlist_extra_eligible IS TRUE
+          THEN sqlc.arg(waitlist_extra_minutes)::int ELSE 0 END))
+FROM live_events e
+WHERE c.event_id = sqlc.arg(event_id) AND e.id = c.event_id
+  AND e.commercial_closed_at IS NOT NULL
   AND c.status = 'active'
   AND c.payment_status IS DISTINCT FROM 'paid'
-  AND NOT c.never_expires   -- VIP: carrinho eterno nunca ganha prazo no fechamento
+  AND c.payment_status IS DISTINCT FROM 'refunded'
+  AND NOT c.never_expires
 RETURNING c.id;
 
 -- name: ShiftOpenCartExpirations :many
--- Propagação da edição de prazo do evento para quem JÁ está com o relógio
--- correndo: desloca expires_at pelo delta entre o prazo efetivo novo e o
--- antigo. DESLOCA, não recalcula — recalcular do zero apagaria as extensões
--- individuais (prazo extra da fila no finalize, GREATEST do reopen RN-10).
---
--- Quem fica de fora, e por quê:
---   • expires_at IS NULL — RN-04: evento ativo não tem relógio; o valor novo
---     passa a valer sozinho no fechamento (FinalizeCartsByEvent lê da fonte
---     única GetEventCartSettings);
---   • pago — A10: pagamento neutraliza o prazo, nada a deslocar;
---   • terminal (expired/cancelled) — o desfecho já aconteceu; "reviver" um
---     carrinho expirado por edição de configuração seria decisão de negócio
---     nova, não propagação.
--- O deslocamento pode cair no passado (lojista ENCURTOU dias depois): correto —
--- o cart.expire re-armado dispara na hora e o guard decide, como sempre.
-UPDATE carts
-SET expires_at = expires_at + make_interval(mins => sqlc.arg(delta_minutes)::int)
-WHERE event_id = $1
-  AND status IN ('active', 'checkout')
-  AND payment_status IS DISTINCT FROM 'paid'
-  AND expires_at IS NOT NULL
-RETURNING id;
+-- Recalculate from E and frozen eligibility. Preserve every deadline already
+-- granted, including individual extensions. Legacy carts without provable E or
+-- eligibility use the deadline/config snapshot instead of fabricating history.
+WITH candidates AS (
+    SELECT c.id, GREATEST(c.expires_at,
+        CASE WHEN e.commercial_closed_at IS NOT NULL AND c.waitlist_extra_eligible IS NOT NULL
+        THEN e.commercial_closed_at + make_interval(mins =>
+            (CASE WHEN e.close_cart_on_event_end
+              THEN COALESCE(e.cart_expiration_minutes, s.cart_expiration_minutes)
+              ELSE COALESCE(e.cart_extended_expiration_minutes, s.cart_extended_expiration_minutes) END)
+            + CASE WHEN c.waitlist_extra_eligible IS TRUE THEN e.waitlist_notified_ttl_minutes ELSE 0 END)
+        ELSE c.deadline_config_base_at + make_interval(mins =>
+            (CASE WHEN e.close_cart_on_event_end
+              THEN COALESCE(e.cart_expiration_minutes, s.cart_expiration_minutes)
+              ELSE COALESCE(e.cart_extended_expiration_minutes, s.cart_extended_expiration_minutes) END)
+            - c.deadline_config_x_minutes
+            + CASE WHEN c.waitlist_extra_eligible IS TRUE
+              THEN e.waitlist_notified_ttl_minutes - c.deadline_config_y_minutes ELSE 0 END)
+        END) AS deadline
+    FROM carts c
+    JOIN live_events e ON e.id = c.event_id
+    JOIN stores s ON s.id = e.store_id
+    WHERE c.event_id = sqlc.arg(event_id)
+      AND c.status IN ('active', 'checkout')
+      AND c.payment_status IS DISTINCT FROM 'paid'
+      AND c.payment_status IS DISTINCT FROM 'refunded'
+      AND NOT c.never_expires
+      AND c.expires_at IS NOT NULL
+)
+UPDATE carts c
+SET expires_at = candidates.deadline
+FROM candidates
+WHERE c.id = candidates.id AND candidates.deadline > c.expires_at
+  AND c.status IN ('active', 'checkout')
+  AND c.payment_status IS DISTINCT FROM 'paid'
+  AND c.payment_status IS DISTINCT FROM 'refunded'
+  AND NOT c.never_expires
+RETURNING c.id;
 
 -- name: CountCartsByEvent :one
 SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'active';
@@ -602,7 +545,10 @@ RETURNING *;
 DELETE FROM cart_items WHERE id = $1;
 
 -- name: GetCartItem :one
-SELECT * FROM cart_items WHERE id = $1;
+SELECT ci.*,to_jsonb(ci) AS original_item,
+ (SELECT COALESCE(jsonb_agg(to_jsonb(pl) ORDER BY pl.sequence),'[]'::jsonb) FROM cart_item_price_lots pl WHERE pl.cart_item_id=ci.id)::jsonb AS original_lots,
+ cart_item_price_lots_json(ci.id) AS price_lots
+FROM cart_items ci WHERE ci.id = $1;
 
 -- =============================================================================
 -- EVENT DETAILS - Stats and Cart Listing
@@ -700,7 +646,7 @@ SELECT
     c.payment_status,
     c.created_at,
     c.expires_at,
-    COALESCE(SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price), 0)::bigint AS total_value,
+    COALESCE(SUM(cart_item_available_total(ci.id)), 0)::bigint AS total_value,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items,
     COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int AS available_items,
     COALESCE(SUM(ci.waitlisted_quantity), 0)::int AS waitlisted_items
@@ -773,33 +719,28 @@ WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
 GROUP BY oi.session_id;
 
 -- name: ListOpenCartItemsByEvent :many
--- A quantidade FINAL de cada produto nos carrinhos que entram na projeção.
---
--- O predicado e a quantidade CHEIA são cópia literal de
--- GetEventStats.projected_revenue — inclusive a exclusão do carrinho já pago
--- ou estornado, que entrou junto nos dois lados. O que a Fatia 5 garante é que
--- os dois níveis usem O MESMO predicado; qualquer mudança aqui tem de acontecer
--- lá em cima na mesma edição, senão a soma das sessões deixa de fechar.
-SELECT
-    ci.cart_id,
-    ci.product_id,
-    ci.quantity,
-    ci.unit_price,
-    ct.event_id AS cart_event_id
+-- Projection and order snapshots share price/session lots. Legacy aggregate
+-- lots still allocate origin with the historical addition log.
+SELECT ci.cart_id, ci.product_id, SUM(l.quantity)::int AS quantity, l.unit_price,
+       ct.event_id AS cart_event_id,
+       (CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE l.session_id END)::uuid AS session_id,
+       (CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE ls.event_id END)::uuid AS session_event_id,
+       l.attribution_from_log
 FROM carts ct
 JOIN cart_items ci ON ci.cart_id = ct.id
+JOIN cart_item_price_lots l ON l.cart_item_id = ci.id
+LEFT JOIN live_sessions ls ON ls.id = l.session_id
 WHERE ct.status IN ('active', 'checkout')
   AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
-  AND (
-    ct.event_id = $1
-    -- Carrinho VIP eterno ancorado em OUTRO evento, mas que vendeu neste: entra
-    -- inteiro na projeção; ProjectBySessionForEvent fica só com a fatia de $1.
-    OR (ct.never_expires AND EXISTS (
-        SELECT 1 FROM cart_item_events cie2
-        JOIN live_sessions ls2 ON ls2.id = cie2.session_id
-        WHERE cie2.cart_id = ct.id AND ls2.event_id = $1))
-  )
-ORDER BY ci.cart_id, ci.product_id;
+  AND l.quantity > 0
+  AND (ct.event_id = $1 OR (ct.never_expires AND (
+      ls.event_id = $1 OR (l.attribution_from_log AND EXISTS (
+          SELECT 1 FROM cart_item_events cie JOIN live_sessions origin ON origin.id=cie.session_id
+          WHERE cie.cart_id=ct.id AND origin.event_id=$1)))))
+GROUP BY ci.cart_id, ci.product_id, l.unit_price, ct.event_id, l.attribution_from_log,
+         CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE l.session_id END,
+         CASE WHEN l.attribution_from_log THEN NULL::uuid ELSE ls.event_id END
+ORDER BY ci.cart_id, ci.product_id, l.unit_price;
 
 -- name: ListCartItemEventsByEvent :many
 -- O log de adições dos MESMOS carrinhos da query acima, na ordem que
@@ -907,6 +848,7 @@ SELECT * FROM carts
 WHERE event_id = $1 AND platform_user_id = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT purchase_closed
   AND erp_order_accepts_items(erp_order_status)
 ORDER BY created_at DESC
 LIMIT 1
@@ -924,6 +866,7 @@ LEFT JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $3
 WHERE c.event_id = $1 AND c.platform_user_id = $2
   AND c.status IN ('pending', 'active', 'checkout')
   AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+  AND NOT c.purchase_closed
   AND erp_order_accepts_items(c.erp_order_status)
 ORDER BY c.created_at DESC
 LIMIT 1;
@@ -947,6 +890,7 @@ SELECT
     c.customer_email,
     c.payment_status,
     c.payment_review_required,
+    c.purchase_closed,
     c.erp_order_status,
     c.paid_at,
     c.payment_integration_id,
@@ -995,6 +939,7 @@ SELECT
     ci.product_id,
     ci.quantity,
     ci.unit_price,
+    cart_item_price_lots_json(ci.id) AS price_lots,
     ci.waitlisted_quantity,
     p.name AS product_name,
     p.image_url AS product_image_url,
@@ -1061,14 +1006,14 @@ WITH pago AS (
     RETURNING *
 ), carimbo AS (
     UPDATE cart_items ci
-    SET paid_quantity = ci.quantity
+    SET paid_quantity = ci.quantity-ci.waitlisted_quantity
     -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
     -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
     -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
     -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
     -- forma: carimba quando a linha gravada diz que está paga.
     WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
-      AND ci.paid_quantity < ci.quantity
+      AND ci.paid_quantity < ci.quantity-ci.waitlisted_quantity
     RETURNING 1
 )
 SELECT * FROM pago;
@@ -1099,14 +1044,14 @@ WITH pago AS (
     RETURNING *
 ), carimbo AS (
     UPDATE cart_items ci
-    SET paid_quantity = ci.quantity
+    SET paid_quantity = ci.quantity-ci.waitlisted_quantity
     -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
     -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
     -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
     -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
     -- forma: carimba quando a linha gravada diz que está paga.
     WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
-      AND ci.paid_quantity < ci.quantity
+      AND ci.paid_quantity < ci.quantity-ci.waitlisted_quantity
     RETURNING 1
 )
 SELECT * FROM pago;
@@ -1602,9 +1547,19 @@ RETURNING *;
 -- dele: precisa ser calculado ANTES de escrever. Por isso a leitura travada
 -- vem primeiro, numa CTE, e a escrita usa o número que ela computou.
 WITH atual AS (
-    SELECT id, stock FROM products WHERE id = sqlc.arg(product_id)::uuid FOR UPDATE
+    SELECT id, stock, active FROM products WHERE id = sqlc.arg(product_id)::uuid FOR UPDATE
 ), tomado AS (
-    SELECT id, LEAST(GREATEST(stock, 0), sqlc.arg(desejado)::int) AS qtd FROM atual
+    SELECT id, CASE WHEN active AND NOT EXISTS (
+        SELECT 1 FROM waitlist_items wi JOIN carts c ON c.id=wi.cart_id
+        LEFT JOIN carts host ON host.id=c.joined_to_cart_id
+        WHERE wi.product_id=atual.id AND wi.status='waiting' AND wi.quantity>0
+          AND c.status IN ('active','checkout')
+          AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
+          AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+          AND (host.id IS NULL OR (host.status IN ('active','checkout')
+            AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
+            AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now())))
+    ) THEN LEAST(GREATEST(stock, 0), sqlc.arg(desejado)::int) ELSE 0 END AS qtd FROM atual
 ), aplicado AS (
     -- `erp_seq` sobe porque este É um movimento nosso, e o espelho decide se a
     -- leitura dele venceu comparando esse contador. Sem isto a retomada era
@@ -1646,28 +1601,36 @@ RETURNING *;
 
 
 -- name: ListCartGridItems :many
--- A grade que sobe para o ERP: os itens deste carrinho MAIS os de todos os
--- carrinhos juntados a ele.
---
--- Existe separada de ListNonWaitlistedCartItems de propósito. Aquela é usada
--- também pelo cancelamento e pela expiração, que devolvem estoque — e devolver
--- o estoque do carrinho VIZINHO ao cancelar este seria roubar a compra de outra
--- pessoa. A união vale só para a grade.
---
--- O mesmo produto pedido nos dois carrinhos vira UMA linha somada: o ERP aceita
--- um produto por linha, e mandar duas faria a segunda substituir a primeira.
+-- ERP group projection: same product and agreed price share a line. Distinct
+-- prices remain separate lines; no rounded average or maximum changes totals.
 SELECT p.external_id AS product_external_id,
        MIN(p.name)::text AS product_name,
        MIN(p.keyword)::text AS product_keyword,
-       SUM(ci.quantity - ci.waitlisted_quantity)::int AS quantity,
-       MAX(ci.unit_price)::bigint AS unit_price
+       SUM(l.quantity - l.waitlisted_quantity)::int AS quantity,
+       l.unit_price::bigint AS unit_price
 FROM cart_items ci
+JOIN cart_item_price_lots l ON l.cart_item_id = ci.id
 JOIN products p ON p.id = ci.product_id
 JOIN carts c ON c.id = ci.cart_id
 WHERE COALESCE(c.joined_to_cart_id, c.id) = sqlc.arg(cart_id)::uuid
-  AND ci.quantity > ci.waitlisted_quantity
+  AND l.quantity > l.waitlisted_quantity
   AND p.external_id IS NOT NULL AND p.external_id <> ''
-GROUP BY p.external_id;
+GROUP BY p.external_id, l.unit_price
+ORDER BY p.external_id, l.unit_price;
+
+-- name: ListNonWaitlistedCartPriceLots :many
+-- Payload/pricing projection. Stock release keeps ListNonWaitlistedCartItems,
+-- which returns one aggregate quantity per product for exactly-once events.
+SELECT ci.id, ci.cart_id, ci.product_id,
+       (l.quantity - l.waitlisted_quantity)::int AS quantity,
+       l.unit_price, l.waitlisted_quantity,
+       p.name AS product_name, p.external_id AS product_external_id,
+       p.keyword AS product_keyword, p.image_url AS product_image_url
+FROM cart_items ci
+JOIN cart_item_price_lots l ON l.cart_item_id = ci.id
+JOIN products p ON p.id = ci.product_id
+WHERE ci.cart_id = $1 AND l.quantity > l.waitlisted_quantity
+ORDER BY ci.product_id, l.sequence;
 
 -- name: ListJoinedCartIDs :many
 -- Os carrinhos que foram juntados a este. Vazio quando ele é independente.
@@ -1835,7 +1798,7 @@ SELECT
     COALESCE(c.coupon_discount_cents, 0)::bigint AS coupon_discount_cents,
     COALESCE(c.shipping_cost_cents, 0)::bigint   AS shipping_cost_cents,
     COALESCE((
-        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+        SELECT SUM(cart_item_available_total(ci.id))
         FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
     ), 0)::bigint AS subtotal_cents,
     COALESCE((

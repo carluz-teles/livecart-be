@@ -22,7 +22,7 @@ func (r *Repository) createPaymentAttempt(ctx context.Context, pool *pgxpool.Poo
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 	var review, payable bool
-	if err = tx.QueryRow(ctx, `SELECT payment_review_required,status IN ('active','checkout') AND COALESCE(payment_status,'pending') NOT IN ('paid','refunded') FROM carts WHERE id=$1 FOR UPDATE`, cartID).Scan(&review, &payable); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT payment_review_required,NOT purchase_closed AND status IN ('active','checkout') AND COALESCE(payment_status,'pending') NOT IN ('paid','refunded') FROM carts WHERE id=$1 FOR UPDATE`, cartID).Scan(&review, &payable); err != nil {
 		return "", err
 	}
 	if err := cartedit.AssertReady(ctx, tx, cartID); err != nil {
@@ -36,7 +36,7 @@ func (r *Repository) createPaymentAttempt(ctx context.Context, pool *pgxpool.Poo
 	}
 	var subtotal, shipping, coupon int64
 	var pct int
-	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT SUM((quantity-waitlisted_quantity)*unit_price) FROM cart_items WHERE cart_id=c.id),0),COALESCE(c.shipping_cost_cents,0),COALESCE(c.coupon_discount_cents,0),e.pix_discount_percent FROM carts c JOIN live_events e ON e.id=c.event_id WHERE c.id=$1`, cartID).Scan(&subtotal, &shipping, &coupon, &pct); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT cart_available_total_cents(c.id),COALESCE(c.shipping_cost_cents,0),COALESCE(c.coupon_discount_cents,0),e.pix_discount_percent FROM carts c JOIN live_events e ON e.id=c.event_id WHERE c.id=$1`, cartID).Scan(&subtotal, &shipping, &coupon, &pct); err != nil {
 		return "", err
 	}
 	expected := max(int64(0), subtotal+shipping-coupon)
@@ -53,7 +53,7 @@ func (r *Repository) createPaymentAttempt(ctx context.Context, pool *pgxpool.Poo
 	}
 	// Compare the quantities and prices actually sent, including same-total swaps.
 	// Simple protocol infers []byte as bytea; send JSON text for the jsonb cast.
-	if err = tx.QueryRow(ctx, `WITH sent AS (SELECT x->>'id' AS id,(x->>'quantity')::int AS qty,(x->>'unit_price')::bigint AS price FROM jsonb_array_elements($2::jsonb) x), current AS (SELECT product_id::text AS id,quantity-waitlisted_quantity AS qty,unit_price AS price FROM cart_items WHERE cart_id=$1 AND quantity>waitlisted_quantity) SELECT NOT EXISTS((SELECT * FROM sent EXCEPT SELECT * FROM current) UNION ALL (SELECT * FROM current EXCEPT SELECT * FROM sent))`, cartID, string(raw)).Scan(&valid); err != nil {
+	if err = tx.QueryRow(ctx, `WITH sent AS (SELECT x->>'id' AS id,(x->>'quantity')::int AS qty,(x->>'unit_price')::bigint AS price FROM jsonb_array_elements($2::jsonb) x), current AS (SELECT ci.product_id::text AS id,SUM(l.quantity-l.waitlisted_quantity)::int AS qty,l.unit_price AS price FROM cart_items ci JOIN cart_item_price_lots l ON l.cart_item_id=ci.id WHERE ci.cart_id=$1 AND l.quantity>l.waitlisted_quantity GROUP BY ci.product_id,l.unit_price) SELECT NOT EXISTS((SELECT * FROM sent EXCEPT ALL SELECT * FROM current) UNION ALL (SELECT * FROM current EXCEPT ALL SELECT * FROM sent))`, cartID, string(raw)).Scan(&valid); err != nil {
 		return "", err
 	}
 	if !valid {

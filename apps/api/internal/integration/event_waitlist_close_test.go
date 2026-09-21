@@ -1,23 +1,7 @@
 package integration
 
-// RN-32 — o item de fila NÃO ATENDIDO morre com o evento, e o carrinho volta a
-// poder expirar.
-//
-// O furo: o guard do ExpireCart se abstém de expirar QUALQUER carrinho com item
-// 'waiting', e o ramo 'waiting' não tem prazo nenhum. Como não existe mais
-// sweep de carrinhos, a task cart.expire dispara uma vez, encontra 0 rows e
-// encerra — nada mais a re-arma exceto uma promoção da fila, que por definição
-// não vem quando o carrinho da frente foi PAGO em vez de expirar. Resultado:
-// carrinho permanentemente vivo, com expires_at vencido, segurando o estoque
-// reservado dos seus itens não-waitlisted.
-//
-// O que estes testes travam:
-//  1. 'waiting' morre; 'notified' AINDA DENTRO da janela de TTL sobrevive (o
-//     PRD proíbe explicitamente matar quem acabou de ser promovido);
-//  2. 'notified' com janela JÁ VENCIDA morre junto;
-//  3. depois disso o guard do ExpireCart deixa de vetar e o carrinho expira;
-//  4. os carrinhos afetados voltam da operação para o chamador re-armar
-//     cart.expire — sem isso eles continuariam vivos mesmo com a fila morta.
+// Only the cart deadline expires unallocated waiting quantities. Legacy
+// notified units have already been allocated and never have an item timer.
 
 import (
 	"context"
@@ -76,6 +60,14 @@ func seedWaitlistCloseFixture(t *testing.T) waitlistCloseFixture {
 	}
 	addWaitlistItem := func(label, status string, expiresAt any, position int) {
 		t.Helper()
+		pending := 0
+		if status == "waiting" {
+			pending = 1
+		}
+		if _, err := testPool.Exec(ctx, `INSERT INTO cart_items(cart_id, product_id, quantity, waitlisted_quantity, unit_price)
+		    VALUES ($1, $2, 1, $3, 1000)`, f.carts[label], f.productID, pending); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := testPool.Exec(ctx,
 			`INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle,
 			     quantity, position, status, cart_id, expires_at)
@@ -107,7 +99,7 @@ func waitlistStatusByCart(t *testing.T, cartID string) string {
 	return status
 }
 
-func TestExpireEventWaitlistSparesLivePromotion(t *testing.T) {
+func TestExpireEventWaitlistSparesAllPromotions(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	f := seedWaitlistCloseFixture(t)
@@ -120,8 +112,16 @@ func TestExpireEventWaitlistSparesLivePromotion(t *testing.T) {
 	if got := waitlistStatusByCart(t, f.carts["waiting"]); got != "expired" {
 		t.Errorf("item 'waiting' ficou %q — sem morrer, o carrinho é eterno", got)
 	}
-	if got := waitlistStatusByCart(t, f.carts["notified-vencido"]); got != "expired" {
-		t.Errorf("item 'notified' com janela vencida ficou %q, queria \"expired\"", got)
+	var remaining, cancelled, original int
+	if err := testPool.QueryRow(ctx, `SELECT quantity,cancelled_quantity,original_quantity
+	    FROM waitlist_items WHERE cart_id=$1`, f.carts["waiting"]).Scan(&remaining, &cancelled, &original); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 || cancelled != 1 || original != 1 {
+		t.Fatalf("expired request lost quantity history: remaining=%d cancelled=%d original=%d", remaining, cancelled, original)
+	}
+	if got := waitlistStatusByCart(t, f.carts["notified-vencido"]); got != "notified" {
+		t.Errorf("legacy promoted unit changed to %q", got)
 	}
 	// O predicado antigo desta query (status IN ('waiting','notified')) mataria
 	// este aqui — o comprador foi promovido e ainda tem prazo válido.
@@ -140,7 +140,7 @@ func TestExpireEventWaitlistSparesLivePromotion(t *testing.T) {
 			t.Errorf("entrada sem dados para a DM: %+v", e)
 		}
 	}
-	if !unblocked[f.carts["waiting"]] || !unblocked[f.carts["notified-vencido"]] {
+	if !unblocked[f.carts["waiting"]] || unblocked[f.carts["notified-vencido"]] {
 		t.Errorf("carrinhos desbloqueados não vieram no retorno: %+v", entries)
 	}
 	if unblocked[f.carts["notified-vivo"]] {
@@ -148,41 +148,24 @@ func TestExpireEventWaitlistSparesLivePromotion(t *testing.T) {
 	}
 }
 
-func TestCartExpiresOnlyAfterWaitlistClose(t *testing.T) {
+func TestCartExpiresAtItsDeadlineWithWaitingItems(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	f := seedWaitlistCloseFixture(t)
 	cartID := f.carts["waiting"]
 
-	// Antes: o guard do ExpireCart se abstém — é aqui que o carrinho ficava
-	// preso para sempre.
-	before, err := testRepo.ExpireCartAndReleaseStock(ctx, cartID, f.storeID)
+	result, err := testRepo.ExpireCartAndReleaseStock(ctx, cartID, f.storeID)
 	if err != nil {
-		t.Fatalf("ExpireCartAndReleaseStock (antes): %v", err)
+		t.Fatalf("expire cart: %v", err)
 	}
-	if before.Eligible {
-		t.Fatal("carrinho com item 'waiting' expirou antes do fechamento da fila — o guard existe justamente para isso")
+	if !result.Eligible {
+		t.Fatal("waiting quantities prevented expiration at the cart deadline")
 	}
-
-	if _, err := testRepo.ExpireEventWaitlist(ctx, f.eventID); err != nil {
-		t.Fatalf("ExpireEventWaitlist: %v", err)
-	}
-
-	after, err := testRepo.ExpireCartAndReleaseStock(ctx, cartID, f.storeID)
-	if err != nil {
-		t.Fatalf("ExpireCartAndReleaseStock (depois): %v", err)
-	}
-	if !after.Eligible {
-		t.Fatal("carrinho continuou inexpirável mesmo com a fila encerrada")
-	}
-
 	var status string
-	if err := testPool.QueryRow(ctx,
-		`SELECT status FROM carts WHERE id = $1::uuid`, cartID,
-	).Scan(&status); err != nil {
-		t.Fatalf("reler cart: %v", err)
+	if err := testPool.QueryRow(ctx, `SELECT status FROM carts WHERE id = $1::uuid`, cartID).Scan(&status); err != nil {
+		t.Fatalf("read expired cart: %v", err)
 	}
 	if status != "expired" {
-		t.Errorf("cart.status = %q, queria \"expired\"", status)
+		t.Errorf("cart.status = %q, want expired", status)
 	}
 }

@@ -479,17 +479,14 @@ func (r *Repository) SetMedia(ctx context.Context, media PostMediaInput) error {
 	return nil
 }
 
-// SetWaitlistNotifiedTTLMinutes grava a janela extra do promovido da fila
-// (RN-10). A coluna existe em live_events desde a 000073 com CHECK 5..240 e o
-// runtime já a consome (GetWaitlistNotifiedTTL → notifiedUntil → o expires_at
-// do carrinho é empurrado com GREATEST); faltava só o caminho de escrita.
-// O clamp aqui é o guarda-costas do CHECK: um valor fora da faixa viraria 500.
+// SetWaitlistNotifiedTTLMinutes grava o adicional de prazo concedido no
+// encerramento aos carrinhos que ainda aguardam estoque. Zero desliga o extra.
 func (r *Repository) SetWaitlistNotifiedTTLMinutes(ctx context.Context, eventID, storeID string, minutes int) error {
-	if minutes < 5 {
-		minutes = 5
+	if minutes < 0 {
+		minutes = 0
 	}
-	if minutes > 240 {
-		minutes = 240
+	if minutes > 43200 {
+		minutes = 43200
 	}
 	uid, err := parseUUID(eventID)
 	if err != nil {
@@ -849,27 +846,6 @@ func (r *Repository) SetCartExpirationMinutes(ctx context.Context, eventID, stor
 		return fmt.Errorf("setting event cart expiration: %w", err)
 	}
 	return nil
-}
-
-// ShiftOpenCartExpirations desloca a janela dos carrinhos abertos do evento
-// pelo delta (minutos) e devolve os ids afetados para o re-arm do cart.expire.
-func (r *Repository) ShiftOpenCartExpirations(ctx context.Context, eventID string, deltaMinutes int) ([]string, error) {
-	uid, err := parseUUID(eventID)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := r.q.ShiftOpenCartExpirations(ctx, sqlc.ShiftOpenCartExpirationsParams{
-		EventID:      uid,
-		DeltaMinutes: int32(deltaMinutes),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("shifting open cart expirations: %w", err)
-	}
-	ids := make([]string, 0, len(rows))
-	for _, row := range rows {
-		ids = append(ids, pgUUIDString(row))
-	}
-	return ids, nil
 }
 
 func (r *Repository) UpdateEventTitle(ctx context.Context, id, title string) (EventRow, error) {
@@ -2333,11 +2309,14 @@ func (r *Repository) ListProjectionInputByEvent(ctx context.Context, eventID str
 			cartEvent = row.CartEventID.String()
 		}
 		items[i] = OpenCartItem{
-			CartID:      row.CartID.String(),
-			ProductID:   row.ProductID.String(),
-			Quantity:    int(row.Quantity.Int32),
-			UnitPrice:   row.UnitPrice.Int64,
-			CartEventID: cartEvent,
+			CartID:         row.CartID.String(),
+			ProductID:      row.ProductID.String(),
+			Quantity:       int(row.Quantity),
+			UnitPrice:      row.UnitPrice,
+			CartEventID:    cartEvent,
+			PriceLot:       !row.AttributionFromLog,
+			SessionID:      pgUUIDString(row.SessionID),
+			SessionEventID: pgUUIDString(row.SessionEventID),
 		}
 	}
 

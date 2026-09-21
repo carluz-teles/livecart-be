@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"livecart/apps/api/internal/cartpricing"
 	"strings"
 	"time"
 
@@ -449,7 +450,8 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			Keyword:            item.Keyword,
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
-			TotalPrice:         item.UnitPrice * int64(item.Quantity),
+			TotalPrice:         cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice),
+			PriceLots:          item.PriceLots,
 			WaitlistedQuantity: item.WaitlistedQuantity,
 			AvailableStock:     item.AvailableStock,
 			GroupName:          item.GroupName,
@@ -458,7 +460,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 
 		// Only count available (non-waitlisted) items in totals
 		if availableQty > 0 {
-			subtotal += item.UnitPrice * int64(availableQty)
+			subtotal += cartpricing.Available(item.PriceLots, item.Quantity, item.WaitlistedQuantity, item.UnitPrice)
 			totalItems += availableQty
 		}
 	}
@@ -516,6 +518,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		CheckoutURL:           output.Cart.CheckoutURL,
 		PlatformHandle:        output.Cart.PlatformHandle,
 		AllowEdit:             output.Cart.AllowEdit,
+		PurchaseClosed:        output.Cart.PurchaseClosed,
 		MaxQuantityPerItem:    output.Cart.MaxQuantityPerItem,
 		ExpiresAt:             output.Cart.ExpiresAt,
 		PaidAt:                output.Cart.PaidAt,
