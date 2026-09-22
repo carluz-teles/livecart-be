@@ -81,6 +81,7 @@ type ProductRef struct {
 // and the ScheduleExpiry/RunScheduledExpiry that stay integration-owned keep
 // compiling.
 type CartExpirySnapshot struct {
+	Protected     bool
 	StoreID       string
 	Status        string
 	PaymentStatus string

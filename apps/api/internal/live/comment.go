@@ -1107,8 +1107,9 @@ func (s *Service) processarItemDoComentario(
 			}
 			erpPendente = true
 		} else if clearErr := s.ingestRepo.ConfirmarItemNoERP(ctx, result.CartID, product.ID); clearErr != nil {
-			// Best-effort: a linha está no ERP, e uma marca velha só faria a
-			// varredura reenviar algo que já chegou — barulho, não perda.
+			erpPendente = true
+			// No successful response to the buyer until the exact ERP grid is
+			// acknowledged. Quantity alone does not prove the price matched.
 			logger.From(ctx, s.logger).Warn("não consegui limpar a marca de pendente",
 				zap.String("cart_id", result.CartID),
 				zap.String("product_id", product.ID),

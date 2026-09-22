@@ -80,5 +80,15 @@ func (s *Service) OnOrderRefunded(ctx context.Context, cartID, storeID string) e
 // repetir. Carrinho sem pedido não tem nada preso no ERP e sai por aqui mesmo.
 func (s *Service) OnCartExpired(ctx context.Context, cartID, storeID string) error {
 	ctx = logger.WithStore(ctx, storeID, "")
+	state, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("checking expired purchase: %w", err)
+	}
+	if (state.CartID != "" && state.CartID != cartID) || state.PurchaseClosed ||
+		state.PaymentStatus == "paid" || state.PaymentStatus == "refunded" || state.PaidAmountCents > 0 {
+		logger.From(ctx, s.logger).Info("stale cart expiry ignored for protected purchase",
+			zap.String("cart_id", cartID), zap.String("owner_cart_id", state.CartID))
+		return nil
+	}
 	return s.CancelERPOrderForCart(ctx, cartID, storeID)
 }

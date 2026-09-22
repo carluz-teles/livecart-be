@@ -197,3 +197,12 @@ RETURNING *;
 
 -- name: GetSentNotificationForComment :one
 SELECT id FROM notification_logs WHERE store_id=$1 AND platform_comment_id=$2 AND notification_type=$3 AND status='sent' ORDER BY created_at DESC LIMIT 1;
+-- name: IsEndedLiveComment :one
+-- Private replies to live comments are only allowed during the broadcast.
+-- Post/reel comments retain their separate seven-day window.
+SELECT EXISTS (
+    SELECT 1 FROM live_comments lc JOIN live_sessions ls ON ls.id=lc.session_id
+    JOIN live_events e ON e.id=ls.event_id
+    WHERE lc.platform_comment_id=sqlc.arg(comment_id) AND e.store_id=sqlc.arg(store_id)
+      AND ls.type='live' AND (ls.status='ended' OR ls.ended_at IS NOT NULL)
+)::boolean;

@@ -2156,6 +2156,9 @@ func (t *Tiny) SetOrderSituacao(ctx context.Context, orderID string, situacao in
 		return fmt.Errorf("setting order situacao: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("setting order situation for %s: %w", orderID, providers.ErrOrderNotFound)
+		}
 		return fmt.Errorf("set order situacao %d failed: status %d: %s", situacao, resp.StatusCode, tinyErrorDetail(body))
 	}
 	return nil
@@ -2351,6 +2354,16 @@ func (t *Tiny) GetOrderTotal(ctx context.Context, orderID string) (int64, bool, 
 // lojista tenha acrescentado pelo painel é apagada em silêncio na próxima
 // mutação, junto com o estoque que ela segurava.
 func (t *Tiny) GetOrderItems(ctx context.Context, orderID string) ([]providers.ERPOrderItem, error) {
+	return t.readOrderItems(ctx, orderID, true)
+}
+
+// GetOrderItemsForReflection only reads the sale. Invoice guards remain on the
+// mutation preflight (GetOrderItems), not on a read-only reconciliation.
+func (t *Tiny) GetOrderItemsForReflection(ctx context.Context, orderID string) ([]providers.ERPOrderItem, error) {
+	return t.readOrderItems(ctx, orderID, false)
+}
+
+func (t *Tiny) readOrderItems(ctx context.Context, orderID string, forMutation bool) ([]providers.ERPOrderItem, error) {
 	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
 	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
@@ -2384,7 +2397,7 @@ func (t *Tiny) GetOrderItems(ctx context.Context, orderID string) ([]providers.E
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("parsing order items: %w", err)
 	}
-	if nf, _ := out.IDNotaFiscal.Int64(); nf > 0 {
+	if nf, _ := out.IDNotaFiscal.Int64(); forMutation && nf > 0 {
 		return nil, fmt.Errorf("pedido %s tem a nota %d: %w", orderID, nf, providers.ErrPedidoComNotaFiscal)
 	}
 	itens := make([]providers.ERPOrderItem, 0, len(out.Itens))

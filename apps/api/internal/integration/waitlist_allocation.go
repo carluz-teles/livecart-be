@@ -89,6 +89,17 @@ func (r *Repository) PromoteNextWaitlistEntry(ctx context.Context, storeID, prod
 	if stock <= 0 {
 		return nil, nil
 	}
+	// A newer ERP invalidation makes the cached balance unsafe to promise.
+	// Check under the product lock also taken by webhook ingress, so a stale
+	// completed task cannot allocate stock while the newer read is pending.
+	var staleStock bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM erp_stock_sync_state
+        WHERE product_id=$1 AND (requested_revision>completed_revision OR deferred_at IS NOT NULL))`, productID).Scan(&staleStock); err != nil {
+		return nil, err
+	}
+	if staleStock {
+		return nil, inventory.ErrWaitlistPromotionDeferred
+	}
 	// Cancellation edits lock the cart too. Recheck the request after that lock
 	// so a customer cannot receive units cancelled while we selected the head.
 	var status string

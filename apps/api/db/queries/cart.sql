@@ -275,8 +275,25 @@ WHERE carts.id = $1
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
   AND NOT payment_review_required
   AND NOT never_expires
+  AND NOT purchase_closed
+  AND erp_order_accepts_items(erp_order_status)
+  AND NOT EXISTS (
+      SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
+        AND (host.payment_status IN ('paid','refunded') OR host.purchase_closed
+          OR host.payment_review_required OR host.status NOT IN ('active','checkout')
+          OR NOT erp_order_accepts_items(host.erp_order_status))
+  )
   AND expires_at <= now()
 RETURNING *;
+
+-- name: LockCartPurchaseForExpiry :many
+-- Payment and admission lock the owner before its children. Keep that order
+-- before changing a child deadline or releasing its stock.
+SELECT c.id, c.joined_to_cart_id FROM carts c
+WHERE c.id IN (SELECT origin.id FROM carts origin WHERE origin.id=$1
+              UNION SELECT origin.joined_to_cart_id FROM carts origin WHERE origin.id=$1)
+ORDER BY (c.id=(SELECT COALESCE(origin.joined_to_cart_id,origin.id) FROM carts origin WHERE origin.id=$1)) DESC,c.id
+FOR UPDATE;
 
 -- name: CancelCart :one
 -- Cancelamento MANUAL pelo lojista (LIV-84). Mesmo desenho guard-first do
@@ -296,6 +313,9 @@ WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
   AND NOT payment_review_required
+  AND NOT purchase_closed
+  AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
+      AND (host.purchase_closed OR host.payment_status IN ('paid','refunded') OR host.payment_review_required))
 RETURNING *;
 
 -- name: RestoreCancelledCartAsPaid :one
@@ -805,7 +825,8 @@ SELECT ci.id, ci.cart_id, ci.product_id,
        p.keyword AS product_keyword, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
-WHERE ci.cart_id = $1 AND ci.quantity > ci.waitlisted_quantity;
+WHERE ci.cart_id = $1 AND ci.quantity > ci.waitlisted_quantity
+ORDER BY p.id;
 
 -- name: ListExpiredCartsByEventAndProduct :many
 -- Returns expired carts for a specific event that contain a specific product (with available qty)
@@ -1148,7 +1169,8 @@ AND (sqlc.arg(to_state)::varchar <> 'reflecting' OR NOT EXISTS (
 -- dele, e é o estado dele que decide o que pode ser escrito. Sem isto, um
 -- carrinho juntado leria o próprio estado — vazio, sem pedido — e tentaria
 -- criar um segundo pedido para o mesmo conteúdo.
-SELECT c.erp_order_state, c.erp_stock_launched, COALESCE(c.external_order_id,'') AS external_order_id,
+SELECT c.id, COALESCE(c.payment_status,'pending')::text AS payment_status,
+       c.purchase_closed, c.erp_order_state, c.erp_stock_launched, COALESCE(c.external_order_id,'') AS external_order_id,
        COALESCE(c.erp_order_status,'') AS erp_order_status,
        c.paid_amount_cents,
        COALESCE(c.paid_at, c.created_at) AS paid_at
@@ -1453,15 +1475,22 @@ SET erp_pending_since = COALESCE(erp_pending_since, now())
 WHERE cart_id = sqlc.arg(cart_id)::uuid
   AND product_id = sqlc.arg(product_id)::uuid;
 
--- name: ConfirmarItemNoERP :exec
--- Limpa a marca: o ERP conhece esta linha.
-UPDATE cart_items
-SET erp_pending_since = NULL, erp_confirmed_quantity = quantity - waitlisted_quantity
-WHERE cart_id = sqlc.arg(cart_id)::uuid
-  AND product_id = sqlc.arg(product_id)::uuid
-  AND erp_pending_since IS NOT NULL
-  AND (erp_confirmed_quantity = quantity - waitlisted_quantity
-       OR EXISTS(SELECT 1 FROM carts c WHERE c.id=cart_items.cart_id AND c.erp_order_state='none' AND COALESCE(c.external_order_id,'')=''));
+-- name: ConfirmarItemNoERP :one
+-- Remote lines require exact-grid proof. A matching quantity alone cannot
+-- acknowledge a different price or a write that has not reached the ERP.
+WITH local_ack AS (
+    UPDATE cart_items SET erp_pending_since=NULL,erp_confirmed_quantity=quantity-waitlisted_quantity
+    WHERE cart_id=sqlc.arg(cart_id)::uuid AND product_id=sqlc.arg(product_id)::uuid
+      AND EXISTS(SELECT 1 FROM carts c WHERE c.id=cart_items.cart_id
+        AND c.joined_to_cart_id IS NULL AND NOT c.purchase_closed
+        AND c.erp_order_state='none' AND COALESCE(c.external_order_id,'')='')
+    RETURNING id
+)
+SELECT (EXISTS(SELECT 1 FROM local_ack) OR EXISTS(
+    SELECT 1 FROM cart_items ci WHERE ci.cart_id=sqlc.arg(cart_id)::uuid
+      AND ci.product_id=sqlc.arg(product_id)::uuid AND ci.erp_pending_since IS NULL
+      AND ci.erp_confirmed_quantity>=ci.quantity-ci.waitlisted_quantity
+))::boolean AS confirmed;
 
 -- name: ListarItensPendentesNoERP :many
 -- As linhas que o ERP não conhece, mais velhas que a carência.
@@ -1597,6 +1626,9 @@ SET status = 'cancelled', cancelled_reason = 'erp_cancelled'
 WHERE carts.id = $1
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT purchase_closed
+  AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
+      AND (host.purchase_closed OR host.payment_status IN ('paid','refunded') OR host.payment_review_required))
 RETURNING *;
 
 
@@ -1604,6 +1636,7 @@ RETURNING *;
 -- ERP group projection: same product and agreed price share a line. Distinct
 -- prices remain separate lines; no rounded average or maximum changes totals.
 SELECT p.external_id AS product_external_id,
+       MIN(COALESCE(c.joined_to_cart_id,c.id)::text)::uuid AS cart_id,
        MIN(p.name)::text AS product_name,
        MIN(p.keyword)::text AS product_keyword,
        SUM(l.quantity - l.waitlisted_quantity)::int AS quantity,
@@ -1612,7 +1645,8 @@ FROM cart_items ci
 JOIN cart_item_price_lots l ON l.cart_item_id = ci.id
 JOIN products p ON p.id = ci.product_id
 JOIN carts c ON c.id = ci.cart_id
-WHERE COALESCE(c.joined_to_cart_id, c.id) = sqlc.arg(cart_id)::uuid
+WHERE COALESCE(c.joined_to_cart_id, c.id) =
+      (SELECT COALESCE(owner.joined_to_cart_id,owner.id) FROM carts owner WHERE owner.id=sqlc.arg(cart_id)::uuid)
   AND l.quantity > l.waitlisted_quantity
   AND p.external_id IS NOT NULL AND p.external_id <> ''
 GROUP BY p.external_id, l.unit_price

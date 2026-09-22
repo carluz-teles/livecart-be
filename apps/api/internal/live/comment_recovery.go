@@ -213,6 +213,11 @@ func (s *Service) applyPersistentCommentItem(ctx context.Context, writer comment
 	available := result.Quantity - result.WaitlistedQuantity
 	pending := false
 	blocked := available > 0 && result.ERPBlocked && !result.ERPConfirmed
+	if blocked {
+		if err := s.ingestRepo.MarcarItemPendenteNoERP(ctx, result.CartID, product.ID); err != nil {
+			return nil, err
+		}
+	}
 	if available > 0 && s.stockReserver != nil && !result.ERPConfirmed && !blocked {
 		if !result.AlreadyApplied {
 			if err := s.stockReserver.NoteReserved(ctx, ReserveParams{Op: stockOpCartAdd,

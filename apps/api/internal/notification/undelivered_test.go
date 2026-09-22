@@ -305,3 +305,52 @@ func TestListaEhEscopadaPelaLoja(t *testing.T) {
 		t.Errorf("loja B enxergou %d entradas da loja A", len(entries))
 	}
 }
+
+func TestLiveReplyEligibilityUsesCurrentBroadcastState(t *testing.T) {
+	requireDB(t)
+	for _, tc := range []struct {
+		name, kind, status  string
+		direct, undelivered bool
+	}{
+		{name: "ended live", kind: "live", status: "ended", undelivered: true},
+		{name: "broadcast still live", kind: "live", status: "live"},
+		{name: "post campaign ended", kind: "post", status: "ended"},
+		{name: "inbound direct message has its own window", kind: "live", status: "ended", direct: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, event, cart := seedStoreEventCart(t)
+			var session string
+			if err := testPool.QueryRow(t.Context(), `INSERT INTO live_sessions(event_id,type,status,sequence_order) VALUES($1,$2,$3,1) RETURNING id::text`, event, tc.kind, tc.status).Scan(&session); err != nil {
+				t.Fatal(err)
+			}
+			comment := "window-" + cart
+			if _, err := testPool.Exec(t.Context(), `INSERT INTO live_comments(session_id,event_id,platform,platform_comment_id,platform_user_id,platform_handle,text) VALUES($1,$2,'instagram',$3,'ig-42','ana','Eu quero')`, session, event, comment); err != nil {
+				t.Fatal(err)
+			}
+			sender := &fakeDMSender{}
+			svc := &Service{queries: testQueries, dmSender: sender, logger: zap.NewNop()}
+			input := sendInput(store, event, cart)
+			input.PlatformCommentID = comment
+			input.CommentCreatedAt = time.Now().Add(-time.Hour)
+			input.DirectOnly = tc.direct
+			result, err := svc.Send(t.Context(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.undelivered {
+				if result.Status != StatusUndelivered || result.Reason != ReasonLiveEnded || sender.dmCalls != 0 || sender.replyCalls != 0 {
+					t.Fatalf("unexpected ended-live delivery: %+v %+v", result, sender)
+				}
+				_, _, at := readLog(t, result.LogID)
+				if at != nil {
+					t.Fatal("undelivered notification marked sent")
+				}
+			} else if result.Status != StatusSent {
+				t.Fatalf("valid notification blocked: %+v", result)
+			}
+			if tc.direct && (sender.dmCalls != 1 || sender.replyCalls != 0) {
+				t.Fatal("direct message incorrectly sent as comment reply")
+			}
+		})
+	}
+}

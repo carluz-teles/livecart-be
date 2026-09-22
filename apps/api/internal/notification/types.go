@@ -107,6 +107,7 @@ const (
 	// do private reply. É o caso que a campanha longa cria: a mensagem de
 	// maior conversão dispara dias depois do último comentário dele.
 	ReasonCommentWindowExpired UndeliverableReason = "comment_window_expired"
+	ReasonLiveEnded            UndeliverableReason = "live_ended"
 	// ReasonNoEligibleComment — não há comentário respondível (comprou por
 	// story/DM, ou o comentário foi apagado). Sem comentário, o Instagram só
 	// permite responder se ELE mandar mensagem primeiro.
@@ -120,6 +121,8 @@ const (
 // o mesmo texto do e-mail de aviso e da lista — duas cópias divergiriam.
 func UndeliverableReasonText(r UndeliverableReason) string {
 	switch r {
+	case ReasonLiveEnded:
+		return "A live terminou e o Instagram não permite mais responder a esse comentário. Peça ao cliente para iniciar uma conversa no direct."
 	case ReasonCommentWindowExpired:
 		return "O último comentário deste cliente tem mais de 7 dias — o prazo do Instagram para responder já passou."
 	case ReasonNoEligibleComment:

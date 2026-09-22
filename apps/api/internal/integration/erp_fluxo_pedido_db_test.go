@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"livecart/apps/api/internal/integration/providers"
 )
@@ -664,8 +665,14 @@ func TestVarreduraParaDePerguntarPorPedidoApagadoNoERP(t *testing.T) {
 
 	// O lojista apagou o pedido no ERP.
 	fake.sumidos[orderID] = true
+	// The sweep is global and bounded. Make this sale stale explicitly so
+	// fixtures created by earlier tests cannot push it out of the first page.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET erp_order_status_at=now()-interval '1 year' WHERE id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
 
-	svc.RunERPOrderStatusSweep(ctx, 0, 100)
+	svc.RunERPOrderStatusSweep(ctx, 30*24*time.Hour, 100)
 
 	_, _, atual, _ := cartERPState(t, fx.cartID)
 	if atual != string(providers.ERPOrderStatusNaoEncontrado) {
@@ -677,7 +684,7 @@ func TestVarreduraParaDePerguntarPorPedidoApagadoNoERP(t *testing.T) {
 	// A segunda varredura não pode perguntar de novo. É isto que a produção
 	// fazia 44 vezes por hora.
 	antes := len(fake.callsWithPrefix("GetSituacao:" + orderID))
-	svc.RunERPOrderStatusSweep(ctx, 0, 100)
+	svc.RunERPOrderStatusSweep(ctx, 30*24*time.Hour, 100)
 	depois := len(fake.callsWithPrefix("GetSituacao:" + orderID))
 
 	if depois != antes {

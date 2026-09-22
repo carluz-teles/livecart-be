@@ -122,6 +122,9 @@ type ERPLinkedProduct struct {
 }
 
 type CartERPOrderState struct {
+	CartID          string // Canonical owner of the ERP order, including joined purchases.
+	PaymentStatus   string
+	PurchaseClosed  bool
 	State           string
 	StockLaunched   bool
 	ExternalOrderID string

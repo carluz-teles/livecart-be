@@ -55,6 +55,15 @@ type CartPriceSyncCollaborators interface {
 	SetCartItemPriceLines(context.Context, string, string, []providers.ERPOrderItem) error
 }
 
+// A grouped purchase must be reflected and acknowledged in one transaction.
+type CartPurchaseSyncCollaborators interface {
+	ReflectCartPurchase(context.Context, string, string, string, []providers.ERPOrderItem) (*CartSyncReport, error)
+}
+
+type orderReflectionReader interface {
+	GetOrderItemsForReflection(context.Context, string) ([]providers.ERPOrderItem, error)
+}
+
 // SetCartSyncCollaborators liga o reflexo.
 func (s *Service) SetCartSyncCollaborators(c CartSyncCollaborators) { s.cartSync = c }
 
@@ -73,6 +82,7 @@ type CartSyncReport struct {
 	Skipped  string
 	Changes  []CartSyncChange
 	Imported int
+	Deferred int
 }
 
 // SyncCartFromERPOrder traz para o carrinho o que o pedido diz hoje.
@@ -99,6 +109,10 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
 		return nil, fmt.Errorf("loading cart ERP order state: %w", err)
+	}
+	if st.CartID != "" {
+		cartID = st.CartID
+		rel.CartID = cartID
 	}
 	casa := st.State
 	if !podeMutar(casa) || st.ExternalOrderID == "" {
@@ -132,9 +146,23 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 	if err != nil {
 		return nil, err
 	}
-	doPedido, err := erpProvider.GetOrderItems(ctx, st.ExternalOrderID)
+	var doPedido []providers.ERPOrderItem
+	if reader, ok := erpProvider.(orderReflectionReader); ok {
+		doPedido, err = reader.GetOrderItemsForReflection(ctx, st.ExternalOrderID)
+	} else {
+		doPedido, err = erpProvider.GetOrderItems(ctx, st.ExternalOrderID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading order items for reflection: %w", err)
+	}
+	if grouped, ok := s.cartSync.(CartPurchaseSyncCollaborators); ok {
+		rel, err := grouped.ReflectCartPurchase(ctx, cartID, storeID, st.ExternalOrderID, doPedido)
+		if err == nil && (len(rel.Changes) > 0 || rel.Deferred > 0) {
+			logger.From(ctx, s.logger).Info("purchase reconciled from ERP order",
+				zap.String("cart_id", cartID), zap.String("external_order_id", st.ExternalOrderID),
+				zap.Int("changes", len(rel.Changes)), zap.Int("deferred_products", rel.Deferred))
+		}
+		return rel, err
 	}
 	// A successful GET can confirm a previously uncertain Tiny write. Without
 	// this acknowledgement, an identical line is skipped below forever while

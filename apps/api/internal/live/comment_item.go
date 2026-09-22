@@ -35,20 +35,25 @@ func (r *Repository) appliedCommentItem(ctx context.Context, q commentQuerier, c
 	var result CommentItemResult
 	var status, erpStatus string
 	var itemExists bool
+	var purchaseClosed bool
 	err := q.QueryRow(ctx, `SELECT e.cart_id::text,c.token,e.quantity,e.waitlisted_quantity,e.is_new_cart,c.status,
         COALESCE(host.erp_order_status,c.erp_order_status,''),ci.id IS NOT NULL,
         COALESCE(ci.erp_pending_since IS NULL AND
-            ci.erp_confirmed_quantity >= ci.quantity-ci.waitlisted_quantity,false)
+            ci.erp_confirmed_quantity >= ci.quantity-ci.waitlisted_quantity,false),
+        c.purchase_closed OR COALESCE(host.purchase_closed,false)
+          OR COALESCE(host.payment_status,c.payment_status,'pending') IN ('paid','refunded')
+          OR COALESCE(host.status,c.status) IN ('cancelled','expired')
         FROM cart_item_events e JOIN carts c ON c.id=e.cart_id
         LEFT JOIN carts host ON host.id=c.joined_to_cart_id
         LEFT JOIN cart_items ci ON ci.cart_id=c.id AND ci.product_id=e.product_id
         WHERE e.platform_comment_id=$1 AND e.product_id=$2`, commentID, productID).Scan(
-		&result.CartID, &result.CartToken, &result.Quantity, &result.WaitlistedQuantity, &result.IsNewCart, &status, &erpStatus, &itemExists, &result.ERPConfirmed)
+		&result.CartID, &result.CartToken, &result.Quantity, &result.WaitlistedQuantity, &result.IsNewCart,
+		&status, &erpStatus, &itemExists, &result.ERPConfirmed, &purchaseClosed)
 	if err != nil {
 		return result, err
 	}
 	result.AlreadyApplied = true
-	result.ERPBlocked = providers.ERPOrderStatus(erpStatus).FechadoParaNovosItens()
+	result.ERPBlocked = purchaseClosed || providers.ERPOrderStatus(erpStatus).FechadoParaNovosItens()
 	if !itemExists || status == "cancelled" || status == "expired" {
 		result.Quantity = 0
 		result.SkipReason = "cart_terminated"

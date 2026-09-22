@@ -92,6 +92,11 @@ func TestReactOrderRefundedERP_RedeliveryIsIdempotent(t *testing.T) {
 func TestReactCartExpiredERP_RedeliveryIsIdempotent(t *testing.T) {
 	requireDB(t)
 	fx := seedPaidCart(t, 1, 0)
+	// This reactor fixture represents an unpaid, expired reservation. A paid
+	// cart is deliberately protected from cancellation, regardless of ERP state.
+	if _, err := testPool.Exec(t.Context(), `UPDATE carts SET payment_status='pending',purchase_closed=false,paid_amount_cents=0,status='expired' WHERE id=$1`, fx.cartID); err != nil {
+		t.Fatal(err)
+	}
 	fake := newScriptedERP()
 	svc := newFinalisationService(fake)
 

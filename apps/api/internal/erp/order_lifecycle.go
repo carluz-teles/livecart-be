@@ -130,6 +130,9 @@ func (s *Service) garantirPedidoDoCarrinho(ctx context.Context, cartID, storeID 
 	if err != nil {
 		return fmt.Errorf("loading cart ERP order state: %w", err)
 	}
+	if st.CartID != "" {
+		cartID = st.CartID
+	}
 
 	switch st.State {
 	case OrderStateOpen, OrderStateMutating, OrderStateReflecting, OrderStateConfirmed:
@@ -369,7 +372,13 @@ func (s *Service) MutateERPOrderItems(ctx context.Context, cartID, storeID strin
 // a mais contra o teto da conta. nil significa "não sei o que o pedido tem", e
 // aí a primeira passada sempre envia.
 func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaAplicada []providers.ERPOrderItem) error {
-	var err error
+	state, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("resolving purchase for ERP mutation: %w", err)
+	}
+	if state.CartID != "" {
+		cartID = state.CartID
+	}
 	ctx, err = s.withPendingERPGridOwnership(ctx, cartID)
 	if err != nil {
 		return err
@@ -1147,6 +1156,12 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 	if err != nil {
 		return fmt.Errorf("loading cart ERP order state: %w", err)
 	}
+	// A child's old expiry/cancellation must never cancel the owner's sale.
+	// Payment is authoritative even when a legacy ERP state still says open.
+	if (st.CartID != "" && st.CartID != cartID) || st.PurchaseClosed ||
+		st.PaymentStatus == "paid" || st.PaymentStatus == "refunded" || st.PaidAmountCents > 0 {
+		return fmt.Errorf("cart %s belongs to a closed, paid or joined purchase; cancellation requires reconciliation", cartID)
+	}
 	switch st.State {
 	case OrderStateNone, OrderStateCancelled:
 		return nil
@@ -1203,7 +1218,21 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 	}
 
 	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
-		return erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, providers.SituacaoCancelada)
+		err := erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, providers.SituacaoCancelada)
+		if errors.Is(err, providers.ErrOrderNotFound) && erpProvider.Name() == providers.ProviderTiny {
+			// A failed PUT alone is not evidence that the sale is absent. Verify
+			// through its GET using the same account and exact external binding.
+			_, readErr := erpProvider.GetOrderSituacao(ctx, st.ExternalOrderID)
+			if errors.Is(readErr, providers.ErrOrderNotFound) {
+				logger.From(ctx, s.logger).Info("ERP cancellation reconciled: order already absent",
+					zap.String("cart_id", cartID), zap.String("external_order_id", st.ExternalOrderID))
+				return nil
+			}
+			if readErr != nil {
+				return fmt.Errorf("verifying missing order before cancellation: %w", readErr)
+			}
+		}
+		return err
 	}); err != nil {
 		// Devolve o estado para a retentativa refazer o ciclo inteiro. Deixá-lo
 		// em 'cancelled' com o pedido vivo no ERP seria pior: o carrinho pararia
