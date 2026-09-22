@@ -106,7 +106,7 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 // consumed by the ScheduleExpiry/RunScheduledExpiry bridge that stays there; the
 // two coexist.
 func cartExpiryTerminal(s *CartExpirySnapshot) bool {
-	return s.Status == "expired" || s.Status == "cancelled" ||
+	return s.Protected || s.Status == "expired" || s.Status == "cancelled" ||
 		s.PaymentStatus == "paid" || s.PaymentStatus == "refunded"
 }
 
@@ -121,29 +121,25 @@ func cartExpiryTerminal(s *CartExpirySnapshot) bool {
 //     ERP (a ação irreversível de cancelar pedido só roda com o cart já 'expired').
 //  3. ERP (best-effort, fora do tx): agora roda no reactor cart.expired.
 //  4. Promove a waitlist de cada produto liberado (pós-commit, fire-and-forget).
-func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
+func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) error {
 	ctx = logger.WithStore(ctx, storeID, "")
 	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("expiry: failed to acquire cart lock", zap.String("cart_id", cartID), zap.Error(err))
-		return
+		return fmt.Errorf("acquiring expiry lock for cart %s: %w", cartID, err)
 	}
 	if !acquired {
-		// Webhook de pagamento está finalizando este mesmo cart. Ele decide.
-		logger.From(ctx, s.logger).Info("expiry: skip, finalisation in progress", zap.String("cart_id", cartID))
-		return
+		return fmt.Errorf("expiry deferred for cart %s: %w", cartID, erp.ErrCartBusy)
 	}
 	defer release()
 
 	res, err := s.repo.ExpireCartAndReleaseStock(ctx, cartID, storeID)
 	if err != nil {
-		logger.From(ctx, s.logger).Error("expiry: failed to expire cart", zap.String("cart_id", cartID), zap.Error(err))
-		return
+		return fmt.Errorf("expiring cart %s: %w", cartID, err)
 	}
 	if !res.Eligible {
 		// Pago ou já expirado/cancelado entre a seleção e o flip. Nada a fazer.
 		logger.From(ctx, s.logger).Info("expiry: cart no longer eligible (paid/terminal in gap)", zap.String("cart_id", cartID))
-		return
+		return nil
 	}
 
 	// ERP reversal (Tiny cancel/estorno) now runs in the cart.expired reactor
@@ -173,6 +169,7 @@ func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
 	for _, productID := range res.FreedProductIDs {
 		s.ProcessWaitlistForProduct(ctx, res.EventID, productID, storeID)
 	}
+	return nil
 }
 
 // ErrWaitlistPromotionDeferred means the oldest buyer is temporarily locked.

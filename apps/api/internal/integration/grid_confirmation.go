@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/cartedit"
@@ -17,6 +19,16 @@ func (r *Repository) ConfirmERPGrid(ctx context.Context, cartID string, grid []p
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	if err := confirmERPGridTx(ctx, tx, cartID, grid); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func confirmERPGridTx(ctx context.Context, tx pgx.Tx, cartID string, grid []providers.ERPOrderItem) error {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1`, cartID).Scan(&cartID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE COALESCE(joined_to_cart_id,id)=$1 ORDER BY (id=$1) DESC,id FOR UPDATE`, cartID); err != nil {
 		return err
 	}
@@ -63,7 +75,7 @@ func (r *Repository) ConfirmERPGrid(ctx context.Context, cartID string, grid []p
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // Only new, versioned pending lines are eligible. Legacy incident repairs need
@@ -71,8 +83,11 @@ func (r *Repository) ConfirmERPGrid(ctx context.Context, cartID string, grid []p
 func (s *Service) RecoverPendingERPItems(ctx context.Context) {
 	rows, err := s.repo.pool.Query(ctx, `WITH candidates AS (
         SELECT c.id FROM carts c WHERE c.status NOT IN ('cancelled','expired')
+        AND NOT c.purchase_closed AND COALESCE(c.payment_status,'pending') NOT IN ('paid','refunded')
         AND erp_order_accepts_items(c.erp_order_status)
-        AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=c.joined_to_cart_id AND NOT erp_order_accepts_items(host.erp_order_status))
+        AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=c.joined_to_cart_id
+          AND (NOT erp_order_accepts_items(host.erp_order_status) OR host.purchase_closed
+            OR host.payment_status IN ('paid','refunded') OR host.status IN ('cancelled','expired')))
         AND NOT EXISTS (SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=c.id AND w.revision>w.synced_revision)
         AND (c.erp_items_retry_at IS NULL OR c.erp_items_retry_at<now())
         AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id=c.id
@@ -138,6 +153,17 @@ func (s *Service) RecoverPendingERPItems(ctx context.Context) {
 		}
 		if ackFailed {
 			deferred++
+			continue
+		}
+		var stillPending bool
+		if err := s.repo.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cart_items WHERE cart_id=$1 AND erp_pending_since IS NOT NULL)`, c.cart).Scan(&stillPending); err != nil {
+			deferred++
+			s.logger.Warn("checking recovered grid acknowledgement", zap.String("cart_id", c.cart), zap.Error(err))
+			continue
+		}
+		if stillPending {
+			deferred++
+			s.logger.Info("ERP item recovery awaits verified grid", zap.String("cart_id", c.cart))
 			continue
 		}
 		acknowledged++

@@ -1795,6 +1795,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	}
 	startRecovery("comment-recovery", liveSvc.RecoverPendingComments)
 	if integrationSvc != nil {
+		startRecovery("cart-expiry-recovery", integrationSvc.RecoverRecentCartExpiries, time.Minute)
 		startRecovery("erp-item-recovery", integrationSvc.RecoverPendingERPItems)
 		startRecovery("erp-resync-recovery", integrationSvc.RecoverERPResync, 30*time.Second)
 	}
@@ -1807,24 +1808,24 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 }
 
 // cartExpiryScheduler adapts the events client to integration.CartExpiryScheduler,
-// enqueueing a cart.expire ETA task keyed "cart-expire:<id>" for dedup.
+// A deadline is part of the identity: an active old task can schedule the new
+// deadline without colliding with its own Asynq TaskID.
 type cartExpiryScheduler struct{ client *events.Client }
 
 func (s cartExpiryScheduler) ScheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error {
-	return s.client.Schedule(ctx, at, events.CartExpire, cartExpireTaskID(cartID), struct {
+	return s.client.Schedule(ctx, at, events.CartExpire, cartExpireTaskID(cartID, at), struct {
 		CartID string `json:"cart_id"`
 	}{CartID: cartID})
 }
 
-// RescheduleCartExpiry move um cart.expire já armado (extensão de prazo pela
-// fila). Um Schedule com o mesmo TaskID seria engolido como "já armado".
+// Old deadlines may still fire, but always re-read the current cart guard.
 func (s cartExpiryScheduler) RescheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error {
-	return s.client.Reschedule(ctx, at, events.CartExpire, cartExpireTaskID(cartID), struct {
-		CartID string `json:"cart_id"`
-	}{CartID: cartID})
+	return s.ScheduleCartExpiry(ctx, cartID, at)
 }
 
-func cartExpireTaskID(cartID string) string { return "cart-expire:" + cartID }
+func cartExpireTaskID(cartID string, at time.Time) string {
+	return fmt.Sprintf("cart-expire:%s:%d", cartID, at.UnixMicro())
+}
 
 // eventCloseScheduler adapts the events client to live.EventCloseScheduler,
 // enqueueing an event.window_close ETA task keyed "event-close:<id>" for dedup.

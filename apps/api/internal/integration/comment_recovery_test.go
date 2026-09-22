@@ -207,7 +207,7 @@ func (r *recoveringCommentERP) ReserveStockInERP(context.Context, string, string
 	return nil
 }
 
-func TestCommentWork_FullPipelineRetriesAfterERPFailureAndSessionEnd(t *testing.T) {
+func TestCommentWork_FullPipelineRetriesAfterERPFailureAndPostSessionEnd(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	fx := seedScaleEvent(t)
@@ -216,7 +216,7 @@ func TestCommentWork_FullPipelineRetriesAfterERPFailureAndSessionEnd(t *testing.
 		t.Fatal(err)
 	}
 	var sessionID string
-	if err := testPool.QueryRow(ctx, `INSERT INTO live_sessions(event_id,status,type,sequence_order) VALUES($1,'live','live',1) RETURNING id::text`, fx.eventID).Scan(&sessionID); err != nil {
+	if err := testPool.QueryRow(ctx, `INSERT INTO live_sessions(event_id,status,type,sequence_order) VALUES($1,'live','post',1) RETURNING id::text`, fx.eventID).Scan(&sessionID); err != nil {
 		t.Fatal(err)
 	}
 	media := "media-" + sessionID

@@ -18,6 +18,18 @@ func (s *Service) SetCartItemPriceLines(ctx context.Context, cartID, productID s
 }
 
 func (r *Repository) SetCartItemPriceLines(ctx context.Context, cartID, productID string, lines []providers.ERPOrderItem) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	if err := reflectCartItemPriceLines(ctx, tx, cartID, productID, lines); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func reflectCartItemPriceLines(ctx context.Context, tx pgx.Tx, cartID, productID string, lines []providers.ERPOrderItem) error {
 	desired := make(map[int64]int)
 	total := 0
 	for _, line := range lines {
@@ -27,11 +39,6 @@ func (r *Repository) SetCartItemPriceLines(ctx context.Context, cartID, productI
 		desired[line.UnitPrice] += line.Quantity
 		total += line.Quantity
 	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 	var status string
 	if err := tx.QueryRow(ctx, `SELECT status FROM carts WHERE id=$1 FOR UPDATE`, cartID).Scan(&status); err != nil {
 		return err
@@ -42,7 +49,7 @@ func (r *Repository) SetCartItemPriceLines(ctx context.Context, cartID, productI
 	var itemID string
 	var pending int
 	var unconfirmed bool
-	err = tx.QueryRow(ctx, `SELECT id::text,waitlisted_quantity,erp_pending_since IS NOT NULL FROM cart_items WHERE cart_id=$1 AND product_id=$2 FOR UPDATE`, cartID, productID).Scan(&itemID, &pending, &unconfirmed)
+	err := tx.QueryRow(ctx, `SELECT id::text,waitlisted_quantity,erp_pending_since IS NOT NULL FROM cart_items WHERE cart_id=$1 AND product_id=$2 FOR UPDATE`, cartID, productID).Scan(&itemID, &pending, &unconfirmed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if total == 0 {
 			return nil
@@ -123,5 +130,5 @@ func (r *Repository) SetCartItemPriceLines(ctx context.Context, cartID, productI
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }

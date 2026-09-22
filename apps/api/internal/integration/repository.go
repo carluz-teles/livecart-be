@@ -1161,9 +1161,16 @@ func (r *Repository) ConfirmarItemNoERP(ctx context.Context, cartID, productID s
 	if err != nil {
 		return err
 	}
-	return r.queries.ConfirmarItemNoERP(ctx, sqlc.ConfirmarItemNoERPParams{
+	confirmed, err := r.queries.ConfirmarItemNoERP(ctx, sqlc.ConfirmarItemNoERPParams{
 		CartID: cart, ProductID: prod,
 	})
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return live.ErrCommentERPPending
+	}
+	return nil
 }
 
 // UpdateLiveCommentResult updates the result of processing a live comment.
@@ -2255,6 +2262,21 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID, stor
 
 	var result ExpireCartResult
 	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+		locked, err := q.LockCartPurchaseForExpiry(ctx, cID)
+		if err != nil {
+			return fmt.Errorf("locking purchase for expiry: %w", err)
+		}
+		for _, row := range locked {
+			if row.ID == cID && row.JoinedToCartID.Valid {
+				ownerLocked := false
+				for _, member := range locked {
+					ownerLocked = ownerLocked || member.ID == row.JoinedToCartID
+				}
+				if !ownerLocked {
+					return fmt.Errorf("purchase changed while locking expiry: %w", erp.ErrCartBusy)
+				}
+			}
+		}
 		cart, err := q.ExpireCart(ctx, cID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -2391,6 +2413,9 @@ func (r *Repository) cancelCartComMotivo(ctx context.Context, cartID, storeID, m
 
 	var result CancelCartResult
 	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+		if _, err := q.LockCartPurchaseForExpiry(ctx, cID); err != nil {
+			return fmt.Errorf("locking purchase for cancellation: %w", err)
+		}
 		// Uma query OU a outra — nunca as duas. Elas diferem só no
 		// cancelled_reason que gravam, e rodar a primeira deixaria o carrinho já
 		// cancelado: a segunda cairia no próprio guard e voltaria ErrNoRows,
@@ -2753,6 +2778,8 @@ func (r *Repository) GetCartExpirySnapshot(ctx context.Context, cartID string) (
 		expiresAt = &t
 	}
 	return &CartExpirySnapshot{
+		Protected: cart.PurchaseClosed || cart.NeverExpires || cart.PaymentReviewRequired ||
+			providers.ERPOrderStatus(cart.ErpOrderStatus.String).FechadoParaNovosItens(),
 		StoreID:       uuidToString(event.StoreID),
 		Status:        cart.Status,
 		PaymentStatus: cart.PaymentStatus.String,
@@ -3842,6 +3869,9 @@ func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*
 		return nil, err
 	}
 	return &CartERPOrderState{
+		CartID:          uuidToString(row.ID),
+		PaymentStatus:   row.PaymentStatus,
+		PurchaseClosed:  row.PurchaseClosed,
 		State:           row.ErpOrderState,
 		StockLaunched:   row.ErpStockLaunched,
 		ExternalOrderID: row.ExternalOrderID,
@@ -4035,15 +4065,23 @@ func (r *Repository) AcquireCartFinalisationLock(ctx context.Context, cartID str
 		}
 	}
 
-	h := fnv.New64a()
-	_, _ = h.Write([]byte("erp_finalisation:" + cartID))
-	key := int64(h.Sum64())
-
 	conn, err := r.pool.Acquire(ctx)
 	if err != nil {
 		freeSlot()
 		return nil, false, fmt.Errorf("acquiring connection for advisory lock: %w", err)
 	}
+	var owner string
+	if err := conn.QueryRow(ctx, `SELECT COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1`, cartID).Scan(&owner); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		conn.Release()
+		freeSlot()
+		return nil, false, fmt.Errorf("resolving purchase lock owner: %w", err)
+	}
+	if owner == "" {
+		owner = cartID
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("erp_finalisation:" + owner))
+	key := int64(h.Sum64())
 	var ok bool
 	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&ok); err != nil {
 		conn.Release()
@@ -4520,7 +4558,7 @@ func (r *Repository) ListCartGridItems(ctx context.Context, cartID string) ([]No
 	out := make([]NonWaitlistedCartItem, 0, len(linhas))
 	for _, l := range linhas {
 		out = append(out, NonWaitlistedCartItem{
-			CartID:            cartID,
+			CartID:            uuidToString(l.CartID),
 			ProductExternalID: l.ProductExternalID.String,
 			ProductName:       l.ProductName,
 			ProductKeyword:    l.ProductKeyword,

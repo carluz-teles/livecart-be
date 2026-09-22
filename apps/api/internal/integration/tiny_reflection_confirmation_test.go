@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,8 +70,8 @@ func TestTinyReflectionAcknowledgesOnlyVerifiedPendingItems(t *testing.T) {
 			flow := erp.NewService(erpRepoAdapter{repo}, &invoicedTinyCollaborator{Service: svc, provider: provider}, zap.NewNop())
 			flow.SetCartSyncCollaborators(svc)
 			_, err = flow.SyncCartFromERPOrder(t.Context(), fx.cartID, fx.storeID)
-			wantErr := scenario == "invoiced order" || scenario == "read failure"
-			if (err != nil) != wantErr || (scenario == "invoiced order" && !errors.Is(err, providers.ErrPedidoComNotaFiscal)) {
+			wantErr := scenario == "read failure"
+			if (err != nil) != wantErr {
 				t.Fatalf("unexpected reflection error: %v", err)
 			}
 			var pending bool
@@ -80,7 +79,7 @@ func TestTinyReflectionAcknowledgesOnlyVerifiedPendingItems(t *testing.T) {
 			if err := testPool.QueryRow(t.Context(), `SELECT erp_pending_since IS NOT NULL,COALESCE(erp_confirmed_quantity,-1),quantity,unit_price FROM cart_items WHERE cart_id=$1`, fx.cartID).Scan(&pending, &confirmed, &quantity, &price); err != nil {
 				t.Fatal(err)
 			}
-			match := scenario == "legacy match" || scenario == "versioned match"
+			match := scenario == "legacy match" || scenario == "versioned match" || scenario == "invoiced order"
 			if pending == match || (match && confirmed != 2) {
 				t.Fatalf("pending=%v confirmed=%d verified=%v", pending, confirmed, match)
 			}

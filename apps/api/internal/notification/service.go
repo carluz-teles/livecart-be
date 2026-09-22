@@ -362,10 +362,30 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		message = TruncateMessage(message, MaxMessageBytes)
 	}
 
+	var endedLive bool
+	if !input.DirectOnly && input.PlatformCommentID != "" {
+		storeID, err := parseUUID(input.StoreID)
+		if err != nil {
+			return nil, err
+		}
+		endedLive, err = s.queries.IsEndedLiveComment(ctx, sqlc.IsEndedLiveCommentParams{
+			CommentID: input.PlatformCommentID, StoreID: storeID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("checking live reply eligibility: %w", err)
+		}
+	}
+
 	// Create log entry as pending
 	logID, err := s.createLog(ctx, input, StatusPending, message, nil)
 	if err != nil {
 		return nil, fmt.Errorf("persisting notification before delivery: %w", err)
+	}
+	if endedLive {
+		s.markUndelivered(ctx, logID, ReasonLiveEnded)
+		logger.From(ctx, s.logger).Info("notification not delivered: live reply window closed",
+			zap.String("store_id", input.StoreID), zap.String("comment_id", input.PlatformCommentID))
+		return &SendResult{LogID: logID, Status: StatusUndelivered, MessageText: message, Reason: ReasonLiveEnded}, nil
 	}
 
 	// RN-38 — a porta pode já estar fechada ANTES da tentativa.
@@ -411,7 +431,7 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 	// mensagem da loja na timeline pedindo DM deixou de ser o menor mal para
 	// virar ruído na live.
 	var sendErr error
-	if input.PlatformCommentID != "" {
+	if input.PlatformCommentID != "" && !input.DirectOnly {
 		logger.From(ctx, s.logger).Debug("trying comment reply first",
 			zap.String("comment_id", input.PlatformCommentID),
 		)
