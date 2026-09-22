@@ -5217,8 +5217,9 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 		return nil, fmt.Errorf("resolving ERP contact: %w", err)
 	}
 
-	// Collect non-waitlisted items
-	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cart.ID)
+	// The owner's order includes every linked cart, even when the owner has
+	// no items of its own. Waiting units remain outside the ERP reservation.
+	items, err := s.repo.ListCartGridItems(ctx, cart.ID)
 	if err != nil {
 		return nil, fmt.Errorf("listing cart items: %w", err)
 	}
@@ -5540,8 +5541,7 @@ func (s *Service) RunScheduledExpiry(ctx context.Context, cartID string) error {
 		}
 		return nil
 	}
-	s.ExpireCart(ctx, cartID, snap.StoreID)
-	return nil
+	return s.ExpireCart(ctx, cartID, snap.StoreID)
 }
 
 // WaitlistCloseScheduler arma a task ETA que mata a fila não atendida de um
@@ -5696,15 +5696,14 @@ func (s *Service) notifyWaitlistUnfulfilled(ctx context.Context, eventID string,
 // cartExpiryTerminal reports whether a cart is already in a state where expiry
 // must not run (paid/refunded or already expired/cancelled).
 func cartExpiryTerminal(s *CartExpirySnapshot) bool {
-	return s.Status == "expired" || s.Status == "cancelled" ||
+	return s.Protected || s.Status == "expired" || s.Status == "cancelled" ||
 		s.PaymentStatus == "paid" || s.PaymentStatus == "refunded"
 }
 
 // ExpireCart delega para inventory.Service (Bloco B3b — o núcleo concorrente vive
-// em internal/inventory). Assinatura pública preservada: RunScheduledExpiry, o
-// sweep e os testes de corrida continuam chamando integration.Service.
-func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
-	s.inventory().ExpireCart(ctx, cartID, storeID)
+// em internal/inventory). Erros chegam ao scheduler para manter a retentativa.
+func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) error {
+	return s.inventory().ExpireCart(ctx, cartID, storeID)
 }
 
 // ProcessExpiredCartsForProduct handles expired carts that contain the given product.

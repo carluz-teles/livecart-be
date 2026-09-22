@@ -351,6 +351,29 @@ func (q *Queries) GetStoreTestRecipient(ctx context.Context, id pgtype.UUID) (Ge
 	return i, err
 }
 
+const isEndedLiveComment = `-- name: IsEndedLiveComment :one
+SELECT EXISTS (
+    SELECT 1 FROM live_comments lc JOIN live_sessions ls ON ls.id=lc.session_id
+    JOIN live_events e ON e.id=ls.event_id
+    WHERE lc.platform_comment_id=$1 AND e.store_id=$2
+      AND ls.type='live' AND (ls.status='ended' OR ls.ended_at IS NOT NULL)
+)::boolean
+`
+
+type IsEndedLiveCommentParams struct {
+	CommentID string      `json:"comment_id"`
+	StoreID   pgtype.UUID `json:"store_id"`
+}
+
+// Private replies to live comments are only allowed during the broadcast.
+// Post/reel comments retain their separate seven-day window.
+func (q *Queries) IsEndedLiveComment(ctx context.Context, arg IsEndedLiveCommentParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isEndedLiveComment, arg.CommentID, arg.StoreID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const listNotificationsByEvent = `-- name: ListNotificationsByEvent :many
 SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason, platform_comment_id FROM notification_logs
 WHERE event_id = $1

@@ -233,14 +233,18 @@ func TestGradeDoERPSomaOsCarrinhosJuntados(t *testing.T) {
 		t.Errorf("grade do anfitrião tem %d linhas, quero 2 — o pedido no ERP é "+
 			"um só e carrega o conteúdo dos dois", len(depois))
 	}
-	// E a do carrinho juntado fica VAZIA: ele não tem pedido próprio.
+	// Both entry points resolve the same owner and grid; state resolution prevents creating a second order.
 	doJuntado, err := testRepo.ListCartGridItems(ctx, juntado)
 	if err != nil {
 		t.Fatalf("grade do juntado: %v", err)
 	}
-	if len(doJuntado) != 0 {
-		t.Errorf("o carrinho juntado ainda monta grade (%d linhas) — ele criaria "+
-			"um segundo pedido para o mesmo conteúdo", len(doJuntado))
+	if len(doJuntado) != len(depois) {
+		t.Fatalf("joined entry point lost the owner's grid: got=%d want=%d", len(doJuntado), len(depois))
+	}
+	for i := range depois {
+		if doJuntado[i] != depois[i] {
+			t.Fatalf("joined grid differs at line %d", i)
+		}
 	}
 }
 

@@ -371,10 +371,14 @@ type ErpStockMovement struct {
 }
 
 type ErpStockSyncState struct {
-	ProductID     pgtype.UUID        `json:"product_id"`
-	LastAttemptAt pgtype.Timestamptz `json:"last_attempt_at"`
-	LastSuccessAt pgtype.Timestamptz `json:"last_success_at"`
-	DeferredAt    pgtype.Timestamptz `json:"deferred_at"`
+	ProductID         pgtype.UUID        `json:"product_id"`
+	LastAttemptAt     pgtype.Timestamptz `json:"last_attempt_at"`
+	LastSuccessAt     pgtype.Timestamptz `json:"last_success_at"`
+	DeferredAt        pgtype.Timestamptz `json:"deferred_at"`
+	RequestedRevision int64              `json:"requested_revision"`
+	CompletedRevision int64              `json:"completed_revision"`
+	ReadOwner         pgtype.UUID        `json:"read_owner"`
+	ReadUntil         pgtype.Timestamptz `json:"read_until"`
 }
 
 type EventConsumed struct {

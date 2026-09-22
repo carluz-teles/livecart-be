@@ -81,6 +81,9 @@ WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
   AND NOT payment_review_required
+  AND NOT purchase_closed
+  AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
+      AND (host.purchase_closed OR host.payment_status IN ('paid','refunded') OR host.payment_review_required))
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until, waitlist_extra_eligible, deadline_config_base_at, deadline_config_x_minutes, deadline_config_y_minutes, purchase_closed
 `
 
@@ -183,6 +186,9 @@ SET status = 'cancelled', cancelled_reason = 'erp_cancelled'
 WHERE carts.id = $1
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT purchase_closed
+  AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
+      AND (host.purchase_closed OR host.payment_status IN ('paid','refunded') OR host.payment_review_required))
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until, waitlist_extra_eligible, deadline_config_base_at, deadline_config_x_minutes, deadline_config_y_minutes, purchase_closed
 `
 
@@ -392,14 +398,20 @@ func (q *Queries) CloseMergedCart(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
-const confirmarItemNoERP = `-- name: ConfirmarItemNoERP :exec
-UPDATE cart_items
-SET erp_pending_since = NULL, erp_confirmed_quantity = quantity - waitlisted_quantity
-WHERE cart_id = $1::uuid
-  AND product_id = $2::uuid
-  AND erp_pending_since IS NOT NULL
-  AND (erp_confirmed_quantity = quantity - waitlisted_quantity
-       OR EXISTS(SELECT 1 FROM carts c WHERE c.id=cart_items.cart_id AND c.erp_order_state='none' AND COALESCE(c.external_order_id,'')=''))
+const confirmarItemNoERP = `-- name: ConfirmarItemNoERP :one
+WITH local_ack AS (
+    UPDATE cart_items SET erp_pending_since=NULL,erp_confirmed_quantity=quantity-waitlisted_quantity
+    WHERE cart_id=$1::uuid AND product_id=$2::uuid
+      AND EXISTS(SELECT 1 FROM carts c WHERE c.id=cart_items.cart_id
+        AND c.joined_to_cart_id IS NULL AND NOT c.purchase_closed
+        AND c.erp_order_state='none' AND COALESCE(c.external_order_id,'')='')
+    RETURNING id
+)
+SELECT (EXISTS(SELECT 1 FROM local_ack) OR EXISTS(
+    SELECT 1 FROM cart_items ci WHERE ci.cart_id=$1::uuid
+      AND ci.product_id=$2::uuid AND ci.erp_pending_since IS NULL
+      AND ci.erp_confirmed_quantity>=ci.quantity-ci.waitlisted_quantity
+))::boolean AS confirmed
 `
 
 type ConfirmarItemNoERPParams struct {
@@ -407,10 +419,13 @@ type ConfirmarItemNoERPParams struct {
 	ProductID pgtype.UUID `json:"product_id"`
 }
 
-// Limpa a marca: o ERP conhece esta linha.
-func (q *Queries) ConfirmarItemNoERP(ctx context.Context, arg ConfirmarItemNoERPParams) error {
-	_, err := q.db.Exec(ctx, confirmarItemNoERP, arg.CartID, arg.ProductID)
-	return err
+// Remote lines require exact-grid proof. A matching quantity alone cannot
+// acknowledge a different price or a write that has not reached the ERP.
+func (q *Queries) ConfirmarItemNoERP(ctx context.Context, arg ConfirmarItemNoERPParams) (bool, error) {
+	row := q.db.QueryRow(ctx, confirmarItemNoERP, arg.CartID, arg.ProductID)
+	var confirmed bool
+	err := row.Scan(&confirmed)
+	return confirmed, err
 }
 
 const countCartsByEvent = `-- name: CountCartsByEvent :one
@@ -644,6 +659,14 @@ WHERE carts.id = $1
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
   AND NOT payment_review_required
   AND NOT never_expires
+  AND NOT purchase_closed
+  AND erp_order_accepts_items(erp_order_status)
+  AND NOT EXISTS (
+      SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
+        AND (host.payment_status IN ('paid','refunded') OR host.purchase_closed
+          OR host.payment_review_required OR host.status NOT IN ('active','checkout')
+          OR NOT erp_order_accepts_items(host.erp_order_status))
+  )
   AND expires_at <= now()
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until, waitlist_extra_eligible, deadline_config_base_at, deadline_config_x_minutes, deadline_config_y_minutes, purchase_closed
 `
@@ -1681,7 +1704,8 @@ func (q *Queries) GetCartERPOpAge(ctx context.Context, id pgtype.UUID) (float64,
 }
 
 const getCartERPOrderState = `-- name: GetCartERPOrderState :one
-SELECT c.erp_order_state, c.erp_stock_launched, COALESCE(c.external_order_id,'') AS external_order_id,
+SELECT c.id, COALESCE(c.payment_status,'pending')::text AS payment_status,
+       c.purchase_closed, c.erp_order_state, c.erp_stock_launched, COALESCE(c.external_order_id,'') AS external_order_id,
        COALESCE(c.erp_order_status,'') AS erp_order_status,
        c.paid_amount_cents,
        COALESCE(c.paid_at, c.created_at) AS paid_at
@@ -1691,6 +1715,9 @@ WHERE orig.id = $1
 `
 
 type GetCartERPOrderStateRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	PaymentStatus    string             `json:"payment_status"`
+	PurchaseClosed   bool               `json:"purchase_closed"`
 	ErpOrderState    string             `json:"erp_order_state"`
 	ErpStockLaunched bool               `json:"erp_stock_launched"`
 	ExternalOrderID  string             `json:"external_order_id"`
@@ -1713,6 +1740,9 @@ func (q *Queries) GetCartERPOrderState(ctx context.Context, id pgtype.UUID) (Get
 	row := q.db.QueryRow(ctx, getCartERPOrderState, id)
 	var i GetCartERPOrderStateRow
 	err := row.Scan(
+		&i.ID,
+		&i.PaymentStatus,
+		&i.PurchaseClosed,
 		&i.ErpOrderState,
 		&i.ErpStockLaunched,
 		&i.ExternalOrderID,
@@ -2393,6 +2423,7 @@ func (q *Queries) JoinCartIntoHost(ctx context.Context, arg JoinCartIntoHostPara
 
 const listCartGridItems = `-- name: ListCartGridItems :many
 SELECT p.external_id AS product_external_id,
+       MIN(COALESCE(c.joined_to_cart_id,c.id)::text)::uuid AS cart_id,
        MIN(p.name)::text AS product_name,
        MIN(p.keyword)::text AS product_keyword,
        SUM(l.quantity - l.waitlisted_quantity)::int AS quantity,
@@ -2401,7 +2432,8 @@ FROM cart_items ci
 JOIN cart_item_price_lots l ON l.cart_item_id = ci.id
 JOIN products p ON p.id = ci.product_id
 JOIN carts c ON c.id = ci.cart_id
-WHERE COALESCE(c.joined_to_cart_id, c.id) = $1::uuid
+WHERE COALESCE(c.joined_to_cart_id, c.id) =
+      (SELECT COALESCE(owner.joined_to_cart_id,owner.id) FROM carts owner WHERE owner.id=$1::uuid)
   AND l.quantity > l.waitlisted_quantity
   AND p.external_id IS NOT NULL AND p.external_id <> ''
 GROUP BY p.external_id, l.unit_price
@@ -2410,6 +2442,7 @@ ORDER BY p.external_id, l.unit_price
 
 type ListCartGridItemsRow struct {
 	ProductExternalID pgtype.Text `json:"product_external_id"`
+	CartID            pgtype.UUID `json:"cart_id"`
 	ProductName       string      `json:"product_name"`
 	ProductKeyword    string      `json:"product_keyword"`
 	Quantity          int32       `json:"quantity"`
@@ -2429,6 +2462,7 @@ func (q *Queries) ListCartGridItems(ctx context.Context, cartID pgtype.UUID) ([]
 		var i ListCartGridItemsRow
 		if err := rows.Scan(
 			&i.ProductExternalID,
+			&i.CartID,
 			&i.ProductName,
 			&i.ProductKeyword,
 			&i.Quantity,
@@ -3454,6 +3488,7 @@ SELECT ci.id, ci.cart_id, ci.product_id,
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1 AND ci.quantity > ci.waitlisted_quantity
+ORDER BY p.id
 `
 
 type ListNonWaitlistedCartItemsRow struct {
@@ -3986,6 +4021,41 @@ func (q *Queries) ListarItensPendentesNoERP(ctx context.Context, arg ListarItens
 			&i.ErpPendingSince,
 			&i.StoreID,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockCartPurchaseForExpiry = `-- name: LockCartPurchaseForExpiry :many
+SELECT c.id, c.joined_to_cart_id FROM carts c
+WHERE c.id IN (SELECT origin.id FROM carts origin WHERE origin.id=$1
+              UNION SELECT origin.joined_to_cart_id FROM carts origin WHERE origin.id=$1)
+ORDER BY (c.id=(SELECT COALESCE(origin.joined_to_cart_id,origin.id) FROM carts origin WHERE origin.id=$1)) DESC,c.id
+FOR UPDATE
+`
+
+type LockCartPurchaseForExpiryRow struct {
+	ID             pgtype.UUID `json:"id"`
+	JoinedToCartID pgtype.UUID `json:"joined_to_cart_id"`
+}
+
+// Payment and admission lock the owner before its children. Keep that order
+// before changing a child deadline or releasing its stock.
+func (q *Queries) LockCartPurchaseForExpiry(ctx context.Context, id pgtype.UUID) ([]LockCartPurchaseForExpiryRow, error) {
+	rows, err := q.db.Query(ctx, lockCartPurchaseForExpiry, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LockCartPurchaseForExpiryRow{}
+	for rows.Next() {
+		var i LockCartPurchaseForExpiryRow
+		if err := rows.Scan(&i.ID, &i.JoinedToCartID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
