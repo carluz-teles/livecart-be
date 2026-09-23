@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/jackc/pgx/v5"
+
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/integration/providers"
 )
@@ -48,12 +50,27 @@ type reflectionMember struct {
 }
 
 func (r *Repository) reflectCartPurchase(ctx context.Context, cartID, storeID, orderID string, grid []providers.ERPOrderItem, resolved map[string]string) (*erp.CartSyncReport, error) {
-	report := &erp.CartSyncReport{CartID: cartID}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	report, err := reflectCartPurchaseTx(ctx, tx, cartID, storeID, orderID, grid, resolved)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+func reflectCartPurchaseTx(
+	ctx context.Context, tx pgx.Tx, cartID, storeID, orderID string,
+	grid []providers.ERPOrderItem, resolved map[string]string,
+) (*erp.CartSyncReport, error) {
+	report := &erp.CartSyncReport{CartID: cartID}
+	var err error
 	var valid bool
 	if err = tx.QueryRow(ctx, `SELECT c.joined_to_cart_id IS NULL AND c.external_order_id=$2
         AND c.erp_order_state='reflecting' AND c.status NOT IN ('cancelled','expired')
@@ -195,9 +212,6 @@ func (r *Repository) reflectCartPurchase(ctx context.Context, cartID, storeID, o
 			kind = "removed"
 		}
 		report.Changes = append(report.Changes, erp.CartSyncChange{ExternalProductID: external, ProductID: resolved[external], Kind: kind, From: from, To: to})
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return nil, err
 	}
 	return report, nil
 }
