@@ -280,11 +280,10 @@ type OrderDetailResponse struct {
 	// loja e mesmo assim foi pago — o cancelamento foi revertido e o pedido
 	// seguiu o fluxo normal. O FE mostra isso no histórico do pedido.
 	CancellationRevertedAt *time.Time `json:"cancellationRevertedAt,omitempty"`
-	// CancellationRevertedReason: POR QUE o cancelamento foi desfeito. Os dois
-	// casos existem e o lojista precisa saber qual é — um diz "ela pagou assim
-	// mesmo", o outro diz "você reabriu o pedido no Tiny".
+	// CancellationRevertedReason distingue a origem da recuperação no histórico.
 	//   'payment_won'  — o pagamento entrou depois do cancelamento
 	//   'erp_reopened' — o lojista reabriu o pedido no ERP, à mão
+	//   'tiny_approved_after_expiry' — aprovação Tiny reconhecida após expiração
 	CancellationRevertedReason string `json:"cancellationRevertedReason,omitempty"`
 	// Waitlist são os produtos que a cliente pediu, a loja não tinha e ela
 	// entrou na fila. Não somam no total nem vão para a transportadora — são o
