@@ -18,6 +18,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/lib/logger"
 )
@@ -124,6 +125,65 @@ func (l *Listener) createPaidOrder(
 	if err != nil {
 		return fmt.Errorf("order OnCartPaid: loading cart items: %w", err)
 	}
+	sourceCarts := []pgtype.UUID{cid}
+	itemSources := make([]pgtype.UUID, len(items))
+	for i := range itemSources {
+		itemSources[i] = cid
+	}
+	eventMetadata := json.RawMessage("{}")
+	if providers.IsERPRecordedPaymentSnapshot(paymentSnapshot) {
+		var payment providers.PaymentStatus
+		if err := json.Unmarshal(paymentSnapshot, &payment); err != nil {
+			return err
+		}
+		if recovery, ok := payment.Metadata[providers.TinyApprovalAfterExpiry]; ok {
+			// The recovery preserves child origins instead of copying their units
+			// onto the owner. Include those closed sources in the paid snapshot.
+			children, err := l.pool.Query(ctx, `SELECT id FROM carts WHERE joined_to_cart_id=$1
+				AND purchase_closed ORDER BY id`, cid)
+			if err != nil {
+				return err
+			}
+			childIDs := []pgtype.UUID{}
+			for children.Next() {
+				var id pgtype.UUID
+				if err := children.Scan(&id); err != nil {
+					children.Close()
+					return err
+				}
+				childIDs = append(childIDs, id)
+			}
+			err = children.Err()
+			children.Close()
+			if err != nil {
+				return err
+			}
+			for _, childID := range childIDs {
+				childItems, err := l.queries.GetCartItemsForOrderMaterialization(ctx, childID)
+				if err != nil {
+					return err
+				}
+				items = append(items, childItems...)
+				sourceCarts = append(sourceCarts, childID)
+				for range childItems {
+					itemSources = append(itemSources, childID)
+				}
+			}
+			gmvCents = 0
+			for _, item := range items {
+				gmvCents += int64(item.Quantity) * item.UnitPrice
+			}
+			paidTotal = payment.Amount
+			discountCents = max(int64(0), gmvCents+shippingCents-paidTotal)
+			eventMetadata, err = json.Marshal(map[string]any{
+				"provider": "tiny", "payment_id": payment.PaymentID,
+				providers.TinyApprovalAfterExpiry: recovery,
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
 
 	// Only the legacy aggregate lots need log-based allocation. Their first-touch
 	// session is not evidence that all units came from that transmission.
@@ -133,19 +193,21 @@ func (l *Listener) createPaidOrder(
 		needsLegacy = needsLegacy || item.AttributionFromLog
 	}
 	if needsLegacy {
-		additions, err := l.queries.ListCartItemEventsForCart(ctx, cid)
-		if err != nil {
-			return fmt.Errorf("order OnCartPaid: loading legacy attribution: %w", err)
-		}
-		for _, a := range additions {
-			sessionID := ""
-			if a.SessionID.Valid {
-				sessionID = uuidStr(a.SessionID)
+		for _, sourceCart := range sourceCarts {
+			additions, err := l.queries.ListCartItemEventsForCart(ctx, sourceCart)
+			if err != nil {
+				return fmt.Errorf("order OnCartPaid: loading legacy attribution: %w", err)
 			}
-			key := uuidStr(a.ProductID)
-			legacyAdditions[key] = append(legacyAdditions[key], live.CartItemAddition{
-				SessionID: sessionID, Quantity: int(a.Quantity), UnitPrice: a.UnitPrice,
-			})
+			for _, a := range additions {
+				sessionID := ""
+				if a.SessionID.Valid {
+					sessionID = uuidStr(a.SessionID)
+				}
+				key := uuidStr(sourceCart) + ":" + uuidStr(a.ProductID)
+				legacyAdditions[key] = append(legacyAdditions[key], live.CartItemAddition{
+					SessionID: sessionID, Quantity: int(a.Quantity), UnitPrice: a.UnitPrice,
+				})
+			}
 		}
 	}
 
@@ -186,14 +248,15 @@ func (l *Listener) createPaidOrder(
 		return fmt.Errorf("order OnCartPaid: insert order: %w", err)
 	}
 
-	for _, item := range items {
+	for i, item := range items {
 		sessionID := ""
 		if item.SessionID.Valid {
 			sessionID = uuidStr(item.SessionID)
 		}
 		allocations := []live.SessionAllocation{{SessionID: sessionID, Quantity: int(item.Quantity), UnitPrice: item.UnitPrice}}
 		if item.AttributionFromLog {
-			allocations = live.AllocateBySession(int(item.Quantity), legacyAdditions[uuidStr(item.ProductID)])
+			key := uuidStr(itemSources[i]) + ":" + uuidStr(item.ProductID)
+			allocations = live.AllocateBySession(int(item.Quantity), legacyAdditions[key])
 		}
 		for _, allocation := range allocations {
 			var origin pgtype.UUID
@@ -265,7 +328,7 @@ func (l *Listener) createPaidOrder(
 		EventType:  "payment_confirmed",
 		OccurredAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 		Source:     "system",
-		Metadata:   json.RawMessage("{}"),
+		Metadata:   eventMetadata,
 	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("order OnCartPaid: insert payment_confirmed event: %w", err)
 	}

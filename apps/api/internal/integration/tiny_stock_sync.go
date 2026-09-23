@@ -50,6 +50,12 @@ func (s *Service) enqueueTinyProductWebhook(ctx context.Context, storeID, kind, 
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 	if kind == "estoque" {
+		// Recovery claims integration -> stock checkpoint. Acquire the shared
+		// integration first too, or ingress and recovery can deadlock each other.
+		// Keep the ping in this transaction: it only reports a durable delivery.
+		if _, err = tx.Exec(ctx, `UPDATE integrations SET metadata=COALESCE(metadata,'{}'::jsonb)||jsonb_build_object('stockWebhookLastPingAt',now()) WHERE id=$1`, integration.ID); err != nil {
+			return err
+		}
 		// Invalidate a GET already in flight before persisting the new revision.
 		// Lock order is product -> checkpoint, shared with waitlist allocation.
 		if _, err = tx.Exec(ctx, `UPDATE products SET erp_seq=erp_seq+1 WHERE store_id=$1 AND external_source='tiny' AND external_id=$2`, storeID, productID); err != nil {
@@ -74,12 +80,6 @@ func (s *Service) enqueueTinyProductWebhook(ctx context.Context, storeID, kind, 
 		Metadata: map[string]string{"store_id": storeID, "integration_id": integration.ID},
 	}); err != nil {
 		return err
-	}
-	if kind == "estoque" {
-		_, err = tx.Exec(ctx, `UPDATE integrations SET metadata=COALESCE(metadata,'{}'::jsonb)||jsonb_build_object('stockWebhookLastPingAt',now()) WHERE id=$1`, integration.ID)
-		if err != nil {
-			return err
-		}
 	}
 	return tx.Commit(ctx)
 }

@@ -261,10 +261,9 @@ func (s *Service) CancelCartFromERP(ctx context.Context, cartID, storeID string)
 // gesto aqui, no "confirmar pagamento manual", e os dois lados divergiam sempre
 // que ele esquecia um. Agora o Tiny é a fonte, e este é o caminho de volta.
 //
-// Usa a MESMA escrita guardada do pagamento por gateway — a que serializa
-// contra a expiração e recusa carrinho morto. O que muda é a origem: o
-// checkout_id leva o id do pedido no ERP, que é o que torna a operação
-// idempotente. A reentrega do webhook não paga duas vezes.
+// Usa a escrita guardada do pagamento normal. Uma aprovação Tiny posterior à
+// expiração tem recuperação própria, com leitura da venda e histórico atômico.
+// O checkout_id identifica o pedido ERP; reentrega não é outro pagamento.
 func (s *Service) MarkCartPaidFromERP(ctx context.Context, cartID, storeID string, amountCents int64) (bool, error) {
 	ctx = logger.WithStore(ctx, storeID, "")
 
@@ -274,6 +273,9 @@ func (s *Service) MarkCartPaidFromERP(ctx context.Context, cartID, storeID strin
 	}
 	if st.ExternalOrderID == "" {
 		return false, nil // sem pedido não há pagamento do ERP a seguir
+	}
+	if st.CartID != "" {
+		cartID = st.CartID
 	}
 
 	agora := time.Now()
@@ -298,6 +300,10 @@ func (s *Service) MarkCartPaidFromERP(ctx context.Context, cartID, storeID strin
 			return false, nil
 		}
 		if errors.Is(err, paymentdomain.ErrCartNotPayable) {
+			restored, restoreErr := s.restoreExpiredTinyApproval(ctx, cartID, storeID, st.ExternalOrderID)
+			if restoreErr != nil || restored {
+				return restored, restoreErr
+			}
 			// Carrinho expirado ou cancelado. O pagamento existe no ERP e o
 			// carrinho não pode recebê-lo — é caso de gente, e a aba "Precisam
 			// atenção" o pega pelo estado.

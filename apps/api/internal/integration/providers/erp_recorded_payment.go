@@ -7,6 +7,8 @@ import (
 
 const PaymentMethodERPManual = "erp_manual"
 
+const TinyApprovalAfterExpiry = "tiny_approved_after_expiry"
+
 // IsERPRecordedPaymentSnapshot identifies our internal acknowledgment of money
 // confirmed by the merchant in the ERP. It must not run checkout writes back
 // into that same sale.
