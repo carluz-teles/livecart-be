@@ -89,7 +89,7 @@ func TestTinyDeferredStockWebhookRecoversAfterEditReconciliation(t *testing.T) {
 		FROM erp_stock_sync_state WHERE product_id=$1`, productID).Scan(&deferred, &success); err != nil || !deferred || success {
 		t.Fatalf("notification lost or claimed successful: deferred=%v success=%v err=%v", deferred, success, err)
 	}
-	ids, err := svc.claimTinyStockChecks(t.Context(), row.StoreID)
+	ids, err := svc.claimERPStockChecks(t.Context(), row.StoreID)
 	if err != nil || len(ids) != 0 {
 		t.Fatalf("recovery repeatedly claimed blocked product: %v %v", ids, err)
 	}
@@ -101,7 +101,7 @@ func TestTinyDeferredStockWebhookRecoversAfterEditReconciliation(t *testing.T) {
 	if _, err := testPool.Exec(t.Context(), `UPDATE integrations SET metadata=metadata-'stockRecoveryClaimedAt' WHERE id=$1`, row.ID); err != nil {
 		t.Fatal(err)
 	}
-	ids, err = svc.claimTinyStockChecks(t.Context(), row.StoreID)
+	ids, err = svc.claimERPStockChecks(t.Context(), row.StoreID)
 	if err != nil || len(ids) != 1 || ids[0] != externalID {
 		t.Fatalf("resolved product not recovered: %v %v", ids, err)
 	}

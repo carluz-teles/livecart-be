@@ -201,20 +201,19 @@ func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integrat
 		}
 		return false, fmt.Errorf("ERP stock snapshot invalidated by concurrent change")
 	}
-	if integration.Provider == "tiny" {
-		_, err = s.repo.pool.Exec(ctx, `UPDATE erp_stock_sync_state SET last_success_at=now(),deferred_at=NULL,
-            completed_revision=GREATEST(completed_revision,$3) WHERE product_id=$1 AND read_owner=$2`, id, owner, requested)
-		if err != nil {
-			return false, fmt.Errorf("recording successful stock check: %w", err)
-		}
+	_, err = s.repo.pool.Exec(ctx, `UPDATE erp_stock_sync_state SET last_success_at=now(),deferred_at=NULL,
+ completed_revision=GREATEST(completed_revision,$3) WHERE product_id=$1 AND read_owner=$2`, id, owner, requested)
+	if err != nil {
+		return false, fmt.Errorf("recording successful stock check: %w", err)
 	}
+
 	logger.From(ctx, s.logger).Info("ERP available stock reconciled", zap.String("store_id", integration.StoreID), zap.String("provider", integration.Provider), zap.String("product_id", id), zap.String("external_product_id", externalID), zap.Int("previous_stock", previous), zap.Int("erp_available", available), zap.Int("admissible", admissible), zap.Bool("changed", previous != admissible))
 	return true, nil
 }
 
 // Claims at most ten products per account per minute. Checkpoints are bounded
 // by catalog size. A failed/missing webhook no longer leaves stock stale forever.
-func (s *Service) claimTinyStockChecks(ctx context.Context, storeID string) ([]string, error) {
+func (s *Service) claimERPStockChecks(ctx context.Context, storeID string) ([]string, error) {
 	tx, err := s.repo.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -222,7 +221,7 @@ func (s *Service) claimTinyStockChecks(ctx context.Context, storeID string) ([]s
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 	// A shared one-minute lease prevents replica count from multiplying the scan budget.
 	tag, err := tx.Exec(ctx, `UPDATE integrations SET metadata=COALESCE(metadata,'{}'::jsonb)||jsonb_build_object('stockRecoveryClaimedAt',now())
- WHERE store_id=$1 AND provider='tiny' AND status='active'
+ WHERE store_id=$1 AND type='erp' AND provider IN ('tiny','bling') AND status='active'
  AND COALESCE((metadata->>'stockRecoveryClaimedAt')::timestamptz,'epoch')<now()-interval '1 minute'`, storeID)
 	if err != nil {
 		return nil, err
@@ -238,7 +237,7 @@ func (s *Service) claimTinyStockChecks(ctx context.Context, storeID string) ([]s
      WHERE wi.product_id=p.id AND wi.status='waiting' AND wi.quantity>0
        AND c.status IN ('active','checkout') AND NOT c.purchase_closed
        AND COALESCE(c.payment_status,'pending') NOT IN ('paid','refunded')
-       AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+       AND (c.never_expires OR is_active_vip(c.store_id, c.platform_handle) OR c.expires_at IS NULL OR c.expires_at>now())
        AND (host.id IS NULL OR (NOT host.purchase_closed AND host.status IN ('active','checkout')
          AND COALESCE(host.payment_status,'pending') NOT IN ('paid','refunded')))
    ) THEN 0 WHEN EXISTS(
@@ -251,7 +250,7 @@ func (s *Service) claimTinyStockChecks(ctx context.Context, storeID string) ([]s
        AND COALESCE(c.payment_status,'pending') NOT IN ('paid','refunded') AND e.status='active'
    ) THEN 1 WHEN s.deferred_at IS NOT NULL OR s.requested_revision>s.completed_revision THEN 2 ELSE 3 END AS urgency
  FROM products p LEFT JOIN erp_stock_sync_state s ON s.product_id=p.id
- WHERE p.store_id=$1 AND p.external_source='tiny' AND p.active AND COALESCE(p.external_id,'')<>''
+ WHERE p.store_id=$1 AND p.external_source=(SELECT i.provider FROM integrations i WHERE i.store_id=$1 AND i.type='erp' AND i.status='active') AND p.active AND COALESCE(p.external_id,'')<>''
  AND NOT EXISTS(SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
      WHERE r.product_id=p.id AND r.revision>w.synced_revision)
  AND (s.last_attempt_at IS NULL OR s.last_attempt_at<now()-interval '5 minutes')
@@ -295,10 +294,10 @@ func (s *Service) claimTinyStockChecks(ctx context.Context, storeID string) ([]s
 	return result, nil
 }
 
-func (s *Service) RunTinyStockRecovery(ctx context.Context) {
-	rows, err := s.repo.pool.Query(ctx, `SELECT store_id::text FROM integrations WHERE type='erp' AND provider='tiny' AND status='active' ORDER BY store_id`)
+func (s *Service) RunERPStockRecovery(ctx context.Context) {
+	rows, err := s.repo.pool.Query(ctx, `SELECT store_id::text FROM integrations WHERE type='erp' AND provider IN ('tiny','bling') AND status='active' ORDER BY store_id`)
 	if err != nil {
-		s.logger.Warn("Tiny stock recovery cannot list accounts", zap.Error(err))
+		s.logger.Warn("ERP stock recovery cannot list accounts", zap.Error(err))
 		return
 	}
 	stores := []string{}
@@ -314,7 +313,7 @@ func (s *Service) RunTinyStockRecovery(ctx context.Context) {
 	}
 	rows.Close()
 	if err != nil {
-		s.logger.Warn("Tiny stock recovery cannot read accounts", zap.Error(err))
+		s.logger.Warn("ERP stock recovery cannot read accounts", zap.Error(err))
 		return
 	}
 	for _, storeID := range stores {
@@ -325,12 +324,12 @@ func (s *Service) RunTinyStockRecovery(ctx context.Context) {
 			accountCtx, cancel := context.WithTimeout(logger.WithStore(ctx, storeID, ""), 40*time.Second)
 			defer cancel()
 			integration, err := s.repo.GetActiveERP(accountCtx, storeID)
-			if err != nil || integration.Provider != "tiny" {
+			if err != nil {
 				return
 			}
-			ids, err := s.claimTinyStockChecks(accountCtx, storeID)
+			ids, err := s.claimERPStockChecks(accountCtx, storeID)
 			if err != nil {
-				s.logger.Warn("Tiny stock recovery cannot claim products", zap.Error(err))
+				s.logger.Warn("ERP stock recovery cannot claim products", zap.Error(err))
 				return
 			}
 			checked := 0
@@ -342,20 +341,20 @@ func (s *Service) RunTinyStockRecovery(ctx context.Context) {
 				// original context for subsequent waitlist/order processing.
 				applied, readErr := s.refreshERPAvailableStock(ratelimit.WithTinyCatalogRead(accountCtx), integration, id)
 				if readErr != nil {
-					logger.From(accountCtx, s.logger).Warn("Tiny stock recovery deferred", zap.String("external_product_id", id), zap.Error(readErr))
+					logger.From(accountCtx, s.logger).Warn("ERP stock recovery deferred", zap.String("external_product_id", id), zap.Error(readErr))
 					// A removed SKU must not starve the rest of the batch. The shared
 					// account limiter and context still stop work during a cooldown.
 					continue
 				}
 				if applied {
 					checked++
-					if err := s.ProcessWaitlistAfterStockWebhook(accountCtx, storeID, "tiny", id); err != nil {
-						logger.From(accountCtx, s.logger).Warn("Tiny stock recovery waitlist deferred", zap.String("external_product_id", id), zap.Error(err))
+					if err := s.ProcessWaitlistAfterStockWebhook(accountCtx, storeID, integration.Provider, id); err != nil {
+						logger.From(accountCtx, s.logger).Warn("ERP stock recovery waitlist deferred", zap.String("external_product_id", id), zap.Error(err))
 					}
 				}
 			}
 			if len(ids) > 0 {
-				logger.From(accountCtx, s.logger).Info("Tiny stock recovery batch finished", zap.Int("claimed", len(ids)), zap.Int("checked", checked))
+				logger.From(accountCtx, s.logger).Info("ERP stock recovery batch finished", zap.Int("claimed", len(ids)), zap.Int("checked", checked))
 			}
 		}()
 	}

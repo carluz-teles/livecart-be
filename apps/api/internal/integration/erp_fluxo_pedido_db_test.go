@@ -786,7 +786,8 @@ func TestMerchantEditCrashSweepCanClearLastItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := testPool.Exec(ctx, `INSERT INTO cart_erp_edit_requests(id,cart_id,revision,request,product_id,retained_quantity)
-        VALUES(gen_random_uuid(),$1,1,'{}',$2,2)`, fx.cartID, fx.productID); err != nil {
+ SELECT gen_random_uuid(),$1,1,jsonb_build_object('_execution',jsonb_build_object('version',1,'remote',true,'integrationId',id,'provider',provider)),$2,2
+ FROM integrations WHERE store_id=$3 AND status='active'`, fx.cartID, fx.productID, fx.storeID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := testPool.Exec(ctx, `DELETE FROM cart_items WHERE cart_id=$1`, fx.cartID); err != nil {

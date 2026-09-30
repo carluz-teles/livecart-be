@@ -2746,9 +2746,8 @@ func (r *Repository) GetCartByID(ctx context.Context, cartID string) (*CartRow, 
 
 // CartExpirySnapshot is the slim view the scheduled cart.expire handler needs:
 // the store (for ExpireCart), the lifecycle status and the current expires_at.
-// The window matters because ExpireCartAndReleaseStock's guard does NOT check
-// expires_at (the sweep pre-filters by it), so a scheduled task firing on a cart
-// whose window was extended must NOT expire it prematurely.
+// The snapshot prevents obsolete tasks from being rearmed; the transaction
+// rechecks the deadline and VIP membership before releasing any stock.
 // CartExpirySnapshot holds a cart's expiry-relevant fields. Its canonical home
 // moved to internal/inventory (Bloco B3b); this alias keeps the repository
 // builder and the ScheduleExpiry/RunScheduledExpiry bridge compiling unchanged.
@@ -2777,8 +2776,14 @@ func (r *Repository) GetCartExpirySnapshot(ctx context.Context, cartID string) (
 		t := cart.ExpiresAt.Time
 		expiresAt = &t
 	}
+	isVip, err := r.queries.IsVipHandle(ctx, sqlc.IsVipHandleParams{
+		StoreID: event.StoreID, PlatformHandle: cart.PlatformHandle,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("checking vip protection for expiry: %w", err)
+	}
 	return &CartExpirySnapshot{
-		Protected: cart.PurchaseClosed || cart.NeverExpires || cart.PaymentReviewRequired ||
+		Protected: cart.PurchaseClosed || cart.NeverExpires || isVip || cart.PaymentReviewRequired ||
 			providers.ERPOrderStatus(cart.ErpOrderStatus.String).FechadoParaNovosItens(),
 		StoreID:       uuidToString(event.StoreID),
 		Status:        cart.Status,
@@ -3525,6 +3530,14 @@ func (r *Repository) ConsolidateEternalCartForHandle(ctx context.Context, storeI
 	if len(carts) == 0 {
 		return out, tx.Commit(ctx)
 	}
+	// An accepted stock edit belongs to its current purchase. Moving its items
+	// would detach the durable revision (including native orders not yet born).
+	// Membership/expiry protection was saved before this optional consolidation.
+	for _, cart := range carts {
+		if err := cartedit.AssertReady(ctx, tx, uuidToString(cart.ID)); err != nil {
+			return out, err
+		}
+	}
 
 	dest := carts[0].ID
 	for _, src := range carts[1:] {
@@ -3868,7 +3881,14 @@ func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*
 	if err != nil {
 		return nil, err
 	}
+	var expiresAt *time.Time
+	if row.ExpiresAt.Valid {
+		expiresAt = &row.ExpiresAt.Time
+	}
 	return &CartERPOrderState{
+		CartStatus:      row.CartStatus,
+		ExpiresAt:       expiresAt,
+		ExpiryProtected: row.ExpiryProtected,
 		CartID:          uuidToString(row.ID),
 		PaymentStatus:   row.PaymentStatus,
 		PurchaseClosed:  row.PurchaseClosed,

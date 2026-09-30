@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 )
@@ -110,6 +111,10 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 		if !payable || currentOwner != ownerCartID {
 			return result, fmt.Errorf("cart changed before accepting item")
 		}
+	}
+
+	if err := cartedit.AssertReady(ctx, tx, ownerCartID); err != nil {
+		return result, err
 	}
 
 	var stock, maximum, current int

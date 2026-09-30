@@ -88,7 +88,7 @@ type StockCollaborators interface {
 // PRÉ-REQUISITO: a conta precisa ter o módulo de Reserva de Estoque ativo. Sem
 // ele o pedido não reserva nada e a live venderia às cegas.
 func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
-	if _, err := s.repo.GetActiveERP(ctx, storeID); err != nil {
+	if _, err := s.activeERP(ctx, storeID); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) && !httpx.IsNotFound(err) {
 			return fmt.Errorf("checking active ERP before reservation: %w", err)
 		}

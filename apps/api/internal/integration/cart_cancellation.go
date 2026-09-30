@@ -120,12 +120,10 @@ func (s *Service) ReactCartCancelledERP(ctx context.Context, cartID, storeID str
 // saída-manual estornadas. Idempotente por erp_order_state.
 //
 // Um cart cancelado pelo lojista e um expirado deixam EXATAMENTE a mesma pegada
-// pré-pagamento, então reusamos o reactor canônico do pacote erp (OnCartExpired)
-// — DRY, um único ponto de verdade para a reversão (Regra nº1). A extração do
-// ERP (Bloco B2) tornou reverseCartReservationsInERP privado ao erp; OnCartExpired
-// é a superfície pública equivalente.
+// pré-pagamento. O cancelamento explícito usa a operação canônica do ERP sem
+// o guard de VIP reservado à expiração automática; pagamento continua protegido.
 func (s *Service) reverseCartERPFootprint(ctx context.Context, cartID, storeID string) error {
-	return s.ERP().OnCartExpired(ctx, cartID, storeID)
+	return s.ERP().CancelERPOrderForCart(ctx, cartID, storeID)
 }
 
 // =============================================================================

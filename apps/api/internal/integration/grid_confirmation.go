@@ -50,7 +50,7 @@ func confirmERPGridTx(ctx context.Context, tx pgx.Tx, cartID string, grid []prov
 		_, err = tx.Exec(ctx, `WITH members AS (
             SELECT ci.id,ci.quantity-ci.waitlisted_quantity AS qty
             FROM cart_items ci JOIN products p ON p.id=ci.product_id JOIN carts c ON c.id=ci.cart_id
-            WHERE COALESCE(c.joined_to_cart_id,c.id)=$1 AND p.external_id=$2
+            WHERE COALESCE(c.joined_to_cart_id,c.id)=$1 AND (c.joined_to_cart_id IS NULL OR c.status NOT IN ('cancelled','expired')) AND p.external_id=$2
         ), actual AS (
             SELECT l.unit_price AS price,SUM(l.quantity-l.waitlisted_quantity)::bigint AS qty
             FROM members m JOIN cart_item_price_lots l ON l.cart_item_id=m.id
@@ -88,7 +88,7 @@ func (s *Service) RecoverPendingERPItems(ctx context.Context) {
         AND NOT EXISTS(SELECT 1 FROM carts host WHERE host.id=c.joined_to_cart_id
           AND (NOT erp_order_accepts_items(host.erp_order_status) OR host.purchase_closed
             OR host.payment_status IN ('paid','refunded') OR host.status IN ('cancelled','expired')))
-        AND NOT EXISTS (SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=c.id AND w.revision>w.synced_revision)
+        AND NOT EXISTS (SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=COALESCE(c.joined_to_cart_id,c.id) AND w.revision>w.synced_revision)
         AND (c.erp_items_retry_at IS NULL OR c.erp_items_retry_at<now())
         AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id=c.id
             AND ci.erp_pending_since<now()-interval '30 seconds' AND ci.erp_confirmed_quantity IS NOT NULL)

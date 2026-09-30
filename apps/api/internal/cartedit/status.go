@@ -36,7 +36,7 @@ func Read(ctx context.Context, db Reader, cartID string) (*Status, error) {
 	var s Status
 	err := db.QueryRow(ctx, `SELECT revision>synced_revision,
 		COALESCE(lease_until>now(),false),COALESCE(last_error,''),attempts,blocked_at IS NOT NULL AND revision>synced_revision
-        FROM cart_erp_edits WHERE cart_id=$1`, cartID).
+        FROM cart_erp_edits WHERE cart_id=(SELECT COALESCE(joined_to_cart_id,id) FROM carts WHERE id=$1)`, cartID).
 		Scan(&s.Pending, &s.Processing, &s.LastError, &s.Attempts, &s.Blocked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &s, nil
@@ -66,7 +66,7 @@ func PendingProducts(ctx context.Context, db interface {
 }, cartID string) ([]string, error) {
 	rows, err := db.Query(ctx, `SELECT DISTINCT p.external_id FROM cart_erp_edit_requests r
         JOIN products p ON p.id=r.product_id JOIN cart_erp_edits w ON w.cart_id=r.cart_id
-        WHERE r.cart_id=$1 AND r.revision>w.synced_revision AND p.external_id IS NOT NULL`, cartID)
+        WHERE r.cart_id=(SELECT COALESCE(joined_to_cart_id,id) FROM carts WHERE id=$1) AND r.revision>w.synced_revision AND p.external_id IS NOT NULL`, cartID)
 	if err != nil {
 		return nil, err
 	}

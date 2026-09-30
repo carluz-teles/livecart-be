@@ -316,7 +316,11 @@ func TestComentarioQueChegaDuranteAExpiracao(t *testing.T) {
 
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = svc.OnCartExpired(ctx, "cart-1", "loja-1") }()
+		go func() {
+			defer wg.Done()
+			repo.expirarCarrinho("cart-1")
+			_ = svc.OnCartExpired(ctx, "cart-1", "loja-1")
+		}()
 		go func() {
 			defer wg.Done()
 			repo.definirItens("cart-1", item("p1", 3))
@@ -466,6 +470,7 @@ func TestLiveEmbaralhadaMantemAsInvariantes(t *testing.T) {
 			case 0:
 				_ = svc.ConfirmERPOrderPayment(ctx, cart, "loja-1", nil)
 			case 1:
+				repo.expirarCarrinho(cart)
 				_ = svc.OnCartExpired(ctx, cart, "loja-1")
 			case 2:
 				// segue aberto

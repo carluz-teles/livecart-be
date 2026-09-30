@@ -102,7 +102,7 @@ func TestTinyStockRecoveryClaimsRotateAndDoNotDuplicate(t *testing.T) {
 	results := make(chan []string, 2)
 	errs := make(chan error, 2)
 	for range 2 {
-		wg.Go(func() { ids, err := svc.claimTinyStockChecks(t.Context(), row.StoreID); results <- ids; errs <- err })
+		wg.Go(func() { ids, err := svc.claimERPStockChecks(t.Context(), row.StoreID); results <- ids; errs <- err })
 	}
 	wg.Wait()
 	close(results)
@@ -130,7 +130,7 @@ func TestTinyStockRecoveryClaimsRotateAndDoNotDuplicate(t *testing.T) {
 	if _, err := testPool.Exec(t.Context(), `UPDATE integrations SET metadata=metadata||jsonb_build_object('stockRecoveryClaimedAt',now()-interval '2 minutes') WHERE id=$1`, row.ID); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := svc.claimTinyStockChecks(t.Context(), row.StoreID)
+	ids, err := svc.claimERPStockChecks(t.Context(), row.StoreID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestTinyStockRecoveryPrioritizesWaitingBuyersWithoutStarvingCatalog(t *test
 	if _, err := testPool.Exec(t.Context(), `UPDATE erp_stock_sync_state s SET deferred_at=now() FROM products p WHERE p.id=s.product_id AND p.store_id=$1 AND p.external_id LIKE 'background-%' AND substring(p.external_id from 12)::int<=12`, row.StoreID); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := svc.claimTinyStockChecks(t.Context(), row.StoreID)
+	ids, err := svc.claimERPStockChecks(t.Context(), row.StoreID)
 	if err != nil || len(ids) != 10 {
 		t.Fatalf("claim: %v %v", ids, err)
 	}
