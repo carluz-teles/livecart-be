@@ -454,7 +454,7 @@ type ERPReservaResponse struct {
 // @Tags integrations
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Success 200 {object} httpx.Envelope{data=InstagramLivesResponse}
+// @Success 200 {object} httpx.Envelope{data=map[string][]providers.LiveMedia}
 // @Failure 404 {object} httpx.Envelope
 // @Router /api/v1/stores/{storeId}/integrations/instagram/lives [get]
 // @Security BearerAuth

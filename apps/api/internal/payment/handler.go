@@ -114,7 +114,7 @@ func (r ConnectPagarmeRequest) Validate() error {
 // @Produce json
 // @Param storeId path string true "Store ID"
 // @Param body body ConnectPagarmeRequest true "Pagar.me connection payload"
-// @Success 200 {object} httpx.Envelope{data=IntegrationResponse}
+// @Success 200 {object} httpx.Envelope{data=object}
 // @Failure 400 {object} httpx.Envelope
 // @Failure 422 {object} httpx.Envelope
 // @Router /api/v1/stores/{storeId}/integrations/payment/pagarme/connect [post]
