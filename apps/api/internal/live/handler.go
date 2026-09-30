@@ -516,6 +516,7 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 // @Success      201 {object} httpx.Envelope{data=SessionResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      404 {object} httpx.Envelope
+// @Failure      409 {object} httpx.Envelope "Publication already linked to a session"
 // @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/lives/{id}/sessions [post]
 // @Security     BearerAuth

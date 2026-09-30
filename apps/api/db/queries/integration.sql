@@ -95,7 +95,8 @@ LIMIT 1;
 
 -- name: UpdateIntegrationCredentials :exec
 UPDATE integrations
-SET credentials = $2, token_expires_at = $3, status = 'active', last_synced_at = now()
+SET credentials = $2, token_expires_at = $3, status = 'active', last_synced_at = now(),
+    metadata = COALESCE(metadata, '{}'::jsonb) - 'tokenRefreshFailure'
 WHERE id = $1;
 
 -- name: UpdateIntegrationStatus :exec

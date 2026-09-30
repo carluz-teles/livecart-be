@@ -2,12 +2,12 @@ package inventory
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/erp"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/lib/logger"
 )
@@ -174,7 +174,7 @@ func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) error 
 
 // ErrWaitlistPromotionDeferred means the oldest buyer is temporarily locked.
 // A stock event retries it instead of giving their units to a later request.
-var ErrWaitlistPromotionDeferred = errors.New("waitlist head temporarily unavailable")
+var ErrWaitlistPromotionDeferred = events.NewDeferredError("waitlist head temporarily unavailable")
 
 // ProcessWaitlistForProduct drains stock in store-wide FIFO order. eventID is
 // retained for existing callers; event membership never grants priority.

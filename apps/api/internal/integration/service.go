@@ -6373,6 +6373,9 @@ func (s *Service) reusableBlingCredentials(ctx context.Context, integration *Int
 	if previous != nil && !latest.IsExpired() && (latest.AccessToken != previous.AccessToken || latest.ExpiresAt.After(previous.ExpiresAt)) {
 		return latest, nil
 	}
+	if tokenRefreshDeferred(current, time.Now()) {
+		return nil, errTokenRefreshDeferred
+	}
 	return nil, nil
 }
 
@@ -6396,6 +6399,9 @@ func (s *Service) refreshBlingToken(ctx context.Context, integration *Integratio
 				(latest.AccessToken != creds.AccessToken || latest.ExpiresAt.After(creds.ExpiresAt)) {
 				refreshed = latest
 				return nil
+			}
+			if tokenRefreshDeferred(current, time.Now()) {
+				return errTokenRefreshDeferred
 			}
 			refreshed, refreshErr = s.refreshTokenWithRepository(ctx, repo, current, latest)
 			// Permanent OAuth failures update status inside this transaction.
@@ -6425,6 +6431,9 @@ func (s *Service) refreshTokenWithRepository(
 
 	newCreds, err := provider.RefreshToken(ctx)
 	if err != nil {
+		if cooldownErr := recordBlingTokenCooldown(ctx, repo, integration, err); cooldownErr != nil {
+			return nil, errors.Join(err, cooldownErr)
+		}
 		permanent := true
 		if integration.Provider == string(providers.ProviderBling) || integration.Provider == string(providers.ProviderInstagram) {
 			var classified interface{ Permanent() bool }
@@ -6582,6 +6591,7 @@ func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.Int
 	}
 	fields := []zap.Field{
 		zap.String("integration_id", log.IntegrationID),
+		zap.String("path", log.Path),
 		zap.String("entity_type", log.EntityType),
 		zap.String("entity_id", log.EntityID),
 		zap.String("direction", log.Direction),
@@ -6589,6 +6599,9 @@ func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.Int
 		zap.String("method", log.Method),
 		zap.Int("http_status", log.HTTPStatus),
 		zap.Duration("duration", log.Duration),
+	}
+	if log.StoreID != "" {
+		fields = append(fields, zap.String("store_id", log.StoreID))
 	}
 	operationLogger := logger.From(ctx, s.logger)
 	if log.Status == "error" {

@@ -14,6 +14,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"livecart/apps/api/internal/events"
 )
 
 // ErrCartNotConverted signals to the caller (paid-webhook / finalisation) that
@@ -33,7 +35,7 @@ var ErrPedidoFaturado = errors.New("pedido já faturado: não recebe mais item")
 // precisa esperar. É transitório por natureza — a mutação devolve o carrinho em
 // menos de um segundo —, e existe para o chamador saber que RETENTAR resolve, em
 // vez de tratar como falha e desistir.
-var ErrCartBusy = errors.New("cart com operação ERP em voo")
+var ErrCartBusy = events.NewDeferredError("cart com operação ERP em voo")
 
 // ERP order state machine (carts.erp_order_state column):
 //

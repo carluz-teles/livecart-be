@@ -573,13 +573,15 @@ func (r *Repository) ListWithExpiringTokens(ctx context.Context, expiresBefore t
 		return nil, fmt.Errorf("listing integrations with expiring tokens: %w", err)
 	}
 
-	result := make([]IntegrationRow, len(rows))
-	for i, row := range rows {
+	result := make([]IntegrationRow, 0, len(rows))
+	for _, row := range rows {
 		resolved, err := r.resolveIntegrationRow(ctx, row)
 		if err != nil {
 			return nil, err
 		}
-		result[i] = *resolved
+		if !tokenRefreshDeferred(resolved, time.Now()) {
+			result = append(result, *resolved)
+		}
 	}
 	return result, nil
 }
