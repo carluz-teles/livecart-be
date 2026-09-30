@@ -74,7 +74,7 @@ func (s *Service) PrepareCartForPayment(ctx context.Context, cartID, storeID str
 // qualquer forma.
 func (s *Service) PrewarmERPContact(ctx context.Context, storeID, platformUserID, platformHandle, name, document, email, phone string) {
 	ctx = logger.WithStore(ctx, storeID, "")
-	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
+	erpIntegration, err := s.activeERP(ctx, storeID)
 	if err != nil {
 		return
 	}
@@ -156,7 +156,7 @@ func (s *Service) garantirPedidoDoCarrinho(ctx context.Context, cartID, storeID 
 		return s.retomarCriacaoPresa(ctx, cartID, storeID)
 	}
 
-	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
+	erpIntegration, err := s.activeERP(ctx, storeID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || httpx.IsNotFound(err) {
 			return nil
@@ -323,9 +323,9 @@ func (s *Service) retomarCriacaoPresa(ctx context.Context, cartID, storeID strin
 		return s.openCartOrder(ctx, storeID, cartID, adopted)
 	}
 
-	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
+	erpIntegration, err := s.activeERP(ctx, storeID)
 	if err != nil {
-		return nil
+		return err
 	}
 	return s.criarPedidoParaCarrinho(ctx, cartID, storeID, erpIntegration)
 }
@@ -614,7 +614,7 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 	if err != nil {
 		return nil, err
 	}
-	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
+	erpIntegration, err := s.activeERP(ctx, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("loading ERP integration: %w", err)
 	}
@@ -916,7 +916,7 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		return fmt.Errorf("loading cart ERP order state: %w", err)
 	}
 
-	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
+	erpIntegration, err := s.activeERP(ctx, storeID)
 	if err != nil {
 		return fmt.Errorf("loading ERP integration: %w", err)
 	}
@@ -1138,6 +1138,10 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 // instante do cancelamento, sem nenhuma outra chamada. Estornar junto, num
 // pedido que só reservou, INFLARIA a reserva em vez de devolvê-la.
 func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID string) error {
+	return s.cancelERPOrderForCart(ctx, cartID, storeID, false)
+}
+
+func (s *Service) cancelERPOrderForCart(ctx context.Context, cartID, storeID string, expiryOnly bool) error {
 	// Mesma trava do confirm, e por um motivo concreto: os dois são operações
 	// TERMINAIS sobre o mesmo pedido, e o confirm reconcilia a grade antes de
 	// aprovar. Sem a exclusão, essa reconciliação aterrissa depois do
@@ -1156,10 +1160,21 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 	if err != nil {
 		return fmt.Errorf("loading cart ERP order state: %w", err)
 	}
+	// Read under the terminal-operation lock. Old queued expiry events must
+	// not cancel a reopened purchase or one protected after the event was sent.
+	if expiryOnly && (st.CartStatus != "expired" || st.ExpiryProtected ||
+		st.ExpiresAt == nil || st.ExpiresAt.After(time.Now())) {
+		logger.From(ctx, s.logger).Info("stale cart expiry ignored for protected purchase",
+			zap.String("cart_id", cartID), zap.String("status", st.CartStatus))
+		return nil
+	}
 	// A child's old expiry/cancellation must never cancel the owner's sale.
 	// Payment is authoritative even when a legacy ERP state still says open.
 	if (st.CartID != "" && st.CartID != cartID) || st.PurchaseClosed ||
 		st.PaymentStatus == "paid" || st.PaymentStatus == "refunded" || st.PaidAmountCents > 0 {
+		if expiryOnly {
+			return nil
+		}
 		return fmt.Errorf("cart %s belongs to a closed, paid or joined purchase; cancellation requires reconciliation", cartID)
 	}
 	switch st.State {
@@ -1344,43 +1359,8 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 	}
 	for _, op := range stuck {
 		opCtx := logger.WithStore(ctx, op.StoreID, "")
-		switch {
-		case op.State == OrderStateConverting && op.ExternalOrderID != "":
-			if err := s.openCartOrder(opCtx, op.StoreID, op.CartID, op.ExternalOrderID); err != nil {
-				logger.From(opCtx, s.logger).Warn("sweep failed to open stuck order",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-			}
-		case op.State == OrderStateConverting:
-			// Adota se o pedido existir; CRIA se não existir.
-			//
-			// Antes a varredura só tentava adotar e desistia — e um carrinho cuja
-			// criação morreu antes do POST ficava sem pedido para sempre, sem
-			// segurar estoque nenhum, esperando um pagamento que talvez nunca
-			// viesse. Medido numa live simulada: três carrinhos parados assim por
-			// mais de seis minutos, com a varredura rodando 31 vezes no meio.
-			if err := s.retomarCriacaoPresa(opCtx, op.CartID, op.StoreID); err != nil {
-				logger.From(opCtx, s.logger).Warn("sweep failed to resume a stuck creation",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-			}
-		case op.State == OrderStateReflecting:
-			resting := op.RestingState
-			if resting == "" {
-				resting = OrderStateOpen
-			}
-			if _, err := s.repo.TransitionCartERPOrderState(ctx, op.CartID, OrderStateReflecting, resting); err != nil {
-				s.logger.Warn("restoring interrupted reflection", zap.Error(err))
-			}
-		case op.State == OrderStateMutating && op.ExternalOrderID != "":
-			if _, err := s.applyCartGridToOrder(opCtx, op.CartID, op.StoreID, op.ExternalOrderID, nil); err != nil {
-				logger.From(opCtx, s.logger).Warn("sweep failed to reconcile mutating cart",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-				continue
-			}
-			if _, err := s.repo.TransitionCartERPOrderState(opCtx, op.CartID, OrderStateMutating, restingOrderState(op.RestingState)); err != nil {
-				logger.From(opCtx, s.logger).Error("sweep failed to return cart to open",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-			}
-			s.collab.MirrorToOrder(opCtx, op.CartID)
+		if err := s.recoverOrderOperation(opCtx, op); err != nil {
+			logger.From(opCtx, s.logger).Warn("ERP operation recovery deferred", zap.String("cart_id", op.CartID), zap.Error(err))
 		}
 	}
 }
@@ -1392,7 +1372,7 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 func (s *Service) adoptOrderByMarker(ctx context.Context, cartID, storeID string) (string, error) {
 	erpProvider, err := s.providerFor(ctx, storeID)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
 	foundID, findErr := erpProvider.FindOrderIDByMarker(ctx, erpOrderMarker(cartID))
 	if findErr != nil {
@@ -1413,7 +1393,7 @@ func (s *Service) adoptOrderByMarker(ctx context.Context, cartID, storeID string
 
 // providerFor resolve o cliente do ERP ativo da loja.
 func (s *Service) providerFor(ctx context.Context, storeID string) (providers.ERPProvider, error) {
-	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
+	erpIntegration, err := s.activeERP(ctx, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("loading ERP integration: %w", err)
 	}

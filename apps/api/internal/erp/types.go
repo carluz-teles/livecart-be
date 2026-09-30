@@ -122,6 +122,9 @@ type ERPLinkedProduct struct {
 }
 
 type CartERPOrderState struct {
+	CartStatus      string
+	ExpiresAt       *time.Time
+	ExpiryProtected bool
 	CartID          string // Canonical owner of the ERP order, including joined purchases.
 	PaymentStatus   string
 	PurchaseClosed  bool

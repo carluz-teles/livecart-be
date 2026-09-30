@@ -14,7 +14,7 @@ func (r *Repository) GetNextEventWaitlistDeadline(ctx context.Context, eventID s
 		SELECT min(c.expires_at)
 		FROM carts c
 		WHERE c.status IN ('active', 'checkout')
-		  AND NOT c.never_expires
+		  AND NOT c.never_expires AND NOT is_active_vip(c.store_id, c.platform_handle)
 		  AND NOT c.payment_review_required
 		  AND c.payment_status IS DISTINCT FROM 'paid'
 		  AND c.payment_status IS DISTINCT FROM 'refunded'

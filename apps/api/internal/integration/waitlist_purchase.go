@@ -28,8 +28,8 @@ func (r *Repository) DecrementProductStockForPurchase(ctx context.Context, produ
         WHERE wi.product_id=$1 AND wi.status='waiting' AND wi.quantity>0
           AND c.status IN ('active','checkout')
           AND COALESCE(c.payment_status,'pending') NOT IN ('paid','refunded')
-          AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
- AND (host.id IS NULL OR (host.status IN ('active','checkout') AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded' AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now()))))`, productID).Scan(&waiting)
+          AND (c.never_expires OR is_active_vip(c.store_id, c.platform_handle) OR c.expires_at IS NULL OR c.expires_at>now())
+ AND (host.id IS NULL OR (host.status IN ('active','checkout') AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded' AND (host.never_expires OR is_active_vip(host.store_id, host.platform_handle) OR host.expires_at IS NULL OR host.expires_at>now()))))`, productID).Scan(&waiting)
 	if err != nil {
 		return err
 	}

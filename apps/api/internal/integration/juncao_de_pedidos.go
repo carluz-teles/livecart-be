@@ -86,6 +86,11 @@ func (s *Service) JoinCarts(ctx context.Context, in JoinCartsInput) (JoinCartsRe
 	if in.CartAID == in.CartBID {
 		return out, httpx.DomainError(422, httpx.CodeValidationFailed, "os dois pedidos são o mesmo")
 	}
+	release, err := s.repo.lockCartJoin(ctx, in.CartAID, in.CartBID)
+	if err != nil {
+		return out, err
+	}
+	defer release()
 	a, err := s.repo.GetCartForJoin(ctx, in.CartAID, in.StoreID)
 	if err != nil {
 		return out, httpx.DomainError(404, httpx.CodeValidationFailed, "pedido não encontrado")

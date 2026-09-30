@@ -13,15 +13,26 @@ import (
 
 const addVipHandle = `-- name: AddVipHandle :one
 
-INSERT INTO vip_handles (store_id, platform_handle, added_by_user_id)
-VALUES ($1, $2, $3)
-ON CONFLICT (store_id, platform_handle) DO UPDATE
-SET added_by_user_id  = EXCLUDED.added_by_user_id,
-    added_at          = now(),
-    removed_at        = NULL,
-    removed_by_user_id = NULL,
-    updated_at        = now()
-RETURNING id, store_id, platform_handle, added_by_user_id, added_at, removed_at, removed_by_user_id, created_at, updated_at
+WITH vip AS (
+    INSERT INTO vip_handles (store_id, platform_handle, added_by_user_id)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (store_id, platform_handle) DO UPDATE
+    SET added_by_user_id = EXCLUDED.added_by_user_id,
+        added_at = now(), removed_at = NULL, removed_by_user_id = NULL, updated_at = now()
+    RETURNING id, store_id, platform_handle, added_by_user_id, added_at, removed_at, removed_by_user_id, created_at, updated_at
+), protected AS (
+    UPDATE carts c SET expires_at = NULL
+    FROM vip v
+    WHERE c.store_id = v.store_id
+      AND lower(ltrim(btrim(c.platform_handle), '@')) = v.platform_handle
+      AND c.status IN ('pending','active','checkout')
+      AND c.payment_status IS DISTINCT FROM 'paid'
+      AND c.payment_status IS DISTINCT FROM 'refunded'
+      AND NOT c.purchase_closed
+      AND c.expires_at IS NOT NULL
+    RETURNING c.id
+)
+SELECT id, store_id, platform_handle, added_by_user_id, added_at, removed_at, removed_by_user_id, created_at, updated_at FROM vip
 `
 
 type AddVipHandleParams struct {
@@ -30,13 +41,25 @@ type AddVipHandleParams struct {
 	AddedByUserID  pgtype.UUID `json:"added_by_user_id"`
 }
 
+type AddVipHandleRow struct {
+	ID              pgtype.UUID        `json:"id"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+	PlatformHandle  string             `json:"platform_handle"`
+	AddedByUserID   pgtype.UUID        `json:"added_by_user_id"`
+	AddedAt         pgtype.Timestamptz `json:"added_at"`
+	RemovedAt       pgtype.Timestamptz `json:"removed_at"`
+	RemovedByUserID pgtype.UUID        `json:"removed_by_user_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
 // =============================================================================
 // VIP HANDLES — clientes cujo carrinho nunca expira (oposto de blocked_handles)
 // =============================================================================
 // Idempotente: cria o VIP ou reativa uma linha antes removida.
-func (q *Queries) AddVipHandle(ctx context.Context, arg AddVipHandleParams) (VipHandle, error) {
+func (q *Queries) AddVipHandle(ctx context.Context, arg AddVipHandleParams) (AddVipHandleRow, error) {
 	row := q.db.QueryRow(ctx, addVipHandle, arg.StoreID, arg.PlatformHandle, arg.AddedByUserID)
-	var i VipHandle
+	var i AddVipHandleRow
 	err := row.Scan(
 		&i.ID,
 		&i.StoreID,
@@ -98,12 +121,7 @@ func (q *Queries) GetVipHandle(ctx context.Context, arg GetVipHandleParams) (Vip
 }
 
 const isVipHandle = `-- name: IsVipHandle :one
-SELECT EXISTS(
-    SELECT 1 FROM vip_handles
-    WHERE store_id = $1
-      AND platform_handle = $2
-      AND removed_at IS NULL
-) AS is_vip
+SELECT is_active_vip($1::uuid, $2::text)::boolean AS is_vip
 `
 
 type IsVipHandleParams struct {

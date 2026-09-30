@@ -30,8 +30,7 @@ type VipActivation struct {
 	EternalCartID string
 	// Merged é quantos carrinhos foram fundidos no eterno.
 	Merged int
-	// Skipped é quantos ficaram de fora — pago, ou com nota já emitida: seguem
-	// com prazo, e portanto seguem expirando.
+	// Skipped é quantos ficaram de fora da consolidação, por exemplo já pagos.
 	Skipped int
 	// OrdersReleased é quantos pedidos antigos soltaram a reserva no ERP depois
 	// de o pedido do carrinho eterno absorver o conteúdo deles.
@@ -117,8 +116,8 @@ type VipHandleResponse struct {
 	// depois da fusão. É a pior saída possível daqui — a mesma unidade contada
 	// em dois pedidos — e precisa aparecer na tela, não só no log.
 	OrdersStuck int `json:"ordersStuck,omitempty"`
-	// ActivationFailed: o @ virou VIP, mas os carrinhos que ele já tinha não
-	// foram consolidados e seguem com prazo para expirar.
+	// ActivationFailed: the membership and expiry protection were saved, but
+	// consolidating carts or their ERP orders needs another attempt.
 	ActivationFailed bool `json:"activationFailed,omitempty"`
 }
 
@@ -161,7 +160,7 @@ func (r *Repository) AddVipHandle(ctx context.Context, input AddVipInput) (*doma
 	if err != nil {
 		return nil, fmt.Errorf("adding vip handle: %w", err)
 	}
-	return toDomainVipHandle(row), nil
+	return toDomainVipHandle(sqlc.VipHandle(row)), nil
 }
 
 func (r *Repository) RemoveVipHandle(ctx context.Context, input RemoveVipInput) (*domain.VipHandle, error) {
@@ -267,11 +266,8 @@ func (s *Service) AddVipHandle(ctx context.Context, input AddVipInput) (*domain.
 	)
 
 	if s.vipCartActivator != nil {
-		// A linha do VIP já está no banco, então compras FUTURAS já caem no
-		// carrinho eterno mesmo se a consolidação falhar aqui. Por isso a
-		// promoção não vira erro — mas também não pode mais passar em silêncio:
-		// o que falha aqui são os carrinhos que o comprador JÁ tem, e eles
-		// continuam expirando. Quem chamou precisa saber para poder avisar.
+		// Membership and deadline removal committed together. A consolidation
+		// failure must still be reported, but cannot leave old carts expiring.
 		act, actErr := s.vipCartActivator.ActivateVipCartsForHandle(ctx, input.StoreID.String(), input.Handle)
 		if actErr != nil {
 			logger.From(ctx, s.logger).Error("failed to activate vip carts after promotion",

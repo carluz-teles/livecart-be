@@ -13,23 +13,30 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/cartedit"
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 )
 
+// Execution metadata is persisted at acceptance; losing an integration later
+// does not turn an outstanding remote reservation into a local-only edit.
+type cartEditExecution = cartedit.Execution
+
 type merchantEditPayload struct {
-	Operation string `json:"operation"`
-	ItemID    string `json:"itemId,omitempty"`
-	ProductID string `json:"productId,omitempty"`
-	Quantity  int    `json:"quantity"`
+	Operation    string `json:"operation"`
+	ItemID       string `json:"itemId,omitempty"`
+	ProductID    string `json:"productId,omitempty"`
+	Quantity     int    `json:"quantity"`
+	OriginCartID string `json:"originCartId,omitempty"`
+	Source       string `json:"source,omitempty"`
 }
 
-// Queue only the Tiny merchant flow. Older clients without an idempotency key
-// retain their synchronous contract; other providers use their existing flow.
+// Every stock edit uses the same durable allocation. Missing HTTP idempotency
+// keys must never bypass the transaction protecting the stock mirror.
 func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInput, operation string) (bool, error) {
 	key := cartedit.RequestID(ctx)
-	if !input.ByMerchant || key == "" || s.pool == nil {
-		return false, nil
+	if key == "" {
+		key = uuid.NewString()
 	}
 	if _, err := uuid.Parse(key); err != nil {
 		return true, httpx.DomainError(400, httpx.CodeValidationFailed, "Idempotency-Key inválida")
@@ -38,7 +45,15 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	if err != nil {
 		return true, err
 	}
+	var ownerID string
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1`, cart.ID).Scan(&ownerID); err != nil {
+		return true, err
+	}
 	req := merchantEditPayload{Operation: operation, ItemID: input.ItemID, ProductID: input.ProductID, Quantity: input.Quantity}
+	req.OriginCartID = cart.ID
+	if !input.ByMerchant {
+		req.Source = mutationSource(false)
+	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return true, err
@@ -53,16 +68,20 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 		return true, err
 	}
 	// A lost HTTP response must not turn an accepted edit into another addition.
-	var previousCart string
 	var same bool
-	err = tx.QueryRow(ctx, `SELECT cart_id::text,request=$2::jsonb FROM cart_erp_edit_requests WHERE id=$1`, key, string(raw)).Scan(&previousCart, &same)
+	err = tx.QueryRow(ctx, `SELECT (request - '_execution' - 'originCartId')=($2::jsonb - 'originCartId')
+ AND COALESCE(NULLIF(request->>'originCartId',''),cart_id::text)=$3
+ FROM cart_erp_edit_requests WHERE id=$1`, key, string(raw), cart.ID).Scan(&same)
 	if err == nil {
-		if previousCart != cart.ID || !same {
+		if !same {
 			return true, httpx.DomainError(409, httpx.CodeIdempotencyKeyReused, "esta chave já foi usada para outra alteração")
 		}
 		return true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		return true, err
+	}
+	if err := cartedit.LockTopologyForEdit(ctx, tx, cart.ID, ownerID); err != nil {
 		return true, err
 	}
 	// Product admission uses the same serialization as global FIFO. Resolve
@@ -75,49 +94,87 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "waitlist_product:"+input.ProductID); err != nil {
 		return true, err
 	}
-	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE id=$1 FOR UPDATE`, cart.ID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT id FROM carts WHERE id IN ($1,$2) ORDER BY (id=$1) DESC,id FOR UPDATE`, ownerID, cart.ID); err != nil {
 		return true, err
+	}
+	var currentOwner string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1`, cart.ID).Scan(&currentOwner); err != nil {
+		return true, err
+	}
+	if currentOwner != ownerID {
+		return true, httpx.DomainError(409, httpx.CodeCartItemChanged, "a compra mudou; atualize o pedido")
 	}
 	r := NewRepository(s.repo.q.WithTx(tx))
 	cart, err = r.GetCartByToken(ctx, input.Token)
 	if err != nil {
 		return true, err
 	}
-	var eligible bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM integrations i WHERE i.store_id=$1
-        AND i.provider='tiny' AND i.status='active') AND EXISTS(SELECT 1 FROM carts c WHERE c.id=$2
-        AND c.external_order_id IS NOT NULL AND c.joined_to_cart_id IS NULL)`, cart.StoreID, cart.ID).Scan(&eligible); err != nil {
-		return true, err
-	}
-	if !eligible {
-		return false, nil
-	}
-	if err := assertCartMutable(cart, toggleGovernsMerchantItemEdit, time.Now()); err != nil {
+	if err := assertCartMutable(cart, itemEditPolicy(input.ByMerchant), time.Now()); err != nil {
 		return true, err
 	}
 	if err := assertCartItemsEditable(cart); err != nil {
 		return true, err
 	}
-	var state string
-	var processing, joined, review, blocked bool
-	if err := tx.QueryRow(ctx, `SELECT erp_order_state,EXISTS(SELECT 1 FROM cart_erp_edits w
-        WHERE w.cart_id=c.id AND w.lease_until>now()), EXISTS(SELECT 1 FROM carts child WHERE child.joined_to_cart_id=c.id) OR c.joined_to_cart_id IS NOT NULL
-         ,c.payment_review_required,EXISTS(SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=c.id AND w.blocked_at IS NOT NULL
-             AND w.revision>w.synced_revision) FROM carts c WHERE id=$1`, cart.ID).Scan(&state, &processing, &joined, &review, &blocked); err != nil {
+	var ownerToken string
+	if err := tx.QueryRow(ctx, `SELECT token FROM carts WHERE id=$1`, ownerID).Scan(&ownerToken); err != nil {
 		return true, err
 	}
-	if joined {
-		return false, nil
+	owner, err := r.GetCartByToken(ctx, ownerToken)
+	if err != nil {
+		return true, err
 	}
-	if review || cart.PaymentStatus == "refunded" {
+	if err := assertCartMutable(owner, false, time.Now()); err != nil {
+		return true, err
+	}
+	if err := assertCartItemsEditable(owner); err != nil {
+		return true, err
+	}
+	var state string
+	var processing, review, blocked bool
+	if err := tx.QueryRow(ctx, `SELECT erp_order_state,EXISTS(SELECT 1 FROM cart_erp_edits w
+ WHERE w.cart_id=c.id AND w.lease_until>now()),
+ EXISTS(SELECT 1 FROM carts member WHERE member.id IN ($1,$2) AND
+ (member.payment_review_required OR member.payment_status='refunded')),
+ EXISTS(SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=c.id AND w.blocked_at IS NOT NULL
+ AND w.revision>w.synced_revision) FROM carts c WHERE id=$1`, ownerID, cart.ID).Scan(&state, &processing, &review, &blocked); err != nil {
+		return true, err
+	}
+	if review {
 		return true, httpx.DomainError(409, httpx.CodePaymentReviewRequired, "o pagamento deste pedido requer conferência antes de editar")
 	}
 	if blocked {
-		return true, httpx.DomainError(409, httpx.CodeCartERPSyncPending,
-			"as alterações deste pedido precisam de conciliação com o ERP antes de editar novamente")
+		return true, httpx.DomainError(409, httpx.CodeCartERPSyncPending, "as alterações deste pedido precisam de conciliação com o ERP antes de editar novamente")
 	}
-	if processing || state != "open" {
+	if processing || (state != "open" && state != "none") {
 		return true, httpx.DomainError(409, httpx.CodeCartERPSyncPending, "o pedido está sincronizando; aguarde antes de editar novamente")
+	}
+	execution := cartEditExecution{Version: 1}
+	var metadata []byte
+	err = tx.QueryRow(ctx, `SELECT id::text,provider,COALESCE(metadata,'{}'::jsonb) FROM integrations
+ WHERE store_id=$1 AND type='erp' AND status='active'`, cart.StoreID).Scan(&execution.IntegrationID, &execution.Provider, &metadata)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return true, err
+	}
+	if err == nil {
+		var settings map[string]any
+		if err := json.Unmarshal(metadata, &settings); err != nil {
+			return true, err
+		}
+		execution.Remote = state != "none" || erp.ModoDeReservaDaIntegracao(execution.Provider, settings) == erp.ReservaNativaDoERP
+	} else if state != "none" {
+		return true, httpx.DomainError(409, httpx.CodeCartERPSyncPending, "reative a integração deste pedido antes de editar")
+	}
+	// A pending batch cannot change provider or drop a remote obligation.
+	var incompatible bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
+ WHERE r.cart_id=$1 AND r.revision>w.synced_revision AND (
+ (r.request->'_execution' IS NULL AND NOT $2) OR
+ (r.request->'_execution' IS NOT NULL AND (COALESCE((r.request->'_execution'->>'remote')::boolean,false)<>$2
+ OR COALESCE(r.request->'_execution'->>'integrationId','')<>$3))))`, ownerID, execution.Remote, execution.IntegrationID).Scan(&incompatible); err != nil {
+		return true, err
+	}
+	if incompatible {
+		return true, httpx.DomainError(409, httpx.CodeCartERPSyncPending, "conclua as alterações pendentes antes de trocar a integração")
 	}
 	var item *CartItemRow
 	if operation != "add" {
@@ -155,16 +212,8 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	if err != nil {
 		return true, err
 	}
-	var linked, hasWaitlist bool
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(p.external_source='tiny' AND p.external_id IS NOT NULL,false),
-      EXISTS(SELECT 1 FROM waitlist_items wi WHERE wi.cart_id=$2 AND wi.product_id=p.id AND wi.status IN ('waiting','notified'))
-      FROM products p WHERE p.id=$1`, input.ProductID, cart.ID).Scan(&linked, &hasWaitlist); err != nil {
-		return true, err
-	}
-	// Waitlist promotion has its own reservation lifecycle. Preserve that
-	// existing path instead of treating a promotion as a merchant reservation.
-	if !linked || hasWaitlist || (item != nil && item.WaitlistedQuantity > 0) {
-		return false, nil
+	if operation != "add" && item != nil && item.WaitlistedQuantity > 0 {
+		return true, httpx.DomainError(409, httpx.CodeCartItemChanged, "encerre a espera deste produto antes de alterar seus itens")
 	}
 	before, waiting, price := 0, 0, cfg.UnitPrice
 	if item != nil {
@@ -173,6 +222,9 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	after := input.Quantity
 	switch operation {
 	case "add":
+		if !productAllowedForCart(cfg, input.ByMerchant) {
+			return true, httpx.DomainError(422, httpx.CodeValidationFailed, "produto não disponível neste evento")
+		}
 		price = cfg.UnitPrice
 		if !cfg.Active {
 			return true, httpx.DomainError(422, httpx.CodeValidationFailed, "produto não está ativo")
@@ -192,12 +244,13 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	if err := r.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
 		return true, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO cart_erp_edits(cart_id) VALUES($1) ON CONFLICT DO NOTHING`, cart.ID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO cart_erp_edits(cart_id) VALUES($1) ON CONFLICT DO NOTHING`, ownerID); err != nil {
 		return true, err
 	}
 	var retained int
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(r.retained_quantity),0) FROM cart_erp_edit_requests r
-        JOIN cart_erp_edits w ON w.cart_id=r.cart_id WHERE r.cart_id=$1 AND r.product_id=$2 AND r.revision>w.synced_revision`, cart.ID, input.ProductID).Scan(&retained); err != nil {
+        JOIN cart_erp_edits w ON w.cart_id=r.cart_id WHERE r.cart_id=$1 AND r.product_id=$2 AND r.revision>w.synced_revision
+ AND COALESCE(r.request->>'originCartId',r.cart_id::text)=$3`, ownerID, input.ProductID, cart.ID).Scan(&retained); err != nil {
 		return true, err
 	}
 	retainDelta := -delta
@@ -261,11 +314,20 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 	var revision int64
 	if err := tx.QueryRow(ctx, `UPDATE cart_erp_edits SET revision=revision+1,
         queued_at=CASE WHEN revision=synced_revision THEN now() ELSE queued_at END,
-        next_attempt_at=now()+interval '1 second',last_error=NULL WHERE cart_id=$1 RETURNING revision`, cart.ID).Scan(&revision); err != nil {
+        next_attempt_at=now()+interval '1 second',last_error=NULL WHERE cart_id=$1 RETURNING revision`, ownerID).Scan(&revision); err != nil {
+		return true, err
+	}
+	var journal map[string]any
+	if err := json.Unmarshal(raw, &journal); err != nil {
+		return true, err
+	}
+	journal["_execution"] = execution
+	raw, err = json.Marshal(journal)
+	if err != nil {
 		return true, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO cart_erp_edit_requests(id,cart_id,revision,request,product_id,retained_quantity)
-        VALUES($1,$2,$3,$4::jsonb,$5,$6)`, key, cart.ID, revision, string(raw), input.ProductID, retainDelta); err != nil {
+        VALUES($1,$2,$3,$4::jsonb,$5,$6)`, key, ownerID, revision, string(raw), input.ProductID, retainDelta); err != nil {
 		return true, err
 	}
 	kind := "quantity_decreased"
@@ -279,7 +341,7 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 		kind = "item_removed"
 	}
 	if err := recordMutation(ctx, r.q, MutationParams{CartID: cart.ID, ProductID: input.ProductID, MutationType: kind,
-		QuantityBefore: before, QuantityAfter: after, UnitPrice: price, Source: "merchant"}); err != nil {
+		QuantityBefore: before, QuantityAfter: after, UnitPrice: price, Source: mutationSource(input.ByMerchant)}); err != nil {
 		return true, err
 	}
 	if reserved > 0 {
@@ -287,13 +349,15 @@ func (s *Service) queueMerchantEdit(ctx context.Context, input MutateCartItemInp
 			return true, err
 		}
 	}
-	if err := r.UpdateCartShipping(ctx, tx, cart.ID, nil); err != nil {
-		return true, err
+	if input.ByMerchant {
+		if err := r.UpdateCartShipping(ctx, tx, cart.ID, nil); err != nil {
+			return true, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return true, err
 	}
-	s.logger.Info("merchant edit queued", zap.String("cart_id", cart.ID), zap.String("store_id", cart.StoreID),
+	s.logger.Info("cart edit queued", zap.String("cart_id", cart.ID), zap.String("store_id", cart.StoreID),
 		zap.Int64("revision", revision), zap.String("operation", operation), zap.Duration("enqueue_duration", time.Since(started)))
 	return true, nil
 }

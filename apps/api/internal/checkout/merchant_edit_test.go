@@ -285,7 +285,23 @@ func TestMerchantEdit_RejectsChangedIdempotencyKeyAndInsufficientStock(t *testin
 
 type scriptedMerchantERP struct {
 	mutate   func(context.Context, string, string) error
+	ensure   func(context.Context, string, string) error
+	verify   func(context.Context, string, string) error
 	promoted atomic.Int32
+}
+
+func (f *scriptedMerchantERP) VerifyERPOrderCancelled(ctx context.Context, cart, store string) error {
+	if f.verify != nil {
+		return f.verify(ctx, cart, store)
+	}
+	return nil
+}
+
+func (f *scriptedMerchantERP) EnsureERPOrderForCart(ctx context.Context, cart, store string) error {
+	if f.ensure != nil {
+		return f.ensure(ctx, cart, store)
+	}
+	return nil
 }
 
 func (f *scriptedMerchantERP) MutateERPOrderItems(ctx context.Context, cart, store string) error {
@@ -497,14 +513,15 @@ func TestMerchantEdit_ConcurrentDuplicateAdditionReservesOnce(t *testing.T) {
 	}
 }
 
-func TestMerchantEdit_WaitlistedItemsKeepExistingReservationFlow(t *testing.T) {
+func TestMerchantEdit_WaitlistedItemsRequireExplicitExit(t *testing.T) {
 	f := seedMerchantEdit(t)
 	if _, err := testPool.Exec(t.Context(), `UPDATE cart_items SET waitlisted_quantity=1 WHERE id=$1`, f.item); err != nil {
 		t.Fatal(err)
 	}
 	queued, err := f.service.queueMerchantEdit(cartedit.WithRequestID(t.Context(), uuid.NewString()), MutateCartItemInput{Token: f.token, ItemID: f.item, Quantity: 1, ByMerchant: true}, "set")
-	if err != nil || queued {
-		t.Fatalf("queue took over waitlist lifecycle: %v %v", queued, err)
+	var domain *httpx.ServiceError
+	if !queued || !errors.As(err, &domain) || domain.Reason != string(httpx.CodeCartItemChanged) {
+		t.Fatalf("expected waiting-item conflict: %v %v", queued, err)
 	}
 	var quantity int
 	if err := testPool.QueryRow(t.Context(), `SELECT quantity FROM cart_items WHERE id=$1`, f.item).Scan(&quantity); err != nil {

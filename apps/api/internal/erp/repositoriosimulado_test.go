@@ -17,6 +17,9 @@ import (
 )
 
 type carrinhoSimulado struct {
+	status          string
+	expiresAt       *time.Time
+	expiryProtected bool
 	// juntadoA reproduz `carts.joined_to_cart_id`. O banco real resolve o
 	// estado por COALESCE(joined_to_cart_id, id) — sem isto aqui, o duplo
 	// mente sobre qual pedido o carrinho responde.
@@ -79,7 +82,15 @@ func novoRepoSimulado() *repoSimulado {
 func (r *repoSimulado) criarCarrinho(id string, itens ...NonWaitlistedCartItem) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.carrinhos[id] = &carrinhoSimulado{state: OrderStateNone, itens: itens}
+	r.carrinhos[id] = &carrinhoSimulado{state: OrderStateNone, status: "active", itens: itens}
+}
+
+func (r *repoSimulado) expirarCarrinho(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	deadline := time.Now().Add(-time.Minute)
+	r.carrinhos[id].status = "expired"
+	r.carrinhos[id].expiresAt = &deadline
 }
 
 // juntarAoAnfitriao encena `carts.joined_to_cart_id`: daqui em diante o
@@ -166,6 +177,9 @@ func (r *repoSimulado) GetCartERPOrderState(_ context.Context, cartID string) (*
 		}
 	}
 	return &CartERPOrderState{
+		CartStatus:      c.status,
+		ExpiresAt:       c.expiresAt,
+		ExpiryProtected: c.expiryProtected,
 		State:           c.state,
 		StockLaunched:   c.stockLaunched,
 		ExternalOrderID: c.externalOrderID,

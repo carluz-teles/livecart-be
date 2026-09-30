@@ -73,7 +73,9 @@ type PaymentService interface {
 
 // merchantEditERP is the existing ERP lifecycle and waitlist boundary.
 type merchantEditERP interface {
+	EnsureERPOrderForCart(context.Context, string, string) error
 	MutateERPOrderItems(context.Context, string, string) error
+	VerifyERPOrderCancelled(context.Context, string, string) error
 	ProcessWaitlistForProduct(context.Context, string, string, string)
 }
 
@@ -97,14 +99,17 @@ func NewService(
 	paymentService PaymentService,
 	logger *zap.Logger,
 ) *Service {
-	return &Service{
+	service := &Service{
 		repo:               repo,
 		pool:               pool,
 		integrationService: integrationService,
-		merchantEditERP:    integrationService,
 		paymentService:     paymentService,
 		logger:             logger.Named("checkout"),
 	}
+	if integrationService != nil {
+		service.merchantEditERP = integrationService
+	}
+	return service
 }
 
 // SetCouponLifecycle wires the redemption hook from the coupon package.
@@ -1170,224 +1175,21 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 // CART ITEM MUTATIONS
 // =============================================================================
 
-// UpdateCartItemQuantity changes an existing item's quantity. delta > 0 grows
-// (and bumps ERP reservation), delta < 0 shrinks (and reverses ERP). Returns
-// the freshly-loaded cart payload so the frontend can swap the React Query
-// cache in one call.
+// Stock changes are accepted atomically and remain pending until the ERP
+// confirms the current grid. A remote error never returns reserved stock.
 func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, itemEditPolicy(input.ByMerchant))
-	if err != nil {
-		return nil, err
-	}
-	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
-	if item.WaitlistedQuantity > 0 {
-		return nil, httpx.DomainError(409, httpx.CodeCartItemChanged, "encerre a espera deste produto antes de alterar sua quantidade")
-	}
-	if input.Quantity < 1 {
-		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
-	}
-
-	delta := input.Quantity - item.Quantity
-	if delta == 0 {
-		return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
-	}
-
-	if delta > 0 {
-		if err := s.validateQuantityCap(ctx, cart, item.ProductID, item.Quantity, input.Quantity); err != nil {
-			return nil, err
-		}
-	}
-
-	// A linha tem DUAS parcelas: o que está segurado no estoque e o que está
-	// esperando na fila. O que move estoque é só a primeira.
-	//
-	// Todo este bloco tratava `quantity` como se fosse tudo segurado. Baixar de
-	// 5 (com 3 na fila, 2 segurados) para 2 mandava delta -3 ao estoque quando
-	// só 2 haviam sido tirados: uma unidade creditada que nunca existiu, nos
-	// dois sistemas. E a linha ficava com 2 total e 3 em fila — disponível
-	// NEGATIVO, que os outros quatro pontos que calculam
-	// `quantity - waitlisted_quantity` leriam como número válido.
-	//
-	// Ao reduzir, some primeiro a parte em FILA: ela não segura nada, então é a
-	// que o comprador abre mão sem custo. Ao aumentar, o acréscimo vira
-	// segurado — validateQuantityCap acima já garantiu que há estoque.
-	heldAfter, waitlistedAfter, stockDelta := splitQuantityChange(
-		item.Quantity, item.WaitlistedQuantity, input.Quantity)
-	_ = heldAfter
-
-	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
-		return nil, err
-	}
-	// Trava otimista: a escrita só vale se a linha ainda estiver como a lemos.
-	//
-	// Entre a leitura lá em cima e esta escrita há uma chamada HTTP ao Tiny que
-	// passa pelo limitador de ~1 req/s — a janela dura SEGUNDOS. Em 05/08 dois
-	// escritores leram quantity=2 com 3s de diferença; o segundo calculou o
-	// delta contra um valor obsoleto e uma unidade sumiu do carrinho enquanto
-	// uma saída a mais era lançada no ERP.
-	expectedItem, err := s.mutateCartItemWithSnapshot(ctx, item, func(repo *Repository) error {
-		ok, err := repo.SetCartItemSplitIfUnchanged(ctx, item.ID, item.Quantity, input.Quantity, waitlistedAfter)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return httpx.DomainError(409, httpx.CodeCartItemChanged, "o item mudou; atualize o carrinho")
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
-		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
-		stockDelta, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
-	)
-	if syncErr != nil {
-		// Roll back the local change so the buyer sees the failure clearly.
-		// Restaura as DUAS parcelas: reverter só o total deixaria a fila com o
-		// valor novo sobre um total antigo.
-		if restoreErr := s.restoreCartItem(ctx, item, expectedItem); restoreErr != nil {
-			logger.From(ctx, s.logger).Error("failed to restore cart prices after ERP failure", zap.String("cart_id", cart.ID), zap.Error(restoreErr))
-		}
-		// Propagate typed httpx errors verbatim (e.g., "estoque insuficiente")
-		// so the buyer sees the actual reason instead of a generic retry copy.
-		var svcErr *httpx.ServiceError
-		if errors.As(syncErr, &svcErr) {
-			return nil, syncErr
-		}
-		logger.From(ctx, s.logger).Error("ERP delta sync failed, rolled back cart item quantity",
-			zap.String("cart_id", cart.ID),
-			zap.String("product_id", item.ProductID),
-			zap.Int("delta", delta),
-			zap.Error(syncErr),
-		)
-		return nil, httpx.ErrUnprocessable("não foi possível atualizar o estoque, tente novamente")
-	}
-
-	mutationType := "quantity_increased"
-	if delta < 0 {
-		mutationType = "quantity_decreased"
-	}
-	if err := s.repo.RecordMutation(ctx, s.pool, MutationParams{
-		CartID:         cart.ID,
-		ProductID:      item.ProductID,
-		MutationType:   mutationType,
-		QuantityBefore: item.Quantity,
-		QuantityAfter:  input.Quantity,
-		UnitPrice:      item.UnitPrice,
-		Source:         mutationSource(input.ByMerchant),
-		ERPMovementID:  movementID,
-	}); err != nil {
-		logger.From(ctx, s.logger).Warn("cart item quantity changed but mutation log write failed",
-			zap.String("cart_id", cart.ID),
-			zap.String("product_id", item.ProductID),
-			zap.Error(err),
-		)
-	}
-
-	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
-	if input.ByMerchant {
-		s.clearShippingAfterMerchantEdit(ctx, cart)
-	}
-	s.invalidatePendingPix(ctx, cart)
-
-	// Quando a quantidade diminui, parte do estoque foi devolvida — tenta
-	// promover o próximo da fila. Best-effort em goroutine para não
-	// bloquear o response do checkout.
-	if delta < 0 {
-		go s.integrationService.ProcessWaitlistForProduct(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.EventID, item.ProductID, cart.StoreID)
-	}
-
-	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+	return s.editCartItem(ctx, input, "set")
 }
 
-// RemoveCartItem deletes an item entirely and reverses the ERP reservation.
 func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, itemEditPolicy(input.ByMerchant))
-	if err != nil {
+	return s.editCartItem(ctx, input, "remove")
+}
+
+func (s *Service) editCartItem(ctx context.Context, input MutateCartItemInput, operation string) (*GetCartForCheckoutOutput, error) {
+	if _, err := s.queueMerchantEdit(ctx, input, operation); err != nil {
 		return nil, err
 	}
-	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
-	if item.WaitlistedQuantity > 0 {
-		return nil, httpx.DomainError(409, httpx.CodeCartItemChanged, "encerre a espera deste produto antes de remover o item")
-	}
-
-	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
-		return nil, err
-	}
-	expectedItem, err := s.mutateCartItemWithSnapshot(ctx, item, func(repo *Repository) error {
-		return repo.DeleteCartItem(ctx, item.ID)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Devolver ao ERP só o que SAIU dele.
-	//
-	// A parcela em fila nunca virou saída — ela existe justamente porque não
-	// havia estoque. Mandar `item.Quantity` devolvia também essa parcela: um
-	// item com quantity=3 e waitlisted=2 tem 1 unidade reservada, e a remoção
-	// creditava 3 no Tiny. Duas unidades nascidas do nada, por remoção.
-	//
-	// É a mesma conta que o PATCH já fazia certo via splitQuantityChange
-	// (:1158) — só a remoção ficou de fora.
-	held := item.Quantity - item.WaitlistedQuantity
-	if held < 0 {
-		held = 0
-	}
-
-	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
-		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
-		-held, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
-	)
-	if syncErr != nil {
-		// Re-create the row at the original quantity to keep state consistent.
-		if restoreErr := s.restoreCartItem(ctx, item, expectedItem); restoreErr != nil {
-			logger.From(ctx, s.logger).Error("failed to restore cart item after ERP failure — manual intervention needed",
-				zap.String("cart_id", cart.ID),
-				zap.String("product_id", item.ProductID),
-				zap.Error(restoreErr),
-			)
-		}
-		var svcErr *httpx.ServiceError
-		if errors.As(syncErr, &svcErr) {
-			return nil, syncErr
-		}
-		logger.From(ctx, s.logger).Error("ERP reversal failed on remove, restored cart item",
-			zap.String("cart_id", cart.ID),
-			zap.String("product_id", item.ProductID),
-			zap.Error(syncErr),
-		)
-		return nil, httpx.ErrUnprocessable("não foi possível remover o item, tente novamente")
-	}
-
-	if err := s.repo.RecordMutation(ctx, s.pool, MutationParams{
-		CartID:         cart.ID,
-		ProductID:      item.ProductID,
-		MutationType:   "item_removed",
-		Source:         mutationSource(input.ByMerchant),
-		QuantityBefore: item.Quantity,
-		QuantityAfter:  0,
-		UnitPrice:      item.UnitPrice,
-		ERPMovementID:  movementID,
-	}); err != nil {
-		logger.From(ctx, s.logger).Warn("item removed but mutation log write failed",
-			zap.String("cart_id", cart.ID),
-			zap.String("product_id", item.ProductID),
-			zap.Error(err),
-		)
-	}
-
-	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
-	if input.ByMerchant {
-		s.clearShippingAfterMerchantEdit(ctx, cart)
-	}
-	s.invalidatePendingPix(ctx, cart)
-
-	// Estoque liberado pela remoção — promove o próximo da fila se houver.
-	go s.integrationService.ProcessWaitlistForProduct(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.EventID, item.ProductID, cart.StoreID)
-
+	s.trySyncCartEdit(ctx, input.Token)
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
 
@@ -1420,139 +1222,8 @@ func (s *Service) DropFromWaitlist(ctx context.Context, input DropFromWaitlistIn
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
 
-// AddCartItem adds a brand-new product to the cart (or sums onto an existing
-// row for the same product). Validates the product against the event whitelist
-// and quantity cap before touching the ERP.
 func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, err := s.loadEditableCart(ctx, input.Token, itemEditPolicy(input.ByMerchant))
-	if err != nil {
-		return nil, err
-	}
-	if err := assertCartItemsEditable(cart); err != nil {
-		return nil, err
-	}
-	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
-	if input.Quantity < 1 {
-		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
-	}
-
-	cfg, err := s.repo.GetEventProductForCart(ctx, cart.EventID, cart.StoreID, input.ProductID)
-	if err != nil {
-		return nil, err
-	}
-	if !cfg.Active {
-		return nil, httpx.ErrUnprocessable("produto não está ativo")
-	}
-	// A whitelist é da SESSÃO e existe para limitar o que a AUDIÊNCIA consegue
-	// pedir por comentário durante a transmissão. Ela não é uma regra sobre o
-	// catálogo: o lojista, corrigindo um pedido pelo painel, pode precisar somar
-	// um produto que não estava naquela live — é o caso que ele pediu, "adicionar
-	// outros produtos cadastrados no LiveCart".
-	//
-	// Seguro porque o preço não depende da whitelist: effective_price é
-	// COALESCE(special_price, p.price), então produto fora dela entra com o preço
-	// do catálogo em vez de zero. `Active` continua valendo para os dois — produto
-	// inativo não tem preço nem estoque que signifiquem algo.
-	if !productAllowedForCart(cfg, input.ByMerchant) {
-		return nil, httpx.ErrUnprocessable("produto não disponível neste evento")
-	}
-
-	existing, err := s.repo.FindCartItemByProduct(ctx, cart.ID, input.ProductID)
-	if err != nil {
-		return nil, err
-	}
-	currentQty := 0
-	if existing != nil {
-		// The listing omits the exact lot snapshot needed for compensation.
-		existing, err = s.repo.GetCartItem(ctx, existing.ID)
-		if err != nil {
-			return nil, err
-		}
-		currentQty = existing.Quantity
-	}
-	desiredQty := currentQty + input.Quantity
-	if cfg.MaxQuantity > 0 && desiredQty > cfg.MaxQuantity {
-		return nil, httpx.ErrUnprocessable(fmt.Sprintf("limite de %d por item", cfg.MaxQuantity))
-	}
-	// Mesma regra do PATCH: o estoque limita o que ESTÁ SENDO ACRESCENTADO, não
-	// o total. As unidades já no carrinho deste comprador saíram da prateleira
-	// quando entraram nele — cobrá-las de novo aqui as contaria duas vezes.
-	if !stockCoversIncrease(cfg.Stock, input.Quantity) {
-		return nil, httpx.ErrUnprocessable(fmt.Sprintf("apenas %d em estoque", cfg.Stock))
-	}
-
-	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
-		return nil, err
-	}
-
-	var expectedItem *cartItemMutationState
-	if existing != nil {
-		expectedItem, err = s.mutateCartItemWithSnapshot(ctx, existing, func(repo *Repository) error {
-			changed, err := repo.AddCartItemQuantityAtPrice(ctx, existing.ID, currentQty, input.Quantity, cfg.UnitPrice)
-			if err != nil {
-				return err
-			}
-			if !changed {
-				return httpx.DomainError(409, httpx.CodeCartItemChanged, "o item mudou; atualize o carrinho")
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		expectedItem, err = s.createCartItemWithSnapshot(ctx, cart.ID, input.ProductID, input.Quantity, cfg.UnitPrice)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
-		ctx, cart.StoreID, cart.ID, cart.EventID, input.ProductID,
-		input.Quantity, cfg.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
-	)
-	if syncErr != nil {
-		// Restore the exact old agreements only while our mutation is current.
-		// A newer addition or payment must never be overwritten by compensation.
-		rollbackErr := s.restoreCartItem(ctx, existing, expectedItem)
-		if rollbackErr != nil {
-			logger.From(ctx, s.logger).Error("failed to compensate cart addition", zap.String("cart_id", cart.ID), zap.Error(rollbackErr))
-		}
-		var svcErr *httpx.ServiceError
-		if errors.As(syncErr, &svcErr) {
-			return nil, syncErr
-		}
-		return nil, httpx.ErrUnprocessable("não foi possível adicionar o produto, tente novamente")
-	}
-
-	mutationType := "item_added"
-	if existing != nil {
-		mutationType = "quantity_increased"
-	}
-	if err := s.repo.RecordMutation(ctx, s.pool, MutationParams{
-		CartID:         cart.ID,
-		ProductID:      input.ProductID,
-		MutationType:   mutationType,
-		QuantityBefore: currentQty,
-		QuantityAfter:  desiredQty,
-		UnitPrice:      cfg.UnitPrice,
-		Source:         mutationSource(input.ByMerchant),
-		ERPMovementID:  movementID,
-	}); err != nil {
-		logger.From(ctx, s.logger).Warn("cart item added but mutation log write failed",
-			zap.String("cart_id", cart.ID),
-			zap.String("product_id", input.ProductID),
-			zap.Error(err),
-		)
-	}
-
-	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
-	if input.ByMerchant {
-		s.clearShippingAfterMerchantEdit(ctx, cart)
-	}
-	s.invalidatePendingPix(ctx, cart)
-
-	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+	return s.editCartItem(ctx, input, "add")
 }
 
 // reevaluateCouponAfterCartMutation calls the coupon lifecycle hook so the
@@ -1663,10 +1334,7 @@ func (s *Service) AddCartItemAsMerchant(ctx context.Context, token, productID st
 		Quantity:   quantity,
 		ByMerchant: true,
 	}
-	if queued, err := s.queueMerchantEdit(ctx, input, "add"); queued || err != nil {
-		return err
-	}
-	_, err := s.AddCartItem(ctx, input)
+	_, err := s.queueMerchantEdit(ctx, input, "add")
 	return err
 }
 
@@ -1678,10 +1346,7 @@ func (s *Service) SetCartItemQuantityAsMerchant(ctx context.Context, token, item
 		Quantity:   quantity,
 		ByMerchant: true,
 	}
-	if queued, err := s.queueMerchantEdit(ctx, input, "set"); queued || err != nil {
-		return err
-	}
-	_, err := s.UpdateCartItemQuantity(ctx, input)
+	_, err := s.queueMerchantEdit(ctx, input, "set")
 	return err
 }
 
@@ -1692,10 +1357,7 @@ func (s *Service) RemoveCartItemAsMerchant(ctx context.Context, token, itemID st
 		ItemID:     itemID,
 		ByMerchant: true,
 	}
-	if queued, err := s.queueMerchantEdit(ctx, input, "remove"); queued || err != nil {
-		return err
-	}
-	_, err := s.RemoveCartItem(ctx, input)
+	_, err := s.queueMerchantEdit(ctx, input, "remove")
 	return err
 }
 
