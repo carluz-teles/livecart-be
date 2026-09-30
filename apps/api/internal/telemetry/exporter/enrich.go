@@ -2,8 +2,10 @@ package exporter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
@@ -208,6 +210,10 @@ type CommentCorrelation struct {
 // export rather than emit a payload with zero-value business fields.
 func (e *Enricher) CommentCartCorrelation(ctx context.Context, platformCommentID string) (CommentCorrelation, bool) {
 	row, err := e.queries.FindCommentCartCorrelation(ctx, platformCommentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Ignored comments (for example, media without a session) are not persisted.
+		return CommentCorrelation{}, false
+	}
 	if err != nil {
 		logger.From(ctx, e.logger).Warn("telemetry enrich: FindCommentCartCorrelation failed, skipping comment correlation",
 			zap.String("platform_comment_id", platformCommentID), zap.Error(err))

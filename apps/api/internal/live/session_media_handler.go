@@ -18,6 +18,7 @@ import (
 // @Param        request body LinkSessionMediaRequest true "Media to link"
 // @Success      201 {object} httpx.Envelope{data=PlatformResponse}
 // @Failure      404 {object} httpx.Envelope
+// @Failure      409 {object} httpx.Envelope "Publication already linked to a session"
 // @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/lives/{id}/sessions/{sessionId}/platforms [post]
 // @Security     BearerAuth

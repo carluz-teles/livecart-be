@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -178,6 +179,10 @@ func (w *TokenRefreshWorker) refreshExpiringTokens() {
 		}
 		itemCtx := logger.WithStore(ctx, integration.StoreID, "")
 		updated, err := w.refreshToken(itemCtx, &integration)
+		if errors.Is(err, errTokenRefreshDeferred) {
+			skipped++
+			continue
+		}
 		if err != nil {
 			logger.From(itemCtx, w.logger).Warn("failed to refresh token",
 				zap.String("integration_id", integration.ID),

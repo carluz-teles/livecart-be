@@ -49,6 +49,7 @@ package erp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -73,13 +74,15 @@ type SplitDePagamento struct {
 	// DescontoCents é o que foi abatido: a diferença entre o preço cheio das
 	// unidades cobertas e o dinheiro que entrou por elas.
 	DescontoCents int64
-	// SaldoCents é o que ainda falta pagar. Negativo significa crédito a
-	// devolver, e nesse caso nada é escrito no ERP.
+	// SaldoCents é o que ainda falta pagar. Negativo exige conciliação;
+	// nesse caso nada é escrito no ERP nem estornado automaticamente.
 	SaldoCents int64
 	// Pagamentos é em quantas cobranças o dinheiro entrou.
 	Pagamentos int
 	Reescrito  bool
 	Motivo     string
+	// Verified requires a checked installment schedule or a successful rewrite.
+	Verified bool
 }
 
 // CartPayment é uma cobrança do livro de pagamentos do carrinho.
@@ -102,14 +105,13 @@ type CartPaymentLedger interface {
 // RecomporParcelasDoPedidoPago devolve ao pedido a verdade sobre o dinheiro:
 // uma parcela com o que a compradora pagou, outra com o que falta.
 //
-// Só age em carrinho PAGO com pedido. Não faz nada quando o total do pedido já é
-// o valor pago — que é o caso normal, e o mais comum.
+// Só age em carrinho PAGO com pedido. Quando o provedor permite consultar as
+// parcelas, confirma a divisão antes de decidir se precisa reescrevê-la.
 //
 // Recusa-se a escrever quando o pedido ficou MENOR que o valor pago. Aí existe
-// crédito a devolver, o ERP não consegue registrar parcelas que somem mais que o
-// total, e qualquer número que gravássemos seria mentira. Sobe como erro para
-// alguém decidir.
-func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, storeID string) (*SplitDePagamento, error) {
+// uma divergência a conferir: o ERP não consegue registrar parcelas que somem
+// mais que o total. Preserva as parcelas e registra uma revisão financeira.
+func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, storeID string) (split *SplitDePagamento, resultErr error) {
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
 		return nil, fmt.Errorf("loading cart ERP order state: %w", err)
@@ -127,6 +129,27 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 		// é pior do que deixar o pedido como está.
 		return nil, nil
 	}
+	checkedAt := time.Now().UTC()
+	defer func() {
+		recorder, ok := s.repo.(PaymentReviewRecorder)
+		if !ok {
+			return
+		}
+		review := PaymentReview{ExternalOrderID: st.ExternalOrderID, CheckedAt: checkedAt}
+		if resultErr != nil {
+			review.Reason = "installments_unverified"
+		} else if split != nil && split.SaldoCents < 0 {
+			review.Reason = "total_below_paid"
+		}
+		if split != nil {
+			review.PaidCents, review.OrderTotalCents = &split.PagoCents, &split.TotalCents
+		}
+		if review.Reason != "" {
+			resultErr = errors.Join(resultErr, recorder.RecordERPFinancialReview(ctx, cartID, storeID, review))
+		} else if split != nil && split.Verified {
+			resultErr = recorder.ResolveERPFinancialReview(ctx, cartID, storeID, st.ExternalOrderID, checkedAt)
+		}
+	}()
 
 	erpProvider, err := s.providerFor(ctx, storeID)
 	if err != nil {
@@ -144,14 +167,17 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 	if err != nil {
 		return nil, fmt.Errorf("reading order total: %w", err)
 	}
-	if invoiced {
-		return &SplitDePagamento{TotalCents: total, Motivo: "pedido com nota fiscal; parcelas preservadas"}, nil
-	}
 
 	var pago, bruto int64
 	for _, p := range pagamentos {
 		pago += p.AmountCents
 		bruto += p.GrossCoveredCents
+	}
+	if invoiced {
+		return &SplitDePagamento{
+			TotalCents: total, PagoCents: pago, SaldoCents: total - pago,
+			Pagamentos: len(pagamentos), Motivo: "pedido com nota fiscal; parcelas preservadas",
+		}, nil
 	}
 	desconto := bruto - pago
 	if desconto < 0 {
@@ -175,7 +201,7 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 		desconto -= included
 	}
 
-	split := &SplitDePagamento{
+	split = &SplitDePagamento{
 		TotalCents:    total,
 		PagoCents:     pago,
 		DescontoCents: desconto,
@@ -183,14 +209,17 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 		Pagamentos:    len(pagamentos),
 	}
 
+	reader, canVerify := erpProvider.(interface {
+		OrderInstallmentsMatch(context.Context, string, []providers.ERPInstallment) (bool, error)
+	})
 	switch {
-	case split.SaldoCents == 0 && len(pagamentos) == 1 && desconto == 0:
+	case split.SaldoCents == 0 && len(pagamentos) == 1 && desconto == 0 && !canVerify:
 		// Um pagamento, sem desconto, cobrindo o pedido inteiro: a parcela que o
 		// ERP já tem diz exatamente isso. Reescrevê-la gastaria uma escrita do
 		// teto de 30/min para não mudar nada.
 		return split, nil
 	case split.SaldoCents < 0:
-		split.Motivo = "o pedido ficou menor que o valor pago — há crédito a devolver"
+		split.Motivo = "o total do pedido diverge dos pagamentos; confira os valores antes de cobrar ou estornar"
 		logger.From(ctx, s.logger).Error("paid order is now worth less than what was paid; installments left untouched",
 			zap.String("cart_id", cartID),
 			zap.String("external_order_id", st.ExternalOrderID),
@@ -211,14 +240,13 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 		}
 		parcelas = append(paidSchedule, parcelas[len(pagamentos):]...)
 	}
-	if reader, ok := erpProvider.(interface {
-		OrderInstallmentsMatch(context.Context, string, []providers.ERPInstallment) (bool, error)
-	}); ok {
+	if canVerify {
 		matches, err := reader.OrderInstallmentsMatch(ctx, st.ExternalOrderID, parcelas)
 		if err != nil {
 			return split, fmt.Errorf("checking existing installments: %w", err)
 		}
 		if matches {
+			split.Verified = true
 			return split, nil
 		}
 	}
@@ -229,6 +257,7 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 	}
 
 	split.Reescrito = true
+	split.Verified = true
 	logger.From(ctx, s.logger).Info("paid order installments rebuilt from the payment ledger",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", st.ExternalOrderID),

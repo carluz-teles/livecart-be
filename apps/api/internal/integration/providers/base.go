@@ -39,6 +39,8 @@ type LogFunc func(ctx context.Context, log IntegrationLog) error
 // IntegrationLog represents an integration operation log entry.
 type IntegrationLog struct {
 	IntegrationID   string
+	StoreID         string
+	Path            string // URL path only; never credentials or query parameters.
 	EntityType      string
 	EntityID        string
 	Direction       string // "outbound" or "inbound"
@@ -131,13 +133,15 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 	logger.From(ctx, b.Logger).Debug("http request",
 		zap.String("integration_id", b.IntegrationID),
 		zap.String("method", method),
-		zap.String("url", url),
+		zap.String("path", req.URL.EscapedPath()),
 		zap.Duration("duration", duration),
 	)
 
 	if err != nil {
 		b.logOperation(ctx, IntegrationLog{
 			IntegrationID:  b.IntegrationID,
+			StoreID:        b.StoreID,
+			Path:           req.URL.EscapedPath(),
 			Direction:      "outbound",
 			Status:         "error",
 			Method:         method,
@@ -177,6 +181,8 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 
 	b.logOperation(ctx, IntegrationLog{
 		IntegrationID:   b.IntegrationID,
+		StoreID:         b.StoreID,
+		Path:            req.URL.EscapedPath(),
 		Direction:       "outbound",
 		Status:          status,
 		Method:          method,
