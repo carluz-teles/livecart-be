@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/cartpricing"
 	"strings"
 	"time"
@@ -345,7 +346,7 @@ func (h *Handler) UpdateCartItemQuantity(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
-	output, err := h.service.UpdateCartItemQuantity(c.Context(), MutateCartItemInput{
+	output, err := h.service.UpdateCartItemQuantity(cartedit.WithRequestID(c.UserContext(), c.Get("Idempotency-Key")), MutateCartItemInput{
 		Token:    token,
 		ItemID:   itemID,
 		Quantity: req.Quantity,
@@ -364,7 +365,7 @@ func (h *Handler) RemoveCartItem(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "token and itemId are required")
 	}
 
-	output, err := h.service.RemoveCartItem(c.Context(), MutateCartItemInput{
+	output, err := h.service.RemoveCartItem(cartedit.WithRequestID(c.UserContext(), c.Get("Idempotency-Key")), MutateCartItemInput{
 		Token:  token,
 		ItemID: itemID,
 	})
@@ -410,7 +411,7 @@ func (h *Handler) AddCartItem(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
-	output, err := h.service.AddCartItem(c.Context(), MutateCartItemInput{
+	output, err := h.service.AddCartItem(cartedit.WithRequestID(c.UserContext(), c.Get("Idempotency-Key")), MutateCartItemInput{
 		Token:     token,
 		ProductID: req.ProductID,
 		Quantity:  req.Quantity,

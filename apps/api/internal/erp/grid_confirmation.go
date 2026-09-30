@@ -3,6 +3,7 @@ package erp
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"livecart/apps/api/internal/integration/providers"
 )
@@ -48,4 +49,22 @@ func (s *Service) withPendingERPGridOwnership(ctx context.Context, cartID string
 		ids = []string{}
 	}
 	return WithEditedProducts(ctx, ids), nil
+}
+
+// A durable edit remains bound to the ERP integration that accepted it.
+// Recovering after a disconnect must not silently become a no-op or write to
+// a replacement account.
+type expectedIntegrationKey struct{}
+
+func WithExpectedIntegration(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, expectedIntegrationKey{}, id)
+}
+
+func (s *Service) activeERP(ctx context.Context, storeID string) (*Integration, error) {
+	integration, err := s.repo.GetActiveERP(ctx, storeID)
+	expected, _ := ctx.Value(expectedIntegrationKey{}).(string)
+	if expected != "" && (err != nil || integration == nil || integration.ID != expected) {
+		return nil, fmt.Errorf("the ERP integration that accepted this edit is unavailable")
+	}
+	return integration, err
 }

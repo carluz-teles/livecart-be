@@ -292,6 +292,7 @@ func TestExpiracaoDeCarrinhoCancelaOPedido(t *testing.T) {
 	repo.criarCarrinho("cart-1", item("p1", 2))
 	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
 
+	repo.expirarCarrinho("cart-1")
 	if err := svc.OnCartExpired(ctx, "cart-1", "loja-1"); err != nil {
 		t.Fatalf("expirando: %v", err)
 	}
@@ -308,6 +309,7 @@ func TestExpiracaoDeCarrinhoSemPedidoNaoFalaComOERP(t *testing.T) {
 	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 5})
 	repo.criarCarrinho("cart-1", item("p1", 2))
 
+	repo.expirarCarrinho("cart-1")
 	if err := svc.OnCartExpired(context.Background(), "cart-1", "loja-1"); err != nil {
 		t.Fatalf("expirando: %v", err)
 	}

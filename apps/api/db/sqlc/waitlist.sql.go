@@ -306,6 +306,7 @@ WITH due_carts AS MATERIALIZED (
     SELECT c.id FROM carts c
     WHERE c.status IN ('active', 'checkout', 'expired')
       AND NOT c.never_expires
+      AND NOT is_active_vip(c.store_id, c.platform_handle)
       AND NOT c.payment_review_required
       AND c.payment_status IS DISTINCT FROM 'paid'
       AND c.payment_status IS DISTINCT FROM 'refunded'
@@ -523,10 +524,10 @@ WITH queued AS (
     WHERE wi.status='waiting' AND wi.quantity>0 AND p.store_id=e.store_id
       AND NOT c.purchase_closed AND c.status IN ('active','checkout')
       AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
-      AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+      AND (c.never_expires OR is_active_vip(c.store_id, c.platform_handle) OR c.expires_at IS NULL OR c.expires_at>now())
       AND (host.id IS NULL OR (host.status IN ('active','checkout')
         AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
-        AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now())))
+        AND (host.never_expires OR is_active_vip(host.store_id, host.platform_handle) OR host.expires_at IS NULL OR host.expires_at>now())))
       AND wi.product_id IN (SELECT own.product_id FROM waitlist_items own WHERE own.cart_id=$1 AND own.status='waiting')
 )
 SELECT wi.id, wi.event_id, wi.product_id, wi.platform_user_id, wi.platform_handle, wi.quantity, wi.position, wi.status, wi.notified_at, wi.fulfilled_at, wi.expires_at, wi.created_at, wi.cart_id, wi.notification_sent_at, wi.cancelled_at, wi.unit_price, wi.original_quantity, wi.fulfilled_quantity, wi.cancelled_quantity, wi.source_command, wi.queue_sequence, wi.price_lot_id,queued.queue_position,

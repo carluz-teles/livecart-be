@@ -275,13 +275,15 @@ WHERE carts.id = $1
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
   AND NOT payment_review_required
   AND NOT never_expires
+  AND NOT is_active_vip(carts.store_id, carts.platform_handle)
   AND NOT purchase_closed
   AND erp_order_accepts_items(erp_order_status)
   AND NOT EXISTS (
       SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
         AND (host.payment_status IN ('paid','refunded') OR host.purchase_closed
           OR host.payment_review_required OR host.status NOT IN ('active','checkout')
-          OR NOT erp_order_accepts_items(host.erp_order_status))
+          OR NOT erp_order_accepts_items(host.erp_order_status)
+          OR host.never_expires OR is_active_vip(host.store_id, host.platform_handle))
   )
   AND expires_at <= now()
 RETURNING *;
@@ -510,6 +512,7 @@ WHERE c.event_id = sqlc.arg(event_id) AND e.id = c.event_id
   AND c.payment_status IS DISTINCT FROM 'paid'
   AND c.payment_status IS DISTINCT FROM 'refunded'
   AND NOT c.never_expires
+  AND NOT is_active_vip(c.store_id, c.platform_handle)
 RETURNING c.id;
 
 -- name: ShiftOpenCartExpirations :many
@@ -540,6 +543,7 @@ WITH candidates AS (
       AND c.payment_status IS DISTINCT FROM 'paid'
       AND c.payment_status IS DISTINCT FROM 'refunded'
       AND NOT c.never_expires
+      AND NOT is_active_vip(c.store_id, c.platform_handle)
       AND c.expires_at IS NOT NULL
 )
 UPDATE carts c
@@ -550,6 +554,7 @@ WHERE c.id = candidates.id AND candidates.deadline > c.expires_at
   AND c.payment_status IS DISTINCT FROM 'paid'
   AND c.payment_status IS DISTINCT FROM 'refunded'
   AND NOT c.never_expires
+  AND NOT is_active_vip(c.store_id, c.platform_handle)
 RETURNING c.id;
 
 -- name: CountCartsByEvent :one
@@ -838,6 +843,8 @@ WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.expires_at IS NOT NULL
   AND c.expires_at < now()
+  AND NOT c.never_expires
+  AND NOT is_active_vip(c.store_id, c.platform_handle)
   AND ci.product_id = $2
   AND ci.quantity > ci.waitlisted_quantity;
 
@@ -1169,7 +1176,10 @@ AND (sqlc.arg(to_state)::varchar <> 'reflecting' OR NOT EXISTS (
 -- dele, e é o estado dele que decide o que pode ser escrito. Sem isto, um
 -- carrinho juntado leria o próprio estado — vazio, sem pedido — e tentaria
 -- criar um segundo pedido para o mesmo conteúdo.
-SELECT c.id, COALESCE(c.payment_status,'pending')::text AS payment_status,
+SELECT c.id, c.status AS cart_status, c.expires_at,
+       (c.never_expires OR is_active_vip(c.store_id, c.platform_handle)
+        OR c.payment_review_required OR NOT erp_order_accepts_items(c.erp_order_status))::boolean AS expiry_protected,
+       COALESCE(c.payment_status,'pending')::text AS payment_status,
        c.purchase_closed, c.erp_order_state, c.erp_stock_launched, COALESCE(c.external_order_id,'') AS external_order_id,
        COALESCE(c.erp_order_status,'') AS erp_order_status,
        c.paid_amount_cents,
@@ -1553,7 +1563,7 @@ SET status                       = 'checkout',
     -- Prazo re-armado a partir de AGORA. O antigo já passou (ou passaria em
     -- instantes), e devolver um carrinho que expira em seguida seria devolver
     -- nada.
-    expires_at = CASE WHEN never_expires THEN NULL
+    expires_at = CASE WHEN never_expires OR is_active_vip(store_id, platform_handle) THEN NULL
                       ELSE now() + (sqlc.arg(minutos_de_prazo)::int || ' minutes')::interval END
 WHERE id = sqlc.arg(cart_id)::uuid
   AND status = 'cancelled'
@@ -1584,10 +1594,10 @@ WITH atual AS (
         WHERE wi.product_id=atual.id AND wi.status='waiting' AND wi.quantity>0
           AND c.status IN ('active','checkout')
           AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
-          AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+          AND (c.never_expires OR is_active_vip(c.store_id, c.platform_handle) OR c.expires_at IS NULL OR c.expires_at>now())
           AND (host.id IS NULL OR (host.status IN ('active','checkout')
             AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
-            AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now())))
+            AND (host.never_expires OR is_active_vip(host.store_id, host.platform_handle) OR host.expires_at IS NULL OR host.expires_at>now())))
     ) THEN LEAST(GREATEST(stock, 0), sqlc.arg(desejado)::int) ELSE 0 END AS qtd FROM atual
 ), aplicado AS (
     -- `erp_seq` sobe porque este É um movimento nosso, e o espelho decide se a
@@ -1647,6 +1657,7 @@ JOIN products p ON p.id = ci.product_id
 JOIN carts c ON c.id = ci.cart_id
 WHERE COALESCE(c.joined_to_cart_id, c.id) =
       (SELECT COALESCE(owner.joined_to_cart_id,owner.id) FROM carts owner WHERE owner.id=sqlc.arg(cart_id)::uuid)
+  AND (c.joined_to_cart_id IS NULL OR c.status NOT IN ('cancelled','expired'))
   AND l.quantity > l.waitlisted_quantity
   AND p.external_id IS NOT NULL AND p.external_id <> ''
 GROUP BY p.external_id, l.unit_price

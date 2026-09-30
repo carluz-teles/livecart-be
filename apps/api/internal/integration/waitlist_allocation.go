@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/inventory"
 )
@@ -39,10 +40,10 @@ func (r *Repository) PromoteNextWaitlistEntry(ctx context.Context, storeID, prod
           AND wi.status='waiting' AND wi.quantity>0
           AND NOT c.purchase_closed AND c.status IN ('active','checkout')
           AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
-          AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+          AND (c.never_expires OR is_active_vip(c.store_id, c.platform_handle) OR c.expires_at IS NULL OR c.expires_at>now())
           AND (host.id IS NULL OR (host.status IN ('active','checkout')
             AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
-            AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now())))
+            AND (host.never_expires OR is_active_vip(host.store_id, host.platform_handle) OR host.expires_at IS NULL OR host.expires_at>now())))
         ORDER BY wi.created_at,wi.queue_sequence LIMIT 1`, productID, storeID).Scan(
 		&result.WaitlistItemID, &result.CartID, &result.EventID, &result.PlatformHandle,
 		&result.UnitPrice, &result.Remaining, &result.Fulfilled, &result.PriceLotID, &ownerCartID)
@@ -73,13 +74,17 @@ func (r *Repository) PromoteNextWaitlistEntry(ctx context.Context, storeID, prod
 		var currentOwner string
 		if err = tx.QueryRow(ctx, `SELECT NOT purchase_closed AND status IN ('active','checkout')
             AND payment_status IS DISTINCT FROM 'paid' AND payment_status IS DISTINCT FROM 'refunded'
-            AND (never_expires OR expires_at IS NULL OR expires_at>now()),payment_review_required,
+            AND (never_expires OR is_active_vip(store_id, platform_handle) OR expires_at IS NULL OR expires_at>now()),payment_review_required,
             COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1 FOR UPDATE`, id).Scan(&eligible, &review, &currentOwner); err != nil {
 			return nil, err
 		}
 		if !eligible || review || currentOwner != ownerCartID {
 			return nil, inventory.ErrWaitlistPromotionDeferred
 		}
+	}
+
+	if err := cartedit.AssertReady(ctx, tx, ownerCartID); err != nil {
+		return nil, fmt.Errorf("%w: %w", inventory.ErrWaitlistPromotionDeferred, err)
 	}
 
 	var stock int

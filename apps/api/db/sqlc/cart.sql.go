@@ -659,13 +659,15 @@ WHERE carts.id = $1
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
   AND NOT payment_review_required
   AND NOT never_expires
+  AND NOT is_active_vip(carts.store_id, carts.platform_handle)
   AND NOT purchase_closed
   AND erp_order_accepts_items(erp_order_status)
   AND NOT EXISTS (
       SELECT 1 FROM carts host WHERE host.id=carts.joined_to_cart_id
         AND (host.payment_status IN ('paid','refunded') OR host.purchase_closed
           OR host.payment_review_required OR host.status NOT IN ('active','checkout')
-          OR NOT erp_order_accepts_items(host.erp_order_status))
+          OR NOT erp_order_accepts_items(host.erp_order_status)
+          OR host.never_expires OR is_active_vip(host.store_id, host.platform_handle))
   )
   AND expires_at <= now()
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, paid_amount_cents, cancellation_reverted_reason, joined_to_cart_id, joined_at, erp_order_status, erp_order_status_at, erp_order_number, erp_op_resting_state, erp_items_retry_at, payment_review_required, pix_cancel_lease_until, waitlist_extra_eligible, deadline_config_base_at, deadline_config_x_minutes, deadline_config_y_minutes, purchase_closed
@@ -805,6 +807,7 @@ WHERE c.event_id = $3 AND e.id = c.event_id
   AND c.payment_status IS DISTINCT FROM 'paid'
   AND c.payment_status IS DISTINCT FROM 'refunded'
   AND NOT c.never_expires
+  AND NOT is_active_vip(c.store_id, c.platform_handle)
 RETURNING c.id
 `
 
@@ -1704,7 +1707,10 @@ func (q *Queries) GetCartERPOpAge(ctx context.Context, id pgtype.UUID) (float64,
 }
 
 const getCartERPOrderState = `-- name: GetCartERPOrderState :one
-SELECT c.id, COALESCE(c.payment_status,'pending')::text AS payment_status,
+SELECT c.id, c.status AS cart_status, c.expires_at,
+       (c.never_expires OR is_active_vip(c.store_id, c.platform_handle)
+        OR c.payment_review_required OR NOT erp_order_accepts_items(c.erp_order_status))::boolean AS expiry_protected,
+       COALESCE(c.payment_status,'pending')::text AS payment_status,
        c.purchase_closed, c.erp_order_state, c.erp_stock_launched, COALESCE(c.external_order_id,'') AS external_order_id,
        COALESCE(c.erp_order_status,'') AS erp_order_status,
        c.paid_amount_cents,
@@ -1716,6 +1722,9 @@ WHERE orig.id = $1
 
 type GetCartERPOrderStateRow struct {
 	ID               pgtype.UUID        `json:"id"`
+	CartStatus       string             `json:"cart_status"`
+	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
+	ExpiryProtected  bool               `json:"expiry_protected"`
 	PaymentStatus    string             `json:"payment_status"`
 	PurchaseClosed   bool               `json:"purchase_closed"`
 	ErpOrderState    string             `json:"erp_order_state"`
@@ -1741,6 +1750,9 @@ func (q *Queries) GetCartERPOrderState(ctx context.Context, id pgtype.UUID) (Get
 	var i GetCartERPOrderStateRow
 	err := row.Scan(
 		&i.ID,
+		&i.CartStatus,
+		&i.ExpiresAt,
+		&i.ExpiryProtected,
 		&i.PaymentStatus,
 		&i.PurchaseClosed,
 		&i.ErpOrderState,
@@ -2434,6 +2446,7 @@ JOIN products p ON p.id = ci.product_id
 JOIN carts c ON c.id = ci.cart_id
 WHERE COALESCE(c.joined_to_cart_id, c.id) =
       (SELECT COALESCE(owner.joined_to_cart_id,owner.id) FROM carts owner WHERE owner.id=$1::uuid)
+  AND (c.joined_to_cart_id IS NULL OR c.status NOT IN ('cancelled','expired'))
   AND l.quantity > l.waitlisted_quantity
   AND p.external_id IS NOT NULL AND p.external_id <> ''
 GROUP BY p.external_id, l.unit_price
@@ -3177,6 +3190,8 @@ WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.expires_at IS NOT NULL
   AND c.expires_at < now()
+  AND NOT c.never_expires
+  AND NOT is_active_vip(c.store_id, c.platform_handle)
   AND ci.product_id = $2
   AND ci.quantity > ci.waitlisted_quantity
 `
@@ -4262,7 +4277,7 @@ SET status                       = 'checkout',
     -- Prazo re-armado a partir de AGORA. O antigo já passou (ou passaria em
     -- instantes), e devolver um carrinho que expira em seguida seria devolver
     -- nada.
-    expires_at = CASE WHEN never_expires THEN NULL
+    expires_at = CASE WHEN never_expires OR is_active_vip(store_id, platform_handle) THEN NULL
                       ELSE now() + ($1::int || ' minutes')::interval END
 WHERE id = $2::uuid
   AND status = 'cancelled'
@@ -4751,6 +4766,7 @@ WITH candidates AS (
       AND c.payment_status IS DISTINCT FROM 'paid'
       AND c.payment_status IS DISTINCT FROM 'refunded'
       AND NOT c.never_expires
+      AND NOT is_active_vip(c.store_id, c.platform_handle)
       AND c.expires_at IS NOT NULL
 )
 UPDATE carts c
@@ -4761,6 +4777,7 @@ WHERE c.id = candidates.id AND candidates.deadline > c.expires_at
   AND c.payment_status IS DISTINCT FROM 'paid'
   AND c.payment_status IS DISTINCT FROM 'refunded'
   AND NOT c.never_expires
+  AND NOT is_active_vip(c.store_id, c.platform_handle)
 RETURNING c.id
 `
 
@@ -4942,10 +4959,10 @@ WITH atual AS (
         WHERE wi.product_id=atual.id AND wi.status='waiting' AND wi.quantity>0
           AND c.status IN ('active','checkout')
           AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
-          AND (c.never_expires OR c.expires_at IS NULL OR c.expires_at>now())
+          AND (c.never_expires OR is_active_vip(c.store_id, c.platform_handle) OR c.expires_at IS NULL OR c.expires_at>now())
           AND (host.id IS NULL OR (host.status IN ('active','checkout')
             AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
-            AND (host.never_expires OR host.expires_at IS NULL OR host.expires_at>now())))
+            AND (host.never_expires OR is_active_vip(host.store_id, host.platform_handle) OR host.expires_at IS NULL OR host.expires_at>now())))
     ) THEN LEAST(GREATEST(stock, 0), $2::int) ELSE 0 END AS qtd FROM atual
 ), aplicado AS (
     -- ` + "`" + `erp_seq` + "`" + ` sobe porque este É um movimento nosso, e o espelho decide se a

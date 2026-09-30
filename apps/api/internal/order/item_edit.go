@@ -202,7 +202,7 @@ func (s *Service) RemoveItem(ctx context.Context, input RemoveOrderItemInput) er
 
 // AddItem godoc
 // @Summary      Add a catalog product to an unpaid order
-// @Description Tiny merchant edits with Idempotency-Key are persisted and synchronized asynchronously. Inspect erpItemSync in the response.
+// @Description Item edits are persisted with their stock reservation and synchronized asynchronously. Reuse Idempotency-Key for retries and inspect erpItemSync in the response.
 // @Description  Merchant-side edit of an order still awaiting payment. Reserves stock, records the mutation as source=merchant, cancels any pending PIX and clears the shipping selection.
 // @Param        Idempotency-Key header string false "Unique UUID for this edit, reused on HTTP retry"
 // @Tags         orders

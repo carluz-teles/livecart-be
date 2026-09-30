@@ -845,7 +845,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				ticker := time.NewTicker(time.Minute)
 				defer ticker.Stop()
 				for {
-					integrationSvc.RunTinyStockRecovery(stockCtx)
+					integrationSvc.RunERPStockRecovery(stockCtx)
 					select {
 					case <-stockCtx.Done():
 						return

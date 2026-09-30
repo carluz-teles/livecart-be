@@ -558,6 +558,7 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 			zap.String("campo", campo),
 			zap.Any("saldo", cru["saldo"]),
 			zap.Any("reservado", cru["reservado"]),
+			zap.Any("disponivel_bruto", cru["disponivel"]),
 			zap.Int("disponivel", n),
 		)
 	}

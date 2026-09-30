@@ -4,15 +4,26 @@
 
 -- name: AddVipHandle :one
 -- Idempotente: cria o VIP ou reativa uma linha antes removida.
-INSERT INTO vip_handles (store_id, platform_handle, added_by_user_id)
-VALUES ($1, $2, $3)
-ON CONFLICT (store_id, platform_handle) DO UPDATE
-SET added_by_user_id  = EXCLUDED.added_by_user_id,
-    added_at          = now(),
-    removed_at        = NULL,
-    removed_by_user_id = NULL,
-    updated_at        = now()
-RETURNING *;
+WITH vip AS (
+    INSERT INTO vip_handles (store_id, platform_handle, added_by_user_id)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (store_id, platform_handle) DO UPDATE
+    SET added_by_user_id = EXCLUDED.added_by_user_id,
+        added_at = now(), removed_at = NULL, removed_by_user_id = NULL, updated_at = now()
+    RETURNING *
+), protected AS (
+    UPDATE carts c SET expires_at = NULL
+    FROM vip v
+    WHERE c.store_id = v.store_id
+      AND lower(ltrim(btrim(c.platform_handle), '@')) = v.platform_handle
+      AND c.status IN ('pending','active','checkout')
+      AND c.payment_status IS DISTINCT FROM 'paid'
+      AND c.payment_status IS DISTINCT FROM 'refunded'
+      AND NOT c.purchase_closed
+      AND c.expires_at IS NOT NULL
+    RETURNING c.id
+)
+SELECT * FROM vip;
 
 -- name: RemoveVipHandle :one
 UPDATE vip_handles
@@ -23,12 +34,7 @@ WHERE store_id = $1 AND platform_handle = $2
 RETURNING *;
 
 -- name: IsVipHandle :one
-SELECT EXISTS(
-    SELECT 1 FROM vip_handles
-    WHERE store_id = $1
-      AND platform_handle = $2
-      AND removed_at IS NULL
-) AS is_vip;
+SELECT is_active_vip(sqlc.arg(store_id)::uuid, sqlc.arg(platform_handle)::text)::boolean AS is_vip;
 
 -- name: GetVipHandle :one
 SELECT * FROM vip_handles

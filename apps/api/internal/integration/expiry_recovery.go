@@ -14,10 +14,11 @@ func (s *Service) RecoverRecentCartExpiries(ctx context.Context) {
         LEFT JOIN carts host ON host.id=c.joined_to_cart_id
         WHERE c.status IN ('active','checkout')
           AND c.expires_at<now()-interval '30 seconds' AND c.expires_at>now()-interval '24 hours'
-          AND NOT c.never_expires AND NOT c.purchase_closed AND NOT c.payment_review_required
+          AND NOT c.never_expires AND NOT is_active_vip(c.store_id, c.platform_handle) AND NOT c.purchase_closed AND NOT c.payment_review_required
           AND COALESCE(c.payment_status,'pending') NOT IN ('paid','refunded')
           AND erp_order_accepts_items(c.erp_order_status)
-          AND (host.id IS NULL OR (NOT host.purchase_closed AND NOT host.payment_review_required
+          AND (host.id IS NULL OR (NOT host.never_expires
+            AND NOT is_active_vip(host.store_id, host.platform_handle) AND NOT host.purchase_closed AND NOT host.payment_review_required
             AND host.status IN ('active','checkout') AND erp_order_accepts_items(host.erp_order_status)
             AND COALESCE(host.payment_status,'pending') NOT IN ('paid','refunded')))
         ORDER BY c.expires_at,c.id LIMIT 50`)

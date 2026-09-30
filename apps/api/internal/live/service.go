@@ -1584,16 +1584,12 @@ func (s *Service) getOrCreateCartForItem(ctx context.Context, input AddToCartInp
 		originSession = &input.SessionID
 	}
 	// Cliente VIP? Então o carrinho é ETERNO e resolvido por (loja, @)
-	// atravessando eventos. Best-effort: falha na checagem cai em carrinho
-	// normal (nunca bloqueia a compra).
+	// atravessando eventos. Uma falha de consulta é retomável; criar um carrinho
+	// comum nessa situação perderia a proteção e a consolidação do VIP.
 	isVip := false
 	if s.vipChecker != nil && input.StoreID != "" && input.PlatformHandle != "" {
 		if v, vErr := s.vipChecker.IsVipHandle(ctx, input.StoreID, input.PlatformHandle); vErr != nil {
-			logger.From(ctx, s.logger).Warn("vip check failed, treating as normal cart",
-				zap.String("store_id", input.StoreID),
-				zap.String("handle", input.PlatformHandle),
-				zap.Error(vErr),
-			)
+			return nil, false, fmt.Errorf("checking vip before resolving cart: %w", vErr)
 		} else {
 			isVip = v
 		}

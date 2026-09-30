@@ -5799,9 +5799,8 @@ func (s *Service) ActivateVipCartsForHandle(ctx context.Context, storeID, handle
 			zap.Int("skipped_with_erp_order", len(res.SkippedCartIDs)),
 		)
 	}
-	// Um carrinho deixado de fora não é detalhe: ele mantém o prazo e vai
-	// expirar como se o comprador não fosse VIP. Sobe como warn para aparecer
-	// sem depender de alguém abrir a resposta da API.
+	// Carts left outside consolidation need visibility even though the active
+	// membership protects them from automatic expiry.
 	if len(res.SkippedCartIDs) > 0 {
 		logger.From(ctx, s.logger).Warn("vip promotion left carts out of the merge",
 			zap.String("store_id", storeID),
