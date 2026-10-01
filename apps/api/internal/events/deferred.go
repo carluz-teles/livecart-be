@@ -9,7 +9,9 @@ type DeferredError struct{ message string }
 func NewDeferredError(message string) error { return &DeferredError{message: message} }
 func (e *DeferredError) Error() string      { return e.message }
 
-func isDeferred(err error) bool {
+// IsDeferred reports whether every cause is an expected postponement. A joined
+// persistence/network failure must still be logged at the normal failure level.
+func IsDeferred(err error) bool {
 	if _, ok := err.(*DeferredError); ok {
 		return true
 	}
@@ -19,14 +21,14 @@ func isDeferred(err error) bool {
 			return false
 		}
 		for _, cause := range causes {
-			if !isDeferred(cause) {
+			if !IsDeferred(cause) {
 				return false
 			}
 		}
 		return true
 	}
 	if cause := errors.Unwrap(err); cause != nil {
-		return isDeferred(cause)
+		return IsDeferred(cause)
 	}
 	return false
 }
