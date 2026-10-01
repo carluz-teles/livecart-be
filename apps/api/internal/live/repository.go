@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -92,6 +93,12 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 
 	qtx := r.q.WithTx(tx)
 
+	// Serialize sequence allocation within this event. The media unique index
+	// still arbitrates concurrent links across different events.
+	if err := tx.QueryRow(ctx, `SELECT id FROM live_events WHERE id=$1 FOR UPDATE`, eventUID).Scan(&eventUID); err != nil {
+		return SessionRow{}, nil, fmt.Errorf("locking session event: %w", err)
+	}
+
 	// Create the session
 	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
 		EventID: eventUID,
@@ -131,7 +138,7 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 			PlatformLiveID: platformLiveID,
 		})
 		if err != nil {
-			return SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+			return SessionRow{}, nil, sessionMediaError(err)
 		}
 		platformOut = &PlatformRow{
 			ID:             platformRow.ID.String(),
@@ -361,7 +368,7 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 				PlatformLiveID: platformLiveID,
 			})
 			if err != nil {
-				return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+				return EventRow{}, SessionRow{}, nil, sessionMediaError(err)
 			}
 			platformRow = &PlatformRow{
 				ID:             row.ID.String(),
@@ -1278,7 +1285,7 @@ func (r *Repository) AddPlatformToSession(ctx context.Context, sessionID, platfo
 		PlatformLiveID: platformLiveID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("adding platform to session: %w", err)
+		return nil, sessionMediaError(err)
 	}
 
 	return &PlatformRow{
@@ -1288,6 +1295,38 @@ func (r *Repository) AddPlatformToSession(ctx context.Context, sessionID, platfo
 		PlatformLiveID: row.PlatformLiveID,
 		AddedAt:        row.AddedAt.Time,
 	}, nil
+}
+
+func sessionMediaError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_lsp_media_in_flight" {
+		return httpx.DomainError(409, httpx.CodeSessionMediaAlreadyLinked,
+			"esta publicação já está vinculada a uma transmissão; abra a transmissão existente ou libere o vínculo antes de tentar novamente")
+	}
+	return fmt.Errorf("adding platform to session: %w", err)
+}
+
+// LinkSessionMediaTx keeps the session type unchanged when the media conflicts.
+func (r *Repository) LinkSessionMediaTx(ctx context.Context, input LinkSessionMediaInput) (*PlatformRow, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("beginning media link: %w", err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) // No-op after commit.
+	transactionRepo := NewRepository(r.q.WithTx(tx), nil)
+	if input.Type != "" {
+		if err := transactionRepo.SetSessionType(ctx, input.SessionID, input.Type); err != nil {
+			return nil, fmt.Errorf("setting session type on media link: %w", err)
+		}
+	}
+	row, err := transactionRepo.AddPlatformToSession(ctx, input.SessionID, input.Platform, input.PlatformLiveID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing media link: %w", err)
+	}
+	return row, nil
 }
 
 func (r *Repository) ListPlatformsBySession(ctx context.Context, sessionID string) ([]PlatformRow, error) {

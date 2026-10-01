@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/hibiken/asynq"
@@ -134,26 +135,39 @@ func (s *Server) Stop() {
 func errorHandler(log *zap.Logger) func(context.Context, *asynq.Task, error) {
 	return func(ctx context.Context, task *asynq.Task, err error) {
 		retried, _ := asynq.GetRetryCount(ctx)
-		maxRetry, _ := asynq.GetMaxRetry(ctx)
+		maxRetry, hasMaxRetry := asynq.GetMaxRetry(ctx)
+		taskID, _ := asynq.GetTaskID(ctx)
+		queue, _ := asynq.GetQueueName(ctx)
+		fields := []zap.Field{
+			zap.String("event", task.Type()), zap.String("task_id", taskID),
+			zap.String("queue", queue), zap.Int("retried", retried),
+			zap.Int("max_retry", maxRetry), zap.Error(err),
+		}
+		var env Envelope
+		if json.Unmarshal(task.Payload(), &env) == nil {
+			fields = append(fields, zap.String("event_id", env.EventID),
+				zap.String("store_id", env.Metadata["store_id"]),
+				zap.String("integration_id", env.Metadata["integration_id"]),
+				zap.String("live_event_id", env.LiveEventID), zap.String("trace_id", env.TraceID))
+		}
+		log := logger.From(ctx, log)
+		if errors.Is(err, asynq.RevokeTask) {
+			log.Info("event task revoked", fields...)
+			return
+		}
 		// When retries are exhausted asynq moves the task to its archived set —
 		// the consumer-side dead-letter queue (inspectable, retained). Log it
 		// distinctly so a dead-lettered event is greppable/alertable, not just
 		// another retry warning.
-		if retried >= maxRetry {
-			log.Error("event handler failed — DEAD-LETTERED (archived)",
-				zap.String("event", task.Type()),
-				zap.Int("retried", retried),
-				zap.Int("max_retry", maxRetry),
-				zap.Error(err),
-			)
+		if (hasMaxRetry && retried >= maxRetry) || errors.Is(err, asynq.SkipRetry) {
+			log.Error("event handler failed — DEAD-LETTERED (archived)", fields...)
 			return
 		}
-		log.Error("event handler failed",
-			zap.String("event", task.Type()),
-			zap.Int("retried", retried),
-			zap.Int("max_retry", maxRetry),
-			zap.Error(err),
-		)
+		if isDeferred(err) {
+			log.Info("event handler deferred; retry scheduled", fields...)
+			return
+		}
+		log.Error("event handler failed", fields...)
 	}
 }
 

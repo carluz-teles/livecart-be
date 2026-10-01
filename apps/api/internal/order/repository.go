@@ -1041,7 +1041,7 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		// item, shipment or ERP error remains. An explicit payment review is
 		// still actionable (for example a payment received after expiration).
 		matcher := fmt.Sprintf(
-			"(c.payment_review_required OR (c.status NOT IN ('cancelled', 'expired') AND (EXISTS(SELECT 1 FROM cart_items pending WHERE pending.cart_id=c.id AND pending.erp_pending_since IS NOT NULL) OR COALESCE(op.erp_finalisation_status, '') = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))))",
+			"(c.payment_review_required OR EXISTS(SELECT 1 FROM erp_payment_reviews pr WHERE pr.cart_id=c.id AND pr.resolved_at IS NULL) OR (c.status NOT IN ('cancelled', 'expired') AND (EXISTS(SELECT 1 FROM cart_items pending WHERE pending.cart_id=c.id AND pending.erp_pending_since IS NOT NULL) OR COALESCE(op.erp_finalisation_status, '') = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))))",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
 		)

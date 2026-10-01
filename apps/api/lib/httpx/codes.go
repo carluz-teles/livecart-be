@@ -92,7 +92,8 @@ const (
 	// CreateSession com metade da mídia (platform sem platformLiveId, ou o
 	// inverso). Código próprio porque a tela do painel precisa distinguir "erro
 	// no seletor de publicação" de qualquer outro 400 da criação de sessão.
-	CodeSessionMediaIncomplete Code = "SESSION_MEDIA_INCOMPLETE" // live/service.go (CreateSession)
+	CodeSessionMediaIncomplete    Code = "SESSION_MEDIA_INCOMPLETE" // live/service.go (CreateSession)
+	CodeSessionMediaAlreadyLinked Code = "SESSION_MEDIA_ALREADY_LINKED"
 
 	// --- INSTAGRAM messaging (internal/live/service.go, ResendCheckoutMessage) ---
 	CodeIgNotifyNotConfigured Code = "IG_NOTIFY_NOT_CONFIGURED" // live/service.go:1214 ("instagram notifications are not configured")

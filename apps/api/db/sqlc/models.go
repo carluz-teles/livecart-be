@@ -329,6 +329,17 @@ type ErpOrderStatusEvent struct {
 	Payload         json.RawMessage    `json:"payload"`
 }
 
+type ErpPaymentReview struct {
+	CartID          pgtype.UUID        `json:"cart_id"`
+	ExternalOrderID string             `json:"external_order_id"`
+	Reason          string             `json:"reason"`
+	PaidCents       pgtype.Int8        `json:"paid_cents"`
+	OrderTotalCents pgtype.Int8        `json:"order_total_cents"`
+	DetectedAt      pgtype.Timestamptz `json:"detected_at"`
+	CheckedAt       pgtype.Timestamptz `json:"checked_at"`
+	ResolvedAt      pgtype.Timestamptz `json:"resolved_at"`
+}
+
 type ErpResyncJob struct {
 	IntegrationID      pgtype.UUID        `json:"integration_id"`
 	RunID              pgtype.UUID        `json:"run_id"`

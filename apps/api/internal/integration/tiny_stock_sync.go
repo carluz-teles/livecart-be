@@ -30,7 +30,8 @@ type TinyProductWebhookCommand struct {
 	Revision      int64  `json:"revision,omitempty"`
 }
 
-var errERPStockReadBusy = errors.New("stock read already in progress; retry with the durable invalidation")
+var errERPStockReadBusy = events.NewDeferredError("stock read already in progress; retry with the durable invalidation")
+var errERPStockSnapshotInvalidated = events.NewDeferredError("ERP stock snapshot invalidated by concurrent change")
 
 func (s *Service) enqueueTinyProductWebhook(ctx context.Context, storeID, kind, productID string) error {
 	integration, err := s.repo.GetActiveERP(ctx, storeID)
@@ -199,7 +200,7 @@ func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integrat
 		if checkpointErr != nil {
 			return false, fmt.Errorf("recording invalidated stock snapshot: %w", checkpointErr)
 		}
-		return false, fmt.Errorf("ERP stock snapshot invalidated by concurrent change")
+		return false, errERPStockSnapshotInvalidated
 	}
 	_, err = s.repo.pool.Exec(ctx, `UPDATE erp_stock_sync_state SET last_success_at=now(),deferred_at=NULL,
  completed_revision=GREATEST(completed_revision,$3) WHERE product_id=$1 AND read_owner=$2`, id, owner, requested)

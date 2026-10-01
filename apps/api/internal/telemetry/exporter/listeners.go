@@ -492,8 +492,7 @@ func (l *Listeners) OnGMVRefunded(ctx context.Context, env events.Envelope) {
 // ProcessInstagramComment and only persisted onto the live_comments row, not
 // echoed back onto the bus. So this handler re-reads the row it just wrote,
 // by platform_comment_id (env.Metadata["comment_id"], set by
-// live.DispatchCommentReceived) — the row is the source of truth and is
-// guaranteed to already exist given the ordering above.
+// live.DispatchCommentReceived). Ignored comments legitimately have no row.
 func (l *Listeners) OnCommentReceived(ctx context.Context, env events.Envelope) {
 	if l.enricher == nil {
 		return
@@ -506,7 +505,7 @@ func (l *Listeners) OnCommentReceived(ctx context.Context, env events.Envelope) 
 	if !ok {
 		// No persisted live_comments row (e.g. the comment was dropped before
 		// CreateLiveComment — no active session/event for the media_id) or a
-		// query failure — Enricher already logged it. Nothing to export.
+		// query failure — Enricher logs only actual query failures. Nothing to export.
 		return
 	}
 

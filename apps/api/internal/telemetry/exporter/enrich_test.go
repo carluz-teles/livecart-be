@@ -3,9 +3,11 @@ package exporter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -319,10 +321,21 @@ func TestEnricher_CommentCartCorrelation(t *testing.T) {
 		}
 	})
 
-	t.Run("returns not-ok and logs when the query fails (e.g. comment not persisted yet)", func(t *testing.T) {
+	t.Run("ignored comment has no correlation and emits no warning", func(t *testing.T) {
+		t.Parallel()
+		enricher, logs := newTestEnricher(&fakeEnrichQueries{correlationErr: fmt.Errorf("query: %w", pgx.ErrNoRows)})
+		if _, ok := enricher.CommentCartCorrelation(t.Context(), "ignored-comment"); ok {
+			t.Fatal("unpersisted comment produced correlation")
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("expected absence generated warnings: %v", logs.All())
+		}
+	})
+
+	t.Run("query failures remain visible", func(t *testing.T) {
 		t.Parallel()
 
-		enricher, logs := newTestEnricher(&fakeEnrichQueries{correlationErr: errors.New("no rows in result set")})
+		enricher, logs := newTestEnricher(&fakeEnrichQueries{correlationErr: errors.New("database unavailable")})
 
 		_, ok := enricher.CommentCartCorrelation(t.Context(), "platform-comment-3")
 		if ok {

@@ -1270,10 +1270,6 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	// cada transmissão é configurada explicitamente.
 	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID, input.ProductIDs)
 	if err != nil {
-		logger.From(ctx, s.logger).Error("failed to create session with platform",
-			zap.String("event_id", input.EventID),
-			zap.Error(err),
-		)
 		return CreateSessionOutput{}, err
 	}
 
@@ -1479,13 +1475,7 @@ func (s *Service) LinkSessionMedia(ctx context.Context, input LinkSessionMediaIn
 	// perguntá-la — na hora de criar, ninguém sabe ainda se aquilo vai ser uma
 	// live, um post ou um reel —, então a sessão nasce como marcador e aprende
 	// o que é quando a publicação chega. Vazio mantém o que já estava lá.
-	if input.Type != "" {
-		if err := s.repo.SetSessionType(ctx, input.SessionID, input.Type); err != nil {
-			return PlatformOutput{}, fmt.Errorf("setting session type on media link: %w", err)
-		}
-	}
-
-	row, err := s.repo.AddPlatformToSession(ctx, input.SessionID, input.Platform, input.PlatformLiveID)
+	row, err := s.repo.LinkSessionMediaTx(ctx, input)
 	if err != nil {
 		return PlatformOutput{}, err
 	}
