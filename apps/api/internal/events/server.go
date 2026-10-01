@@ -163,7 +163,7 @@ func errorHandler(log *zap.Logger) func(context.Context, *asynq.Task, error) {
 			log.Error("event handler failed — DEAD-LETTERED (archived)", fields...)
 			return
 		}
-		if isDeferred(err) {
+		if IsDeferred(err) {
 			log.Info("event handler deferred; retry scheduled", fields...)
 			return
 		}

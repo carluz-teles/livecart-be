@@ -24,6 +24,7 @@ func TestBlingOAuthErrorClassifiesWithoutLeakingResponse(t *testing.T) {
 	}{
 		{"revoked", 400, `{"error":"invalid_grant","error_description":"secret-token"}`, true},
 		{"invalid app", 401, `{"error":{"type":"invalid_client"}}`, true},
+		{"invalid request", 401, `{"error":"invalid_request","error_description":"secret-token"}`, false},
 		{"quota", 429, `{"error":{"type":"TOO_MANY_REQUESTS"}}`, false},
 		{"server", 503, `{"error":"invalid_grant"}`, false},
 		{"unknown", 400, `{"error":"secret-token"}`, false},
@@ -33,6 +34,10 @@ func TestBlingOAuthErrorClassifiesWithoutLeakingResponse(t *testing.T) {
 			var classified interface{ Permanent() bool }
 			if !errors.As(err, &classified) || classified.Permanent() != tc.permanent {
 				t.Fatalf("classification: %v", err)
+			}
+			var status interface{ Status() int }
+			if !errors.As(err, &status) || status.Status() != tc.status {
+				t.Fatalf("lost HTTP status for cooldown classification: %v", err)
 			}
 			if strings.Contains(err.Error(), "secret-token") {
 				t.Fatal("token response leaked")

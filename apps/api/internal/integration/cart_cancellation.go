@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	paymentdomain "livecart/apps/api/internal/payment"
@@ -223,9 +224,7 @@ func (s *Service) CancelCartFromERP(ctx context.Context, cartID, storeID string)
 	if !acquired {
 		// Pagamento finalizando agora. O pagamento vence — sair daqui é o certo,
 		// e o mesmo raciocínio do cancelamento manual.
-		logger.From(ctx, s.logger).Info("erp cancel: refused, finalisation in progress",
-			zap.String("cart_id", cartID))
-		return false, nil
+		return false, fmt.Errorf("cancelling cart from ERP: %w", erp.ErrCartBusy)
 	}
 	defer release()
 

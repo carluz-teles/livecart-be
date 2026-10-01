@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"livecart/apps/api/internal/events"
@@ -11,8 +12,8 @@ import (
 
 var errTokenRefreshDeferred = events.NewDeferredError("token refresh deferred until the provider cooldown ends")
 
-// A generic Bling 403 may be an IP block, not revoked credentials. Keep the
-// connection and its credentials, but share the cooldown across workers/deploys.
+// Bling 401/403 responses without a permanent OAuth cause do not prove revoked
+// credentials. Keep the connection, sharing a cooldown across workers/deploys.
 func tokenRefreshDeferred(row *IntegrationRow, now time.Time) bool {
 	if row.Provider != "bling" {
 		return false
@@ -30,7 +31,11 @@ func recordBlingTokenCooldown(
 	ctx context.Context, repo *Repository, row *IntegrationRow, refreshErr error,
 ) error {
 	var status interface{ Status() int }
-	if row.Provider != "bling" || !errors.As(refreshErr, &status) || status.Status() != 403 {
+	if row.Provider != "bling" || !errors.As(refreshErr, &status) {
+		return nil
+	}
+	statusCode := status.Status()
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
 		return nil
 	}
 	var permanent interface{ Permanent() bool }
@@ -47,10 +52,11 @@ func recordBlingTokenCooldown(
 	for key, value := range row.Metadata {
 		metadata[key] = value
 	}
+	now := time.Now().UTC()
 	metadata["tokenRefreshFailure"] = map[string]any{
-		"attempts": attempts, "statusCode": 403,
-		"lastAttemptAt": time.Now().UTC().Format(time.RFC3339),
-		"nextAttemptAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"attempts": attempts, "statusCode": statusCode,
+		"lastAttemptAt": now.Format(time.RFC3339),
+		"nextAttemptAt": now.Add(time.Hour).Format(time.RFC3339),
 	}
 	if err := repo.UpdateMetadata(ctx, row.ID, metadata); err != nil {
 		return fmt.Errorf("recording Bling token cooldown: %w", err)

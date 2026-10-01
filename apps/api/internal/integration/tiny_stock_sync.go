@@ -342,7 +342,7 @@ func (s *Service) RunERPStockRecovery(ctx context.Context) {
 				// original context for subsequent waitlist/order processing.
 				applied, readErr := s.refreshERPAvailableStock(ratelimit.WithTinyCatalogRead(accountCtx), integration, id)
 				if readErr != nil {
-					logger.From(accountCtx, s.logger).Warn("ERP stock recovery deferred", zap.String("external_product_id", id), zap.Error(readErr))
+					s.logStockRecoveryError(accountCtx, "ERP stock recovery deferred", id, readErr)
 					// A removed SKU must not starve the rest of the batch. The shared
 					// account limiter and context still stop work during a cooldown.
 					continue
@@ -350,7 +350,7 @@ func (s *Service) RunERPStockRecovery(ctx context.Context) {
 				if applied {
 					checked++
 					if err := s.ProcessWaitlistAfterStockWebhook(accountCtx, storeID, integration.Provider, id); err != nil {
-						logger.From(accountCtx, s.logger).Warn("ERP stock recovery waitlist deferred", zap.String("external_product_id", id), zap.Error(err))
+						s.logStockRecoveryError(accountCtx, "ERP stock recovery waitlist deferred", id, err)
 					}
 				}
 			}
@@ -359,4 +359,13 @@ func (s *Service) RunERPStockRecovery(ctx context.Context) {
 			}
 		}()
 	}
+}
+
+func (s *Service) logStockRecoveryError(ctx context.Context, message, externalProductID string, err error) {
+	level := zap.WarnLevel
+	if events.IsDeferred(err) {
+		level = zap.InfoLevel
+	}
+	logger.From(ctx, s.logger).Log(level, message,
+		zap.String("external_product_id", externalProductID), zap.Error(err))
 }
