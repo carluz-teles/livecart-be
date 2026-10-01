@@ -101,7 +101,7 @@ type CartReopener interface {
 	ReopenCartFromERP(ctx context.Context, cartID, storeID string) (ReopenReport, error)
 	// CancelCartFromERP é o caminho de ida: o lojista cancelou o pedido no ERP e
 	// o carrinho segue. Devolve false quando o carrinho não pôde ser cancelado
-	// (pago, ou já terminal).
+	// (pago, ou já terminal). ErrCartBusy indica finalização ainda em andamento.
 	CancelCartFromERP(ctx context.Context, cartID, storeID string) (bool, error)
 	// MarkCartPaidFromERP registra, do lado de cá, o pagamento que o lojista
 	// lançou no ERP. Devolve false quando o carrinho já estava pago.
@@ -187,6 +187,11 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 		if morto, err := s.repo.CartIsTerminated(ctx, t.CartID); err == nil && !morto {
 			cancelado, cErr := s.reopener.CancelCartFromERP(ctx, t.CartID, storeID)
 			switch {
+			case errors.Is(cErr, ErrCartBusy):
+				logger.From(ctx, s.logger).Info("ERP cancellation deferred; cart finalisation in progress",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+				)
 			case cErr != nil:
 				logger.From(ctx, s.logger).Error("the order was cancelled in the ERP and the cart could not follow",
 					zap.String("cart_id", t.CartID),
