@@ -137,7 +137,7 @@ func TestCartEdit_CancellationNeedsRemoteEvidence(t *testing.T) {
 	f.service.merchantEditERP = &scriptedMerchantERP{}
 	dueMerchantEdit(t, f.cart)
 	f.service.RecoverMerchantEdits(t.Context())
-	assertEditStock(t, f, 10)
+	assertEditStock(t, f, 8) // A blocked ERP edit now waits for a fresh stock read before releasing retention.
 }
 
 func TestCartEdit_JoinLockRejectsNewCommandButAllowsReplay(t *testing.T) {

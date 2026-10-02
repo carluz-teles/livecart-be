@@ -148,7 +148,8 @@ func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integrat
         VALUES($1,$2,now()+interval '2 minutes') ON CONFLICT(product_id) DO UPDATE
         SET read_owner=EXCLUDED.read_owner,read_until=EXCLUDED.read_until
         WHERE erp_stock_sync_state.read_until IS NULL OR erp_stock_sync_state.read_until<now()
-        RETURNING requested_revision,completed_revision,deferred_at IS NOT NULL`, id, owner).Scan(&requested, &completed, &deferred)
+        RETURNING requested_revision,completed_revision,deferred_at IS NOT NULL OR credit_requires_refresh`, id, owner).
+		Scan(&requested, &completed, &deferred)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, errERPStockReadBusy
 	}
@@ -249,14 +250,17 @@ func (s *Service) claimERPStockChecks(ctx context.Context, storeID string) ([]st
      SELECT 1 FROM cart_items ci JOIN carts c ON c.id=ci.cart_id JOIN live_events e ON e.id=c.event_id
      WHERE ci.product_id=p.id AND c.status IN ('active','checkout') AND NOT c.purchase_closed
        AND COALESCE(c.payment_status,'pending') NOT IN ('paid','refunded') AND e.status='active'
-   ) THEN 1 WHEN s.deferred_at IS NOT NULL OR s.requested_revision>s.completed_revision THEN 2 ELSE 3 END AS urgency
+   ) THEN 1 WHEN s.deferred_at IS NOT NULL OR s.credit_requires_refresh
+     OR s.requested_revision>s.completed_revision THEN 2 ELSE 3 END AS urgency
  FROM products p LEFT JOIN erp_stock_sync_state s ON s.product_id=p.id
  WHERE p.store_id=$1 AND p.external_source=(SELECT i.provider FROM integrations i WHERE i.store_id=$1 AND i.type='erp' AND i.status='active') AND p.active AND COALESCE(p.external_id,'')<>''
  AND NOT EXISTS(SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
-     WHERE r.product_id=p.id AND r.revision>w.synced_revision)
+     WHERE r.product_id=p.id AND r.revision>w.synced_revision
+       AND (w.blocked_at IS NULL OR w.lease_until>now()))
  AND (s.last_attempt_at IS NULL OR s.last_attempt_at<now()-interval '5 minutes')
  AND (s.read_until IS NULL OR s.read_until<now())
- AND (s.deferred_at IS NOT NULL OR s.requested_revision>s.completed_revision OR s.last_success_at IS NULL OR s.last_success_at<now()-interval '15 minutes')
+ AND (s.deferred_at IS NOT NULL OR s.credit_requires_refresh OR s.requested_revision>s.completed_revision
+   OR s.last_success_at IS NULL OR s.last_success_at<now()-interval '15 minutes')
  ), priority AS (
  SELECT id,0 AS lane FROM eligible WHERE urgency<3 ORDER BY urgency,last_attempt_at NULLS FIRST,id LIMIT 8
  ), rotation AS (

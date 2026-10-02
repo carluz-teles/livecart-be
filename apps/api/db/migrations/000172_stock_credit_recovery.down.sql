@@ -1,0 +1,1 @@
+ALTER TABLE erp_stock_sync_state DROP COLUMN credit_requires_refresh;

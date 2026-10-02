@@ -3844,6 +3844,9 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 //
 //	products.stock == saldo do ERP − unidades vivas que esse saldo ainda não desconta
 //
+// Edições bloqueadas retêm conservadoramente suas unidades locais e removidas:
+// a grade ainda não foi conciliada. A liberação exige nova leitura do saldo.
+//
 // É única porque a pluralidade era o defeito. Havia TRÊS escritas absolutas
 // sobre products.stock com defesas diferentes — o espelho do webhook (com esta
 // compensação), o botão "Sincronizar" e a edição do produto (sem nenhuma) — e o

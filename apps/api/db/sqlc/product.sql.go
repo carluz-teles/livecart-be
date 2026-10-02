@@ -12,11 +12,20 @@ import (
 )
 
 const applyERPStockMirror = `-- name: ApplyERPStockMirror :execrows
-UPDATE products
-SET stock = GREATEST($1::int, 0), erp_seq = erp_seq + 1, updated_at = now()
-WHERE products.id = $2 AND products.erp_seq = $3::bigint
-AND NOT EXISTS (SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
-    WHERE r.product_id=products.id AND r.revision>w.synced_revision)
+WITH admitted AS (
+    SELECT p.id FROM products p
+    WHERE p.id=$2 AND p.erp_seq=$3::bigint
+    AND NOT EXISTS (SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
+        WHERE r.product_id=p.id AND r.revision>w.synced_revision
+          AND (w.blocked_at IS NULL OR w.lease_until>now()))
+    FOR UPDATE
+), credit_recovered AS (
+    UPDATE erp_stock_sync_state s SET credit_requires_refresh=false
+    FROM admitted a WHERE s.product_id=a.id AND s.credit_requires_refresh
+)
+UPDATE products p
+SET stock=GREATEST($1::int,0),erp_seq=p.erp_seq+1,updated_at=now()
+FROM admitted a WHERE p.id=a.id
 `
 
 type ApplyERPStockMirrorParams struct {
@@ -390,20 +399,34 @@ func (q *Queries) GetProductByKeyword(ctx context.Context, arg GetProductByKeywo
 }
 
 const incrementProductStock = `-- name: IncrementProductStock :one
-UPDATE products
-SET stock = stock + $2, erp_seq = erp_seq + 1, updated_at = now()
-WHERE id = $1
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq, barcode
+WITH before AS (
+    SELECT p.id, p.external_source IN ('tiny','bling') AND COALESCE(p.external_id,'')<>''
+      AND (EXISTS(SELECT 1 FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
+          WHERE r.product_id=p.id AND r.revision>w.synced_revision AND w.blocked_at IS NOT NULL)
+        OR EXISTS(SELECT 1 FROM erp_stock_sync_state s WHERE s.product_id=p.id AND s.credit_requires_refresh)) AS deferred
+    FROM products p WHERE p.id=$2 FOR UPDATE
+), checkpoint AS (
+    INSERT INTO erp_stock_sync_state(product_id,last_attempt_at,deferred_at,credit_requires_refresh)
+    SELECT id,'epoch',now(),true FROM before WHERE deferred
+    ON CONFLICT(product_id) DO UPDATE SET last_attempt_at='epoch',
+        deferred_at=COALESCE(erp_stock_sync_state.deferred_at,now()),credit_requires_refresh=true
+)
+UPDATE products p
+SET stock=p.stock+CASE WHEN before.deferred THEN 0 ELSE $1::int END,
+    erp_seq=p.erp_seq+1,updated_at=now()
+FROM before WHERE p.id=before.id RETURNING p.id, p.store_id, p.name, p.external_id, p.external_source, p.keyword, p.price, p.image_url, p.stock, p.active, p.created_at, p.updated_at, p.weight_grams, p.height_cm, p.width_cm, p.length_cm, p.sku, p.package_format, p.insurance_value_cents, p.group_id, p.erp_seq, p.barcode
 `
 
 type IncrementProductStockParams struct {
-	ID    pgtype.UUID `json:"id"`
 	Stock pgtype.Int4 `json:"stock"`
+	ID    pgtype.UUID `json:"id"`
 }
 
 // Release reserved stock back to product.
+// A blocked edit can have a mirrored balance clamped to zero. A relative
+// credit could then exceed ERP availability; recover from a fresh read instead.
 func (q *Queries) IncrementProductStock(ctx context.Context, arg IncrementProductStockParams) (Product, error) {
-	row := q.db.QueryRow(ctx, incrementProductStock, arg.ID, arg.Stock)
+	row := q.db.QueryRow(ctx, incrementProductStock, arg.Stock, arg.ID)
 	var i Product
 	err := row.Scan(
 		&i.ID,

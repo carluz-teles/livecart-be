@@ -95,7 +95,7 @@ var keywordPattern = regexp.MustCompile(`\b([A-Za-z0-9]{4})\b`)
 // ExtractPossibleKeywords extracts all 4-character alphanumeric codes from text.
 // Returns uppercase keywords for case-insensitive matching.
 func ExtractPossibleKeywords(text string) []string {
-	matches := keywordPattern.FindAllStringSubmatch(text, -1)
+	matches := keywordPattern.FindAllStringSubmatch(semMencoes(text), -1)
 	if matches == nil {
 		return nil
 	}
