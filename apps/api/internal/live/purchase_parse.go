@@ -45,6 +45,13 @@ type PurchaseItem struct {
 // Existe para que preço nunca vire quantidade. Sem ela, "de 15,90 3" lia 15.
 var precoRe = regexp.MustCompile(`\d+[.,]\d{2}\b`)
 
+// Menções identificam pessoas. Seus números e palavras não são parte do pedido.
+var mencaoRe = regexp.MustCompile(`@[A-Za-z0-9_.]+`)
+
+func semMencoes(texto string) string {
+	return mencaoRe.ReplaceAllString(texto, " ")
+}
+
 // palavrasDePreco marcam o comentário como conversa sobre valor.
 //
 // Não bastam para recusar sozinhas — ver marcadorExplicitoRe.
@@ -95,7 +102,7 @@ func tokenizar(texto string) []string {
 // Devolve nil quando não há intenção de compra. A ordem dos itens é a do texto,
 // porque é a ordem em que a compradora pensou — e é ela que a tela mostra.
 func ParsePurchaseItems(texto string) []PurchaseItem {
-	texto = strings.TrimSpace(texto)
+	texto = strings.TrimSpace(semMencoes(texto))
 	if texto == "" {
 		return nil
 	}
@@ -305,7 +312,7 @@ var verboDeCompraRe = regexp.MustCompile(
 // A ordem espelha a de ParsePurchaseItems, porque o primeiro portão que fecha é
 // o que explica.
 func MotivoDaRecusa(texto string) string {
-	texto = strings.TrimSpace(texto)
+	texto = strings.TrimSpace(semMencoes(texto))
 	if texto == "" {
 		return "texto vazio"
 	}

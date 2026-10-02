@@ -1394,17 +1394,40 @@ WHERE p.external_id = sqlc.arg(external_product_id)
 --   reserva LOCAL   → o ERP não sabe de nada nosso; conta tudo que está vivo
 --
 -- `conta_com_pedido` é esse interruptor. O chamador o deriva do modo efetivo.
-SELECT COALESCE(SUM(CASE WHEN NOT sqlc.arg(conta_com_pedido)::bool
+-- Edições bloqueadas não têm uma grade conciliada: reter toda a quantidade
+-- local e as remoções ainda não liberadas, mesmo se o ERP já as descontar.
+-- Isso permite atualizar o produto sem encerrar a pendência do pedido.
+-- A origem persistida também protege filhos que se separaram da compra.
+WITH blocked_edits AS (
+    SELECT r.cart_id,r.product_id,
+        COALESCE(NULLIF(r.request->>'originCartId','')::uuid,r.cart_id) AS origin_cart_id,
+        GREATEST(SUM(r.retained_quantity),0) AS retained
+    FROM cart_erp_edit_requests r JOIN cart_erp_edits w ON w.cart_id=r.cart_id
+    JOIN products p ON p.id=r.product_id
+    WHERE r.revision>w.synced_revision AND w.blocked_at IS NOT NULL
+      AND p.external_id=sqlc.arg(external_product_id)
+      AND p.external_source=sqlc.arg(external_source) AND p.store_id=sqlc.arg(store_id)
+    GROUP BY r.cart_id,r.product_id,origin_cart_id
+), blocked_items AS (
+    SELECT DISTINCT ci.id,ci.quantity-ci.waitlisted_quantity AS quantity
+    FROM cart_items ci JOIN carts c ON c.id=ci.cart_id
+    JOIN blocked_edits b ON b.product_id=ci.product_id
+      AND (COALESCE(c.joined_to_cart_id,c.id)=b.cart_id OR c.id=b.origin_cart_id)
+)
+SELECT (COALESCE(SUM(CASE WHEN NOT sqlc.arg(conta_com_pedido)::bool
     AND COALESCE(c.external_order_id,'')<>''
     AND COALESCE(c.erp_order_status,'') NOT IN ('','cancelado','nao_encontrado')
     THEN GREATEST(0,ci.quantity-ci.waitlisted_quantity-COALESCE(ci.erp_confirmed_quantity,0))
-    ELSE ci.quantity-ci.waitlisted_quantity END),0)::int
+    ELSE ci.quantity-ci.waitlisted_quantity END),0)
+    + (SELECT COALESCE(SUM(quantity),0) FROM blocked_items)
+    + (SELECT COALESCE(SUM(retained),0) FROM blocked_edits))::int
 FROM cart_items ci
 JOIN carts c ON c.id = ci.cart_id
 JOIN products p ON p.id = ci.product_id
 WHERE p.external_id = sqlc.arg(external_product_id)
   AND p.external_source = sqlc.arg(external_source)
   AND p.store_id = sqlc.arg(store_id)
+  AND NOT EXISTS (SELECT 1 FROM blocked_items b WHERE b.id=ci.id)
   AND (
         c.external_order_id IS NULL OR c.external_order_id = ''
      -- Pedido CANCELADO não segura nada. Olhar só a EXISTÊNCIA do id foi o

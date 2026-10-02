@@ -9,8 +9,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
@@ -400,11 +402,20 @@ func (s *Service) finishMerchantEdit(ctx context.Context, w merchantEditWork) ([
 		return nil, err
 	}
 	products := []string{}
+	q := s.repo.q.WithTx(tx)
 	for _, r := range releases {
 		if r.qty < 0 {
 			return nil, fmt.Errorf("negative retained stock for product %s", r.id)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE products SET stock=stock+$2,erp_seq=erp_seq+1,updated_at=now() WHERE id=$1`, r.id, r.qty); err != nil {
+		var productID pgtype.UUID
+		if err := productID.Scan(r.id); err != nil {
+			return nil, err
+		}
+		// Share cancellation's stock credit guard. A previously blocked edit
+		// invalidates its mirror and waits for fresh ERP stock before release.
+		if _, err := q.IncrementProductStock(ctx, sqlc.IncrementProductStockParams{
+			ID: productID, Stock: pgtype.Int4{Int32: int32(r.qty), Valid: true},
+		}); err != nil {
 			return nil, err
 		}
 		if r.qty > 0 {
