@@ -40,12 +40,22 @@ func seedScheduledEvent(t *testing.T, ctx context.Context, storeID, title string
 	t.Helper()
 	starts := time.Now().UTC().Add(startsIn).Truncate(time.Second)
 	ends := time.Now().UTC().Add(endsIn).Truncate(time.Second)
+	createdEnd := ends
+	if endsIn <= 0 {
+		createdEnd = time.Now().Add(time.Hour)
+	}
 	out, err := newWindowService(nil).Create(ctx, CreateLiveInput{
 		StoreID: storeID, Title: title, Type: "multi",
-		ScheduledAt: &starts, EndsAt: &ends,
+		ScheduledAt: &starts, EndsAt: &createdEnd,
 	})
 	if err != nil {
 		t.Fatalf("criar evento agendado: %v", err)
+	}
+	if endsIn <= 0 {
+		// Simulate a campaign created earlier whose window has since elapsed.
+		if _, err := testPool.Exec(ctx, `UPDATE live_events SET ends_at=$2 WHERE id=$1`, out.ID, ends); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if got := readEventStatus(t, ctx, out.ID); got != "scheduled" {
 		t.Fatalf("evento com scheduled_at deveria nascer 'scheduled', veio %q", got)
