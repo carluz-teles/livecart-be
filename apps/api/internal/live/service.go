@@ -210,6 +210,9 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 	if startsAt != nil && !input.EndsAt.After(*startsAt) {
 		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt precisa ser depois de startsAt")
 	}
+	if !input.EndsAt.After(time.Now()) {
+		return CreateLiveOutput{}, httpx.DomainError(400, httpx.CodeLiveInvalidWindow, "O encerramento precisa estar no futuro: escolha quando o evento deve encerrar")
+	}
 
 	// Default close_cart_on_event_end to true if not specified
 	closeCartOnEventEnd := true

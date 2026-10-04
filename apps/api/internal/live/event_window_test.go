@@ -132,6 +132,39 @@ func TestCreateEventWritesWindowAndArmsClose(t *testing.T) {
 	}
 }
 
+func TestCreateEventRejectsExpiredWindowWithoutWriting(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	storeID := seedWindowStore(t, ctx, "win-expired")
+	sched := &fakeCloseScheduler{}
+	svc := newWindowService(sched)
+	ended := time.Now().Add(-time.Minute)
+	started := ended.Add(-time.Hour)
+	for _, tc := range []struct {
+		name   string
+		starts *time.Time
+	}{
+		{name: "starts immediately"},
+		{name: "both dates are past", starts: &started},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.Create(ctx, CreateLiveInput{
+				StoreID: storeID, Title: "Prazo incorreto", StartsAt: tc.starts, EndsAt: &ended,
+			})
+			if err == nil || httpx.StatusFromError(err) != 400 {
+				t.Fatalf("expected invalid window, got %v", err)
+			}
+		})
+	}
+	var count int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM live_events WHERE store_id=$1`, storeID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || len(sched.armed) != 0 {
+		t.Fatalf("rejected creation persisted %d events and armed %d jobs", count, len(sched.armed))
+	}
+}
+
 func TestCreateEventRejectsEndBeforeStart(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()

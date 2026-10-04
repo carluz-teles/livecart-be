@@ -325,7 +325,7 @@ func (i *Instagram) sendDMRequest(ctx context.Context, url string, payload map[s
 			zap.String("body", bodyStr),
 			zap.String("recipient_id", recipientID),
 		)
-		return &providers.DeliveryError{Err: fmt.Errorf("instagram send dm failed: status %d, body: %s", resp.StatusCode, bodyStr), Retryable: resp.StatusCode == 429 || resp.StatusCode >= 500}
+		return &providers.DeliveryError{Err: fmt.Errorf("instagram send dm failed: status %d, body: %s", resp.StatusCode, bodyStr), Retryable: retryableMessageFailure(resp.StatusCode, respBody)}
 	}
 
 	logger.From(ctx, i.logger).Info("instagram dm sent",
@@ -505,8 +505,8 @@ func (i *Instagram) sendPrivateReplyOnce(ctx context.Context, commentID, text st
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
 		)
-		return &providers.DeliveryError{Err: fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr), Retryable: resp.StatusCode == 429 || resp.StatusCode >= 500},
-			resp.StatusCode == 429 || resp.StatusCode >= 500
+		retryable := retryableMessageFailure(resp.StatusCode, respBody)
+		return &providers.DeliveryError{Err: fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr), Retryable: retryable}, retryable
 	}
 
 	logger.From(ctx, i.logger).Info("instagram private reply sent",
@@ -514,6 +514,23 @@ func (i *Instagram) sendPrivateReplyOnce(ctx context.Context, commentID, text st
 		zap.Int("text_bytes", len(text)),
 	)
 	return nil, false
+}
+
+// Meta can return HTTP 500 for a comment that has already received its only
+// private reply. Retrying that business refusal never opens another reply slot.
+func retryableMessageFailure(status int, body []byte) bool {
+	var response struct {
+		Error struct {
+			Subcode int `json:"error_subcode"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &response) == nil {
+		switch response.Error.Subcode {
+		case 2534022, 2534023: // Messaging window closed / private reply already used.
+			return false
+		}
+	}
+	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
 
 // GetActiveLives retrieves all live videos currently being broadcast by the user.
