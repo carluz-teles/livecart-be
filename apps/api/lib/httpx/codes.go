@@ -88,6 +88,7 @@ const (
 	CodeLiveProductRequired Code = "LIVE_PRODUCT_REQUIRED" // live/service.go:256 ("select at least one product for the promotion")
 	CodeLiveEventNotActive  Code = "LIVE_EVENT_NOT_ACTIVE" // live/service.go:1378,1409 (set active product / change processing on a non-active event)
 	CodeLiveEventEnded      Code = "LIVE_EVENT_ENDED"      // live/service.go:916 ("evento encerrado nao pode ser iniciado")
+	CodeLiveInvalidWindow   Code = "LIVE_INVALID_WINDOW"   // Event creation requires an end in the future.
 	CodeLiveSessionNotLive  Code = "LIVE_SESSION_NOT_LIVE" // live/service.go:2044 ("só é possível controlar o modo live de uma sessão em andamento")
 	// CreateSession com metade da mídia (platform sem platformLiveId, ou o
 	// inverso). Código próprio porque a tela do painel precisa distinguir "erro

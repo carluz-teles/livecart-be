@@ -1268,11 +1268,8 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		return err
 	}
 
-	if result.Status == notification.StatusFailed && result.Error != nil {
-		var temporary interface{ Temporary() bool }
-		if errors.As(result.Error, &temporary) && temporary.Temporary() || errors.Is(result.Error, context.DeadlineExceeded) || errors.Is(result.Error, context.Canceled) {
-			return result.Error
-		}
+	if result.Status == notification.StatusFailed && retryableNotificationError(result.Error) {
+		return result.Error
 	}
 	logger.From(ctx, s.logger).Info("immediate notification processed",
 		zap.String("cart_id", input.CartID),
@@ -1280,6 +1277,27 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		zap.Bool("is_new_cart", input.IsNewCart),
 	)
 	return nil
+}
+
+func retryableNotificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			if retryableNotificationError(cause) {
+				return true
+			}
+		}
+		return false
+	}
+	if temporary, ok := err.(interface{ Temporary() bool }); ok {
+		return temporary.Temporary()
+	}
+	return retryableNotificationError(errors.Unwrap(err))
 }
 
 // sendMaxQuantityReply sends a reply to the user when they've reached or exceeded the max quantity limit.
