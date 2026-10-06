@@ -1404,10 +1404,9 @@ func (s *Service) providerFor(ctx context.Context, storeID string) (providers.ER
 	return erpProvider, nil
 }
 
-// CheckTinyStockWebhookDelivery é o health-check de ENTREGA de webhook:
-// integração ativa sem NENHUM evento de estoque na janela é quase certeza de URL
-// removida pelo lado do ERP (eles apagam o cadastro após falhas consecutivas e
-// param de entregar em silêncio). Loga em ERROR com dedupe de 24h por integração.
+// CheckTinyStockWebhookDelivery reports a delivery gap, deduplicated for 24h.
+// Stock can legitimately stay unchanged overnight; silence alone does not
+// establish that the webhook was removed or that delivery failed.
 func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter time.Duration) {
 	stale, err := s.repo.ListTinyIntegrationsWithStaleStockWebhook(ctx, staleAfter)
 	if err != nil {
@@ -1425,7 +1424,7 @@ func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter 
 		} else {
 			fields = append(fields, zap.String("last_stock_event_at", "nunca"))
 		}
-		logger.From(itemCtx, s.logger).Error("WEBHOOK DO ERP POSSIVELMENTE REMOVIDO: sem eventos de estoque na janela — recadastrar a URL no painel", fields...)
+		logger.From(itemCtx, s.logger).Warn("ERP stock webhook quiet: no stock events in the window; verify delivery if stock changed in ERP", fields...)
 		if stampErr := s.repo.StampIntegrationStockWebhookAlert(itemCtx, integ.IntegrationID); stampErr != nil {
 			logger.From(itemCtx, s.logger).Warn("failed to stamp stock webhook alert",
 				zap.String("integration_id", integ.IntegrationID),

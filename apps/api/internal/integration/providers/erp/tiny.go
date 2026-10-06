@@ -946,37 +946,16 @@ func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
 	if d.PesoLiquido > weightKg {
 		weightKg = d.PesoLiquido
 	}
-	if weightKg <= 0 {
-		return nil
-	}
-
 	format := mapTinyEmbalagem(d.Embalagem)
-
-	// Envelope: only width and length are meaningful; altura defaults to 1cm.
+	height := d.Altura
 	if format == "letter" {
-		if d.Largura <= 0 || d.Comprimento <= 0 {
-			return nil
-		}
-		return &ERPShippingProfile{
-			WeightGrams:   int(math.Round(weightKg * 1000)),
-			HeightCm:      1,
-			WidthCm:       int(math.Round(d.Largura)),
-			LengthCm:      int(math.Round(d.Comprimento)),
-			PackageFormat: format,
-		}
+		height = 1
 	}
-
-	// Box / roll: all four required.
-	if d.Altura <= 0 || d.Largura <= 0 || d.Comprimento <= 0 {
-		return nil
+	profile := flatDimensionsToShipping(weightKg, height, d.Largura, d.Comprimento)
+	if profile != nil {
+		profile.PackageFormat = format
 	}
-	return &ERPShippingProfile{
-		WeightGrams:   int(math.Round(weightKg * 1000)),
-		HeightCm:      int(math.Round(d.Altura)),
-		WidthCm:       int(math.Round(d.Largura)),
-		LengthCm:      int(math.Round(d.Comprimento)),
-		PackageFormat: format,
-	}
+	return profile
 }
 
 // variantToShipping converts the flat `peso/altura/largura/profundidade` Tiny
@@ -1007,7 +986,7 @@ func topLevelWeightHintGrams(p tinyProductPayload) int {
 	if weightKg <= 0 {
 		return 0
 	}
-	return int(math.Round(weightKg * 1000))
+	return wholeShippingMeasure(weightKg * 1000)
 }
 
 // variantWeightHintGrams is the same as topLevelWeightHintGrams but for an
@@ -1016,7 +995,7 @@ func variantWeightHintGrams(v tinyVariantPayload) int {
 	if v.Peso <= 0 {
 		return 0
 	}
-	return int(math.Round(v.Peso * 1000))
+	return wholeShippingMeasure(v.Peso * 1000)
 }
 
 // flatDimensionsToShipping is the shared kg+cm flat-field converter used both
@@ -1025,16 +1004,26 @@ func variantWeightHintGrams(v tinyVariantPayload) int {
 // Returns nil unless all four fields are positive — partial profiles are not
 // useful and are rejected by the LiveCart domain validation.
 func flatDimensionsToShipping(weightKg, heightCm, widthCm, lengthCm float64) *ERPShippingProfile {
-	if weightKg <= 0 || heightCm <= 0 || widthCm <= 0 || lengthCm <= 0 {
-		return nil
-	}
-	return &ERPShippingProfile{
-		WeightGrams:   int(math.Round(weightKg * 1000)),
-		HeightCm:      int(math.Round(heightCm)),
-		WidthCm:       int(math.Round(widthCm)),
-		LengthCm:      int(math.Round(lengthCm)),
+	profile := &ERPShippingProfile{
+		WeightGrams:   wholeShippingMeasure(weightKg * 1000),
+		HeightCm:      wholeShippingMeasure(heightCm),
+		WidthCm:       wholeShippingMeasure(widthCm),
+		LengthCm:      wholeShippingMeasure(lengthCm),
 		PackageFormat: "box",
 	}
+	if profile.WeightGrams == 0 || profile.HeightCm == 0 || profile.WidthCm == 0 || profile.LengthCm == 0 {
+		return nil
+	}
+	return profile
+}
+
+// Shipping stores whole grams/cm. Round positive fractions up so a valid
+// measurement never becomes zero and the parcel is never underestimated.
+func wholeShippingMeasure(value float64) int {
+	if math.IsNaN(value) || value <= 0 || value >= float64(math.MaxInt) {
+		return 0
+	}
+	return int(math.Ceil(value))
 }
 
 // mapTinyEmbalagem best-effort maps Tiny's package category to our
@@ -2070,6 +2059,15 @@ func (t *Tiny) ApproveOrder(ctx context.Context, orderID string) error {
 // ErrOrderStockLaunched para o chamador poder estornar UMA vez e repetir.
 func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []providers.ERPOrderItem) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/itens", tinyAPIBaseURL, orderID)
+
+	// Tiny accepts free items in its panel but rejects them in PUT /itens. This
+	// endpoint replaces the entire grid and has no item discount field. Neither
+	// dropping the gift nor substituting a positive price preserves the order.
+	for _, item := range items {
+		if item.UnitPrice <= 0 {
+			return fmt.Errorf("pedido %s, produto %s: %w", orderID, item.ProductID, providers.ErrOrderItemPriceInvalid)
+		}
+	}
 
 	grid := make([]map[string]any, len(items))
 	for i, item := range items {

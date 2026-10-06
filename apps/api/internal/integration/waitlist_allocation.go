@@ -39,9 +39,11 @@ func (r *Repository) PromoteNextWaitlistEntry(ctx context.Context, storeID, prod
         WHERE wi.product_id=$1 AND e.store_id=$2 AND p.store_id=$2 AND cart_event.store_id=$2 AND p.active
           AND wi.status='waiting' AND wi.quantity>0
           AND NOT c.purchase_closed AND c.status IN ('active','checkout')
+          AND erp_order_accepts_items(c.erp_order_status)
           AND c.payment_status IS DISTINCT FROM 'paid' AND c.payment_status IS DISTINCT FROM 'refunded'
           AND (c.never_expires OR is_active_vip(c.store_id, c.platform_handle) OR c.expires_at IS NULL OR c.expires_at>now())
           AND (host.id IS NULL OR (host.status IN ('active','checkout')
+            AND NOT host.purchase_closed AND erp_order_accepts_items(host.erp_order_status)
             AND host.payment_status IS DISTINCT FROM 'paid' AND host.payment_status IS DISTINCT FROM 'refunded'
             AND (host.never_expires OR is_active_vip(host.store_id, host.platform_handle) OR host.expires_at IS NULL OR host.expires_at>now())))
         ORDER BY wi.created_at,wi.queue_sequence LIMIT 1`, productID, storeID).Scan(
@@ -73,6 +75,7 @@ func (r *Repository) PromoteNextWaitlistEntry(ctx context.Context, storeID, prod
 		var eligible, review bool
 		var currentOwner string
 		if err = tx.QueryRow(ctx, `SELECT NOT purchase_closed AND status IN ('active','checkout')
+            AND erp_order_accepts_items(erp_order_status)
             AND payment_status IS DISTINCT FROM 'paid' AND payment_status IS DISTINCT FROM 'refunded'
             AND (never_expires OR is_active_vip(store_id, platform_handle) OR expires_at IS NULL OR expires_at>now()),payment_review_required,
             COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1 FOR UPDATE`, id).Scan(&eligible, &review, &currentOwner); err != nil {

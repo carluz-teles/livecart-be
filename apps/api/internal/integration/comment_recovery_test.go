@@ -108,6 +108,48 @@ func TestCommentWork_RetrySurvivesLeaseAndFailure(t *testing.T) {
 	}
 }
 
+func TestCommentDeliveryAcknowledgesBusyWorkWithoutCompletingIt(t *testing.T) {
+	requireDB(t)
+	ctx := t.Context()
+	id := fmt.Sprintf("delivery-busy-%d", time.Now().UnixNano())
+	input := live.ProcessInstagramCommentInput{CommentID: id}
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := testRepo.BeginCommentWork(ctx, id, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := live.NewService(live.NewRepository(sqlc.New(testPool), testPool), zap.NewNop())
+	svc.SetIngestRepository(liveIngestRepoAdapter{testRepo})
+	for range 5 {
+		if err := svc.ProcessInstagramCommentDelivery(ctx, input); err != nil {
+			t.Fatalf("duplicate delivery consumed queue retry: %v", err)
+		}
+	}
+	var held bool
+	if err := testPool.QueryRow(ctx, `SELECT completed_at IS NULL AND lease_owner=$2 AND attempts=1
+        FROM live_comment_work WHERE platform_comment_id=$1`, id, owner).Scan(&held); err != nil || !held {
+		t.Fatalf("delivery changed durable work: held=%v err=%v", held, err)
+	}
+	if err := testRepo.FinishCommentWork(ctx, id, owner, context.DeadlineExceeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessInstagramCommentDelivery(ctx, input); err != nil {
+		t.Fatalf("scheduled retry consumed queue retry: %v", err)
+	}
+	makeCommentRetryDue(t, id)
+	if owner, done, err := testRepo.BeginCommentWork(ctx, id, payload); err != nil || done || owner == "" {
+		t.Fatalf("acknowledged envelope lost its recovery: owner=%s done=%v err=%v", owner, done, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := svc.ProcessInstagramCommentDelivery(cancelled, live.ProcessInstagramCommentInput{CommentID: id + "-db-failure"}); err == nil {
+		t.Fatal("delivery acknowledged failed durable persistence")
+	}
+}
+
 func TestCommentWork_UnknownMediaIsIgnored(t *testing.T) {
 	requireDB(t)
 	for _, name := range []string{"new comment", "previously pending comment"} {

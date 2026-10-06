@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -133,6 +134,13 @@ func (s *Service) RecoverPendingERPItems(ctx context.Context) {
 		attempted++
 		if err := s.ReserveStockInERP(ctx, c.store, c.cart, c.event, "", 0, 0, ""); err != nil {
 			deferred++
+			if errors.Is(err, providers.ErrOrderItemPriceInvalid) {
+				// Keep checking for a merchant reconciliation, but do not spend
+				// the live's read budget on an unchanged, unrepresentable grid.
+				if _, retryErr := s.repo.pool.Exec(ctx, `UPDATE carts SET erp_items_retry_at=now()+interval '30 minutes' WHERE id=$1`, c.cart); retryErr != nil {
+					s.logger.Warn("delaying ERP price reconciliation", zap.String("cart_id", c.cart), zap.Error(retryErr))
+				}
+			}
 			s.logger.Warn("ERP cart remains pending", zap.String("cart_id", c.cart), zap.String("store_id", c.store), zap.Error(err))
 			continue
 		}
