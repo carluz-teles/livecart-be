@@ -108,7 +108,7 @@ func tinyPositiveFinancialCents(value float64, maximum int64) (int64, bool) {
 		return 0, false
 	}
 	cents := math.Round(value * 100)
-	if cents <= 0 || cents > float64(maximum) {
+	if cents <= 0 || cents >= float64(math.MaxInt64) || cents > float64(maximum) {
 		return 0, false
 	}
 	return int64(cents), true
