@@ -15,7 +15,7 @@ import (
 
 func TestTinyReflectionAcknowledgesOnlyVerifiedPendingItems(t *testing.T) {
 	requireDB(t)
-	for _, scenario := range []string{"legacy match", "versioned match", "missing item", "older quantity", "different price", "duplicate product", "newer local quantity", "invoiced order", "read failure"} {
+	for _, scenario := range []string{"legacy match", "versioned match", "free item reconciled", "missing item", "older quantity", "different price", "duplicate product", "newer local quantity", "invoiced order", "read failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			fx := seedPaidCart(t, 2, 0)
 			exec := func(query string, args ...any) {
@@ -29,6 +29,9 @@ func TestTinyReflectionAcknowledgesOnlyVerifiedPendingItems(t *testing.T) {
 			exec(`UPDATE cart_items SET erp_pending_since=now()-interval '10 days',erp_confirmed_quantity=NULL WHERE cart_id=$1`, fx.cartID)
 			if scenario == "versioned match" {
 				exec(`UPDATE cart_items SET erp_confirmed_quantity=0 WHERE cart_id=$1`, fx.cartID)
+			}
+			if scenario == "free item reconciled" {
+				exec(`UPDATE cart_items SET unit_price=0,erp_confirmed_quantity=0 WHERE cart_id=$1`, fx.cartID)
 			}
 			seqBefore := seqDoProduto(t, fx.productID)
 			provider, err := providererp.NewTiny(providererp.TinyConfig{Credentials: &providers.Credentials{AccessToken: "local-fixture"}, Logger: zap.NewNop(), StoreID: fx.storeID, IntegrationID: "local-reflection-confirmation"})
@@ -44,6 +47,8 @@ func TestTinyReflectionAcknowledgesOnlyVerifiedPendingItems(t *testing.T) {
 				reads++
 				status, quantity, price, invoice := 200, 2, 10.0, 0
 				switch scenario {
+				case "free item reconciled":
+					price = 0
 				case "older quantity":
 					quantity = 1
 				case "different price":
@@ -79,7 +84,7 @@ func TestTinyReflectionAcknowledgesOnlyVerifiedPendingItems(t *testing.T) {
 			if err := testPool.QueryRow(t.Context(), `SELECT erp_pending_since IS NOT NULL,COALESCE(erp_confirmed_quantity,-1),quantity,unit_price FROM cart_items WHERE cart_id=$1`, fx.cartID).Scan(&pending, &confirmed, &quantity, &price); err != nil {
 				t.Fatal(err)
 			}
-			match := scenario == "legacy match" || scenario == "versioned match" || scenario == "invoiced order"
+			match := scenario == "legacy match" || scenario == "versioned match" || scenario == "invoiced order" || scenario == "free item reconciled"
 			if pending == match || (match && confirmed != 2) {
 				t.Fatalf("pending=%v confirmed=%d verified=%v", pending, confirmed, match)
 			}
@@ -87,7 +92,11 @@ func TestTinyReflectionAcknowledgesOnlyVerifiedPendingItems(t *testing.T) {
 			if scenario == "newer local quantity" {
 				wantQuantity = 3
 			}
-			if quantity != wantQuantity || price != 1000 || writes != 0 || reads != 1 {
+			wantPrice := 1000
+			if scenario == "free item reconciled" {
+				wantPrice = 0
+			}
+			if quantity != wantQuantity || price != wantPrice || writes != 0 || reads != 1 {
 				t.Fatalf("reflection changed pending purchase or ERP: qty=%d price=%d reads=%d writes=%d", quantity, price, reads, writes)
 			}
 			if match {

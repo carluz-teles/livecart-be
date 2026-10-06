@@ -1071,6 +1071,10 @@ const LiveCartItemMarker = "[livecart]"
 // esperasse a situação 1 deixaria a porta aberta com a nota já emitida.
 var ErrPedidoComNotaFiscal = errors.New("pedido já tem nota fiscal emitida")
 
+// ErrOrderItemPriceInvalid marks an item grid rejected by the provider's price
+// contract. Retrying the same write cannot fix it; keep the reservation pending.
+var ErrOrderItemPriceInvalid = errors.New("a API do ERP exige preço unitário maior que zero; preserve o brinde e concilie os itens pendentes no painel do ERP")
+
 // ERPStockDetail são os três saldos que o ERP guarda de um produto.
 //
 // O LiveCart só usa `Available` para decidir o que vende. Os outros dois existem
