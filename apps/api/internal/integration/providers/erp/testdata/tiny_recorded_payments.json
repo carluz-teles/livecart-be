@@ -1,0 +1,375 @@
+[
+  {
+    "name": "reduced_order_total",
+    "paid_cents": 332107,
+    "verified": false,
+    "order": {
+      "situacao": 3,
+      "valorTotalPedido": 3087.27,
+      "valorDesconto": 0,
+      "idNotaFiscal": 0,
+      "id": 1,
+      "pagamento": {
+        "parcelas": [
+          {
+            "data": "2026-10-01 00:00:00",
+            "valor": 2087.27
+          },
+          {
+            "data": "2026-10-17 00:00:00",
+            "valor": 200
+          },
+          {
+            "data": "2026-11-16 00:00:00",
+            "valor": 200
+          },
+          {
+            "data": "2026-12-16 00:00:00",
+            "valor": 200
+          },
+          {
+            "data": "2027-01-15 00:00:00",
+            "valor": 200
+          },
+          {
+            "data": "2027-02-14 00:00:00",
+            "valor": 200
+          }
+        ]
+      }
+    },
+    "accounts": [
+      {
+        "situacao": "aberto",
+        "valor": 200,
+        "saldo": 200,
+        "dataVencimento": "2027-02-14",
+        "id": 10
+      },
+      {
+        "situacao": "aberto",
+        "valor": 200,
+        "saldo": 200,
+        "dataVencimento": "2027-01-15",
+        "id": 11
+      },
+      {
+        "situacao": "aberto",
+        "valor": 200,
+        "saldo": 200,
+        "dataVencimento": "2026-12-16",
+        "id": 12
+      },
+      {
+        "situacao": "aberto",
+        "valor": 200,
+        "saldo": 200,
+        "dataVencimento": "2026-11-16",
+        "id": 13
+      },
+      {
+        "situacao": "aberto",
+        "valor": 200,
+        "saldo": 200,
+        "dataVencimento": "2026-10-17",
+        "id": 14
+      },
+      {
+        "situacao": "aberto",
+        "valor": 2087.27,
+        "saldo": 2087.27,
+        "dataVencimento": "2026-10-01",
+        "id": 15
+      }
+    ],
+    "receipts": {
+      "10": [],
+      "11": [],
+      "12": [],
+      "13": [],
+      "14": [],
+      "15": []
+    }
+  },
+  {
+    "name": "consolidated_card",
+    "paid_cents": 58064,
+    "verified": true,
+    "order": {
+      "situacao": 3,
+      "valorTotalPedido": 580.64,
+      "valorDesconto": 0,
+      "idNotaFiscal": 0,
+      "id": 1,
+      "pagamento": {
+        "parcelas": [
+          {
+            "data": "2027-03-28 00:00:00",
+            "valor": 96.79
+          },
+          {
+            "data": "2027-09-24 00:00:00",
+            "valor": 96.77
+          },
+          {
+            "data": "2028-03-22 00:00:00",
+            "valor": 96.77
+          },
+          {
+            "data": "2028-09-18 00:00:00",
+            "valor": 96.77
+          },
+          {
+            "data": "2029-03-17 00:00:00",
+            "valor": 96.77
+          },
+          {
+            "data": "2029-09-13 00:00:00",
+            "valor": 96.77
+          }
+        ]
+      }
+    },
+    "accounts": [
+      {
+        "situacao": "pago",
+        "valor": 580.64,
+        "saldo": 0,
+        "dataVencimento": "2026-09-30",
+        "id": 10
+      }
+    ],
+    "receipts": {
+      "10": [
+        {
+          "data": "2026-10-05",
+          "tipo": 1,
+          "valorPago": 540.63,
+          "valorTaxa": 40.01,
+          "valorJuro": 0,
+          "valorDesconto": 0,
+          "valorAcrescimo": 0,
+          "id": 1000
+        }
+      ]
+    }
+  },
+  {
+    "name": "consolidated_mixed_methods",
+    "paid_cents": 86770,
+    "verified": true,
+    "order": {
+      "situacao": 3,
+      "valorTotalPedido": 867.7,
+      "valorDesconto": 0,
+      "idNotaFiscal": 0,
+      "id": 1,
+      "pagamento": {
+        "parcelas": [
+          {
+            "data": "2026-09-29 00:00:00",
+            "valor": 69.95
+          },
+          {
+            "data": "2026-09-29 00:00:00",
+            "valor": 69.95
+          },
+          {
+            "data": "2026-09-29 00:00:00",
+            "valor": 69.95
+          },
+          {
+            "data": "2026-09-29 00:00:00",
+            "valor": 69.95
+          },
+          {
+            "data": "2026-09-29 00:00:00",
+            "valor": 69.95
+          },
+          {
+            "data": "2026-09-29 00:00:00",
+            "valor": 69.95
+          },
+          {
+            "data": "2026-09-30 00:00:00",
+            "valor": 74.67
+          },
+          {
+            "data": "2026-09-30 00:00:00",
+            "valor": 74.67
+          },
+          {
+            "data": "2026-09-30 00:00:00",
+            "valor": 74.67
+          },
+          {
+            "data": "2026-09-30 00:00:00",
+            "valor": 74.67
+          },
+          {
+            "data": "2026-09-30 00:00:00",
+            "valor": 74.67
+          },
+          {
+            "data": "2026-09-30 00:00:00",
+            "valor": 74.65
+          }
+        ]
+      }
+    },
+    "accounts": [
+      {
+        "situacao": "pago",
+        "valor": 74.67,
+        "saldo": 0,
+        "dataVencimento": "2026-09-29",
+        "id": 10
+      },
+      {
+        "situacao": "pago",
+        "valor": 793.03,
+        "saldo": 0,
+        "dataVencimento": "2026-09-29",
+        "id": 11
+      }
+    ],
+    "receipts": {
+      "10": [
+        {
+          "data": "2026-10-05",
+          "tipo": 1,
+          "valorPago": 74.04,
+          "valorTaxa": 0.63,
+          "valorJuro": 0,
+          "valorDesconto": 0,
+          "valorAcrescimo": 0,
+          "id": 1000
+        }
+      ],
+      "11": [
+        {
+          "data": "2026-10-05",
+          "tipo": 1,
+          "valorPago": 708.65,
+          "valorTaxa": 84.38,
+          "valorJuro": 0,
+          "valorDesconto": 0,
+          "valorAcrescimo": 0,
+          "id": 1100
+        }
+      ]
+    }
+  },
+  {
+    "name": "commercial_discount_difference",
+    "paid_cents": 22894,
+    "verified": false,
+    "order": {
+      "situacao": 3,
+      "valorTotalPedido": 218.57,
+      "valorDesconto": 10.370000000000001,
+      "idNotaFiscal": 0,
+      "id": 1,
+      "pagamento": {
+        "parcelas": [
+          {
+            "data": "2026-09-26 00:00:00",
+            "valor": 218.57
+          }
+        ]
+      }
+    },
+    "accounts": [
+      {
+        "situacao": "aberto",
+        "valor": 218.57,
+        "saldo": 218.57,
+        "dataVencimento": "2026-09-26",
+        "id": 10
+      }
+    ],
+    "receipts": {
+      "10": []
+    }
+  },
+  {
+    "name": "unreceived_card",
+    "paid_cents": 111984,
+    "verified": false,
+    "order": {
+      "situacao": 3,
+      "valorTotalPedido": 1119.84,
+      "valorDesconto": 0,
+      "idNotaFiscal": 0,
+      "id": 1,
+      "pagamento": {
+        "parcelas": [
+          {
+            "data": "2026-11-05 00:00:00",
+            "valor": 223.96
+          },
+          {
+            "data": "2026-12-06 00:00:00",
+            "valor": 223.97
+          },
+          {
+            "data": "2027-01-06 00:00:00",
+            "valor": 223.97
+          },
+          {
+            "data": "2027-02-06 00:00:00",
+            "valor": 223.97
+          },
+          {
+            "data": "2027-03-09 00:00:00",
+            "valor": 223.97
+          }
+        ]
+      }
+    },
+    "accounts": [
+      {
+        "situacao": "aberto",
+        "valor": 223.97,
+        "saldo": 223.97,
+        "dataVencimento": "2027-03-09",
+        "id": 10
+      },
+      {
+        "situacao": "aberto",
+        "valor": 223.97,
+        "saldo": 223.97,
+        "dataVencimento": "2027-02-06",
+        "id": 11
+      },
+      {
+        "situacao": "aberto",
+        "valor": 223.97,
+        "saldo": 223.97,
+        "dataVencimento": "2027-01-06",
+        "id": 12
+      },
+      {
+        "situacao": "aberto",
+        "valor": 223.97,
+        "saldo": 223.97,
+        "dataVencimento": "2026-12-06",
+        "id": 13
+      },
+      {
+        "situacao": "aberto",
+        "valor": 223.96,
+        "saldo": 223.96,
+        "dataVencimento": "2026-11-05",
+        "id": 14
+      }
+    ],
+    "receipts": {
+      "10": [],
+      "11": [],
+      "12": [],
+      "13": [],
+      "14": []
+    }
+  }
+]

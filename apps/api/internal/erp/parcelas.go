@@ -51,6 +51,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -169,9 +170,44 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 	}
 
 	var pago, bruto int64
+	hasERPRecordedPayment := false
 	for _, p := range pagamentos {
+		if p.AmountCents <= 0 || p.AmountCents > math.MaxInt64-pago {
+			return nil, fmt.Errorf("invalid payment ledger amount")
+		}
 		pago += p.AmountCents
 		bruto += p.GrossCoveredCents
+		hasERPRecordedPayment = hasERPRecordedPayment || p.Method == providers.PaymentMethodERPManual
+	}
+	if hasERPRecordedPayment && erpProvider.Name() == providers.ProviderTiny {
+		// An ERP approval is an aggregate acknowledgment, not the merchant's
+		// card schedule. Never reconstruct that schedule from its import date.
+		split = &SplitDePagamento{
+			TotalCents: total, PagoCents: pago, SaldoCents: total - pago,
+			Pagamentos: len(pagamentos), Motivo: "pagamento externo; parcelas do Tiny preservadas",
+		}
+		if split.SaldoCents < 0 {
+			return split, nil // The deferred recorder preserves the value discrepancy.
+		}
+		if split.SaldoCents > 0 {
+			return split, fmt.Errorf("tiny: pagamento externo não cobre o total atual do pedido")
+		}
+		for _, p := range pagamentos {
+			if p.Method != providers.PaymentMethodERPManual || p.CheckoutID != "erp-"+st.ExternalOrderID {
+				return split, fmt.Errorf("tiny: pagamentos de origens distintas exigem conciliação financeira")
+			}
+		}
+		verifier, ok := erpProvider.(interface {
+			VerifyRecordedOrderPayment(context.Context, string, int64) error
+		})
+		if !ok {
+			return split, fmt.Errorf("tiny: verificação de recebimentos externos indisponível")
+		}
+		if err := verifier.VerifyRecordedOrderPayment(ctx, st.ExternalOrderID, pago); err != nil {
+			return split, fmt.Errorf("verifying Tiny external receipts: %w", err)
+		}
+		split.Verified = true
+		return split, nil
 	}
 	if invoiced {
 		return &SplitDePagamento{
