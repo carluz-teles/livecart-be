@@ -50,6 +50,44 @@ func TestWaitlistAllocationGlobalFIFO(t *testing.T) {
 	}
 }
 
+func TestWaitlistAllocationSkipsOrdersClosedInERP(t *testing.T) {
+	requireDB(t)
+	for _, status := range []string{"preparando_envio", "faturado", "pronto_envio", "enviado", "entregue", "nao_entregue", "cancelado"} {
+		for _, joined := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/joined=%v", status, joined), func(t *testing.T) {
+				ctx := t.Context()
+				fx := seedScaleEvent(t)
+				product := seedSoldOutProductWithQueue(t, fx, 1, 0)
+				oldest := seedQueueWaiter(t, fx, product, 1)
+				owner := oldest
+				if joined {
+					owner = seedHolderCart(t, fx, product, 1)
+					if _, err := testPool.Exec(ctx, `UPDATE carts SET joined_to_cart_id=$2 WHERE id=$1`, oldest, owner); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := testPool.Exec(ctx, `UPDATE carts SET erp_order_status=$2,never_expires=true WHERE id=$1`, owner, status); err != nil {
+					t.Fatal(err)
+				}
+				next := seedQueueWaiter(t, fx, product, 2)
+				result, err := testRepo.PromoteNextWaitlistEntry(ctx, fx.storeID, product)
+				if err != nil || result == nil || result.CartID != next {
+					t.Fatalf("promotion=%+v err=%v; want next eligible cart", result, err)
+				}
+				var waiting, fulfilled, facts int
+				if err := testPool.QueryRow(ctx, `SELECT wi.quantity,wi.fulfilled_quantity,
+                        (SELECT count(*) FROM event_outbox WHERE name='waitlist.notified' AND payload->>'cart_id'=$1)
+                        FROM waitlist_items wi WHERE wi.cart_id=$1::uuid`, oldest).Scan(&waiting, &fulfilled, &facts); err != nil {
+					t.Fatal(err)
+				}
+				if waiting != 1 || fulfilled != 0 || facts != 0 || productStock(t, product) != 0 {
+					t.Fatalf("closed order changed: waiting=%d fulfilled=%d facts=%d", waiting, fulfilled, facts)
+				}
+			})
+		}
+	}
+}
+
 func TestWaitlistAllocationPartialKeepsOriginalPriceAndDeadline(t *testing.T) {
 	requireDB(t)
 	ctx := t.Context()

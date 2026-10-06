@@ -26,6 +26,17 @@ type CommentWorkRepository interface {
 	ListPendingCommentWork(context.Context, int) ([][]byte, error)
 }
 
+// ProcessInstagramCommentDelivery acknowledges redundant deliveries whose work
+// is already durable and leased or scheduled for recovery. It must not mark that
+// work completed: the current owner/recovery worker still owes the ERP result.
+func (s *Service) ProcessInstagramCommentDelivery(ctx context.Context, input ProcessInstagramCommentInput) error {
+	err := s.ProcessInstagramComment(ctx, input)
+	if err == ErrCommentBusy {
+		return nil
+	}
+	return err
+}
+
 func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInstagramCommentInput) (err error) {
 	work, persistent := s.ingestRepo.(CommentWorkRepository)
 	if !persistent || input.CommentID == "" {

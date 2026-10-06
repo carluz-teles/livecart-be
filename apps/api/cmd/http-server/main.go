@@ -1197,7 +1197,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(env.Payload, &input); err != nil {
 				return asynq.SkipRetry
 			}
-			err := liveSvc.ProcessInstagramComment(ctx, input)
+			err := liveSvc.ProcessInstagramCommentDelivery(ctx, input)
 			// Telemetry export (Fatia 4). Dispatched AFTER ProcessInstagramComment
 			// returns — not before, unlike cart.paid's dispatchTelemetryAsync call
 			// site — because comment.received's own handler is what creates the
