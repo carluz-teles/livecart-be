@@ -126,7 +126,7 @@ func (s *Service) refreshERPAvailableStock(ctx context.Context, integration *Int
 	return s.refreshERPAvailableStockRevision(ctx, integration, externalID, 0)
 }
 
-func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integration *IntegrationRow, externalID string, revision int64) (bool, error) {
+func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integration *IntegrationRow, externalID string, revision int64) (applied bool, resultErr error) {
 	// A read cannot outlive its shared lease. No database connection is held
 	// while waiting for quota or for the ERP to respond.
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
@@ -159,7 +159,12 @@ func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integrat
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer releaseCancel()
-		if _, err := s.repo.pool.Exec(releaseCtx, `UPDATE erp_stock_sync_state SET read_owner=NULL,read_until=NULL WHERE product_id=$1 AND read_owner=$2`, id, owner); err != nil {
+		// Persist the retry even if the caller's deadline expired. Ownership
+		// prevents an expired reader from dirtying a newer successful snapshot.
+		if _, err := s.repo.pool.Exec(releaseCtx, `UPDATE erp_stock_sync_state
+ SET read_owner=NULL,read_until=NULL,
+ deferred_at=CASE WHEN $3 THEN COALESCE(deferred_at,now()) ELSE deferred_at END
+ WHERE product_id=$1 AND read_owner=$2`, id, owner, resultErr != nil); err != nil {
 			logger.From(releaseCtx, s.logger).Warn("stock read lease release deferred", zap.String("product_id", id), zap.Error(err))
 		}
 	}()
@@ -192,15 +197,11 @@ func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integrat
 	if admissible < 0 {
 		return false, fmt.Errorf("pending reservations could not be read")
 	}
-	applied, err := s.repo.ApplyERPStockMirror(ctx, id, admissible, seen)
+	applied, err = s.repo.ApplyERPStockMirror(ctx, id, admissible, seen)
 	if err != nil {
 		return false, err
 	}
 	if !applied {
-		_, checkpointErr := s.repo.pool.Exec(ctx, `UPDATE erp_stock_sync_state SET deferred_at=COALESCE(deferred_at,now()) WHERE product_id=$1`, id)
-		if checkpointErr != nil {
-			return false, fmt.Errorf("recording invalidated stock snapshot: %w", checkpointErr)
-		}
 		return false, errERPStockSnapshotInvalidated
 	}
 	_, err = s.repo.pool.Exec(ctx, `UPDATE erp_stock_sync_state SET last_success_at=now(),deferred_at=NULL,
@@ -215,6 +216,8 @@ func (s *Service) refreshERPAvailableStockRevision(ctx context.Context, integrat
 
 // Claims at most ten products per account per minute. Checkpoints are bounded
 // by catalog size. A failed/missing webhook no longer leaves stock stale forever.
+// Reserve two slots for deferred reads and two for catalog rotation; the first
+// urgent buyer stays first, followed by retries before the account deadline.
 func (s *Service) claimERPStockChecks(ctx context.Context, storeID string) ([]string, error) {
 	tx, err := s.repo.pool.Begin(ctx)
 	if err != nil {
@@ -232,7 +235,7 @@ func (s *Service) claimERPStockChecks(ctx context.Context, storeID string) ([]st
 		return []string{}, nil
 	}
 	rows, err := tx.Query(ctx, `WITH eligible AS (
- SELECT p.id,s.last_attempt_at,
+ SELECT p.id,s.last_attempt_at,s.deferred_at,
    CASE WHEN EXISTS(
      SELECT 1 FROM waitlist_items wi JOIN carts c ON c.id=wi.cart_id
      LEFT JOIN carts host ON host.id=c.joined_to_cart_id
@@ -261,22 +264,29 @@ func (s *Service) claimERPStockChecks(ctx context.Context, storeID string) ([]st
  AND (s.read_until IS NULL OR s.read_until<now())
  AND (s.deferred_at IS NOT NULL OR s.credit_requires_refresh OR s.requested_revision>s.completed_revision
    OR s.last_success_at IS NULL OR s.last_success_at<now()-interval '15 minutes')
+ ), retries AS (
+ SELECT id,1 AS lane FROM eligible WHERE deferred_at IS NOT NULL
+ ORDER BY last_attempt_at NULLS FIRST,id LIMIT 2
  ), priority AS (
- SELECT id,0 AS lane FROM eligible WHERE urgency<3 ORDER BY urgency,last_attempt_at NULLS FIRST,id LIMIT 8
+ SELECT id,0 AS lane FROM eligible WHERE urgency<3 AND id NOT IN (SELECT id FROM retries)
+ ORDER BY urgency,last_attempt_at NULLS FIRST,id LIMIT (8-(SELECT COUNT(*) FROM retries))
  ), rotation AS (
- SELECT id,1 AS lane FROM eligible WHERE id NOT IN (SELECT id FROM priority)
- ORDER BY urgency DESC,last_attempt_at NULLS FIRST,id LIMIT (10-(SELECT COUNT(*) FROM priority))
+ SELECT id,2 AS lane FROM eligible WHERE id NOT IN (SELECT id FROM priority UNION ALL SELECT id FROM retries)
+ ORDER BY urgency DESC,last_attempt_at NULLS FIRST,id LIMIT (10-(SELECT COUNT(*) FROM priority)-(SELECT COUNT(*) FROM retries))
  ), candidates AS (
- SELECT * FROM priority UNION ALL SELECT * FROM rotation
+ SELECT * FROM priority UNION ALL SELECT * FROM retries UNION ALL SELECT * FROM rotation
  ), claimed AS (
- INSERT INTO erp_stock_sync_state(product_id,last_attempt_at)
- SELECT id,now() FROM candidates
- ON CONFLICT(product_id) DO UPDATE SET last_attempt_at=now()
+ INSERT INTO erp_stock_sync_state(product_id,last_attempt_at,deferred_at)
+ SELECT id,now(),now() FROM candidates
+ ON CONFLICT(product_id) DO UPDATE SET last_attempt_at=now(),deferred_at=COALESCE(erp_stock_sync_state.deferred_at,now())
  WHERE erp_stock_sync_state.last_attempt_at<now()-interval '5 minutes'
- RETURNING product_id)
- SELECT p.external_id FROM claimed c JOIN products p ON p.id=c.product_id
+ RETURNING product_id), ranked AS (
+ SELECT p.external_id,selected.lane,
+ row_number() OVER(PARTITION BY selected.lane ORDER BY e.urgency,e.last_attempt_at NULLS FIRST,p.id) AS position
+ FROM claimed c JOIN products p ON p.id=c.product_id
  JOIN candidates selected ON selected.id=p.id JOIN eligible e ON e.id=p.id
- ORDER BY selected.lane,e.urgency,e.last_attempt_at NULLS FIRST,p.id`, storeID)
+ ) SELECT external_id FROM ranked
+ ORDER BY CASE WHEN lane=0 AND position=1 THEN 0 WHEN lane=1 THEN 1 WHEN lane=0 THEN 2 ELSE 3 END,position`, storeID)
 	if err != nil {
 		return nil, err
 	}

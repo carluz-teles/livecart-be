@@ -2779,18 +2779,39 @@ func (t *Tiny) UpdateContact(ctx context.Context, contactID string, contact ERPC
 // =============================================================================
 
 // tinyNotaFiscalLite captures the subset of Tiny's nota fiscal payload we use.
-// It maps both NotaFiscalModel (returned standalone by GET /notafiscal/{id})
+// It maps both NotaFiscalModel (returned standalone by GET /notas/{id})
 // and the embedded notaFiscal field on a pedido response — fields not present
 // in one shape stay zero-valued and the caller falls back accordingly.
 type tinyNotaFiscalLite struct {
-	ID          int64       `json:"id"`
-	Numero      json.Number `json:"numero"`
-	Serie       json.Number `json:"serie"`
-	Situacao    json.Number `json:"situacao"`
-	ChaveAcesso string      `json:"chaveAcesso"`
-	LinkAcesso  string      `json:"linkAcesso"`
-	DataEmissao string      `json:"dataEmissao"`
-	XML         string      `json:"xml"`
+	ID          int64                 `json:"id"`
+	Numero      tinyInvoiceIdentifier `json:"numero"`
+	Serie       tinyInvoiceIdentifier `json:"serie"`
+	Situacao    json.Number           `json:"situacao"`
+	ChaveAcesso string                `json:"chaveAcesso"`
+	LinkAcesso  string                `json:"linkAcesso"`
+	DataEmissao string                `json:"dataEmissao"`
+	XML         string                `json:"xml"`
+}
+
+// Tiny returns identifiers as strings or JSON numbers. They are not amounts:
+// converting "021490" to a number would discard part of the invoice identifier.
+type tinyInvoiceIdentifier string
+
+func (v *tinyInvoiceIdentifier) UnmarshalJSON(data []byte) error {
+	var value string
+	if len(data) > 0 && data[0] == '"' {
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+	} else {
+		var number json.Number
+		if err := json.Unmarshal(data, &number); err != nil {
+			return err
+		}
+		value = number.String()
+	}
+	*v = tinyInvoiceIdentifier(value)
+	return nil
 }
 
 // situacao codes returned by Tiny for NotaFiscalModel.situacao. Centralised so
@@ -2834,6 +2855,7 @@ func (t *Tiny) GetInvoiceByOrder(ctx context.Context, orderID string) (*provider
 	// most "advanced" one (highest situacao wins) so a re-emitted NFe wins
 	// over a previously-cancelled one.
 	var orderResp struct {
+		InvoiceID    int64                `json:"idNotaFiscal"`
 		NotaFiscal   *tinyNotaFiscalLite  `json:"notaFiscal"`
 		NotasFiscais []tinyNotaFiscalLite `json:"notasFiscais"`
 		Ecommerce    struct {
@@ -2857,6 +2879,9 @@ func (t *Tiny) GetInvoiceByOrder(ctx context.Context, orderID string) (*provider
 	// that haven't been invoiced) and pick the best representative.
 	best, ok := pickBestNotaFiscal(candidates)
 	if !ok {
+		if orderResp.InvoiceID > 0 {
+			return t.GetInvoiceByID(ctx, strconv.FormatInt(orderResp.InvoiceID, 10))
+		}
 		return nil, providers.ErrInvoiceNotFound
 	}
 	return tinyNotaFiscalToERP(best), nil
@@ -2868,7 +2893,7 @@ func (t *Tiny) GetInvoiceByID(ctx context.Context, invoiceID string) (*providers
 	if strings.TrimSpace(invoiceID) == "" {
 		return nil, fmt.Errorf("invoiceID is required")
 	}
-	endpoint := fmt.Sprintf("%s/notafiscal/%s", tinyAPIBaseURL, invoiceID)
+	endpoint := fmt.Sprintf("%s/notas/%s", tinyAPIBaseURL, invoiceID)
 
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
@@ -2897,7 +2922,7 @@ func (t *Tiny) GetInvoiceXML(ctx context.Context, invoiceID string) ([]byte, err
 	if strings.TrimSpace(invoiceID) == "" {
 		return nil, fmt.Errorf("invoiceID is required")
 	}
-	endpoint := fmt.Sprintf("%s/notafiscal/%s/xml", tinyAPIBaseURL, invoiceID)
+	endpoint := fmt.Sprintf("%s/notas/%s/xml", tinyAPIBaseURL, invoiceID)
 
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
@@ -2963,8 +2988,8 @@ func tinyNotaFiscalToERP(in tinyNotaFiscalLite) *providers.ERPInvoice {
 
 	out := &providers.ERPInvoice{
 		InvoiceID: strconv.FormatInt(in.ID, 10),
-		Number:    in.Numero.String(),
-		Series:    in.Serie.String(),
+		Number:    string(in.Numero),
+		Series:    string(in.Serie),
 		AccessKey: strings.TrimSpace(in.ChaveAcesso),
 		Status:    status,
 		StatusRaw: in.Situacao.String(),
@@ -2973,13 +2998,11 @@ func tinyNotaFiscalToERP(in tinyNotaFiscalLite) *providers.ERPInvoice {
 		out.XMLContent = []byte(in.XML)
 	}
 	if in.DataEmissao != "" {
-		// Tiny emits dataEmissao either as RFC3339 or as Brazilian "dd/mm/aaaa hh:mm:ss".
-		if t, err := time.Parse(time.RFC3339, in.DataEmissao); err == nil {
-			out.IssuedAt = t
-		} else if t, err := time.ParseInLocation("02/01/2006 15:04:05", in.DataEmissao, tinyLocation); err == nil {
-			out.IssuedAt = t
-		} else if t, err := time.ParseInLocation("02/01/2006", in.DataEmissao, tinyLocation); err == nil {
-			out.IssuedAt = t
+		for _, layout := range []string{time.RFC3339, "2006-01-02", "2006-01-02 15:04:05", "02/01/2006 15:04:05", "02/01/2006"} {
+			if issuedAt, err := time.ParseInLocation(layout, in.DataEmissao, tinyLocation); err == nil {
+				out.IssuedAt = issuedAt
+				break
+			}
 		}
 	}
 	return out
