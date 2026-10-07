@@ -1031,7 +1031,15 @@ func (s *Service) RecordWebhookPing(ctx context.Context, storeID, provider strin
 	defer cancel()
 	// Merge one field in SQL; a read/replace can erase a concurrent stock
 	// checkpoint, OAuth setting or webhook health timestamp.
-	_, err := s.repo.pool.Exec(ctx, `UPDATE integrations SET metadata=COALESCE(metadata,'{}'::jsonb)||jsonb_build_object('webhookLastPingAt',now()) WHERE store_id=$1 AND type=$2 AND provider=$3`, storeID, integrationType, provider)
+	// Health needs minute precision. Skip a busy row instead of competing with
+	// durable ingress, recovery checkpoints or credential refresh transactions.
+	_, err := s.repo.pool.Exec(ctx, `WITH eligible AS (
+ SELECT id FROM integrations WHERE store_id=$1 AND type=$2 AND provider=$3
+ AND COALESCE((metadata->>'webhookLastPingAt')::timestamptz,'epoch')<now()-interval '1 minute'
+ FOR UPDATE SKIP LOCKED
+ ) UPDATE integrations i
+ SET metadata=COALESCE(i.metadata,'{}'::jsonb)||jsonb_build_object('webhookLastPingAt',now())
+ FROM eligible e WHERE i.id=e.id`, storeID, integrationType, provider)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to stamp webhook ping", zap.String("store_id", storeID), zap.String("provider", provider), zap.Error(err))
 	}
@@ -5367,10 +5375,41 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 		PersonType: "F",
 	}
 
-	// Check cache first
+	// A document match takes precedence over a historical handle association.
+	// The customer may already have a different, verified contact in the ERP.
 	cachedID, err := s.repo.GetERPContact(ctx, storeID, integration.ID, platformUserID)
 	if err != nil {
 		return "", err
+	}
+
+	// Search by document — most reliable key in Tiny.
+	if strings.TrimSpace(customerDocument) != "" {
+		results, err := erpProvider.SearchContacts(ctx, providers.SearchContactsParams{
+			CpfCnpj: customerDocument,
+		})
+		if err != nil {
+			return "", fmt.Errorf("resolving ERP contact by document: %w", err)
+		}
+		if len(results) > 1 {
+			return "", fmt.Errorf("multiple ERP contacts match customer document")
+		}
+		if len(results) == 1 {
+			contactID := strings.TrimSpace(results[0].ContactID)
+			if contactID == "" || contactID == "0" {
+				return "", fmt.Errorf("ERP document search returned an invalid contact ID")
+			}
+			if contactID != cachedID {
+				if err := s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, contactID); err != nil {
+					return "", fmt.Errorf("caching ERP contact resolved by document: %w", err)
+				}
+			}
+			logger.From(ctx, s.logger).Info("ERP contact resolved by document",
+				zap.String("contact_id", contactID),
+				zap.String("platform_user_id", platformUserID),
+			)
+			s.bestEffortUpdateContact(ctx, erpProvider, contactID, enrich)
+			return contactID, nil
+		}
 	}
 	if cachedID != "" {
 		logger.From(ctx, s.logger).Info("ERP contact resolved from cache",
@@ -5379,22 +5418,6 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 		)
 		s.bestEffortUpdateContact(ctx, erpProvider, cachedID, enrich)
 		return cachedID, nil
-	}
-
-	// Search by document — most reliable key in Tiny.
-	if customerDocument != "" {
-		results, err := erpProvider.SearchContacts(ctx, providers.SearchContactsParams{
-			CpfCnpj: customerDocument,
-		})
-		if err == nil && len(results) > 0 {
-			logger.From(ctx, s.logger).Info("ERP contact resolved by document",
-				zap.String("contact_id", results[0].ContactID),
-				zap.String("platform_user_id", platformUserID),
-			)
-			_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, results[0].ContactID)
-			s.bestEffortUpdateContact(ctx, erpProvider, results[0].ContactID, enrich)
-			return results[0].ContactID, nil
-		}
 	}
 
 	// Note: previously fell back to SearchContacts(Name: platformHandle).
