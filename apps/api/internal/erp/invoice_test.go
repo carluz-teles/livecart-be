@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+
 	"livecart/apps/api/internal/integration/providers"
 )
 
@@ -200,4 +203,110 @@ func TestService_SyncCartInvoiceByExternalOrder(t *testing.T) {
 			t.Fatalf("unknown pedido must not reach the upsert, got %d", repo.upserts)
 		}
 	})
+}
+
+type invoiceHistoryRepo struct {
+	*mockRepo
+	legacy bool
+	err    error
+	checks int
+	store  string
+	cart   string
+	order  string
+}
+
+func (r *invoiceHistoryRepo) IsLegacyCartWithoutInvoiceWorkflow(
+	_ context.Context,
+	storeID, cartID, externalOrderID string,
+) (bool, error) {
+	r.checks++
+	r.store, r.cart, r.order = storeID, cartID, externalOrderID
+	return r.legacy, r.err
+}
+
+func TestService_InvoiceWebhookClassifiesOnlyVerifiedLegacy(t *testing.T) {
+	t.Parallel()
+	classificationErr := errors.New("history database unavailable")
+	cases := []struct {
+		name       string
+		legacy     bool
+		err        error
+		wantFetch  int
+		wantWarn   int
+		wantInfo   int
+		wantResult bool
+	}{
+		{name: "verified history skips all provider and persistence operations", legacy: true, wantInfo: 1},
+		{name: "current missing order remains actionable", wantFetch: 1, wantWarn: 1, wantResult: true},
+		{name: "failed classification is retriable and never treated as history", legacy: true, err: classificationErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			provider := &fakeInvoiceProvider{invoice: &providers.ERPInvoice{InvoiceID: "invoice"}}
+			repo := &invoiceHistoryRepo{
+				mockRepo: &mockRepo{findCartID: "cart", anchorStoreID: "store", anchorExtOrder: "order"},
+				legacy:   tc.legacy,
+				err:      tc.err,
+			}
+			core, observed := observer.New(zap.InfoLevel)
+			svc := NewService(repo, &mockCollab{provider: provider}, zap.New(core))
+			state, err := svc.SyncCartInvoiceByExternalOrder(t.Context(), "store", "order", "invoice")
+			if !errors.Is(err, tc.err) || (state != nil) != tc.wantResult {
+				t.Fatalf("result=%+v err=%v", state, err)
+			}
+			if repo.checks != 1 || repo.store != "store" || repo.cart != "cart" || repo.order != "order" {
+				t.Fatalf("classification lost exact store/cart/order binding: %+v", repo)
+			}
+			if provider.byID != tc.wantFetch || provider.byOrder != 0 || repo.upserts != tc.wantFetch {
+				t.Fatalf("unexpected I/O: byID=%d byOrder=%d writes=%d", provider.byID, provider.byOrder, repo.upserts)
+			}
+			if repo.creates != 0 || repo.transitions != 0 || repo.invoiceMirrors != 0 {
+				t.Fatal("invoice classification changed the purchase lifecycle")
+			}
+			if observed.FilterLevelExact(zap.WarnLevel).Len() != tc.wantWarn ||
+				observed.FilterLevelExact(zap.InfoLevel).Len() != tc.wantInfo {
+				t.Fatalf("unexpected invoice diagnostics: %+v", observed.All())
+			}
+		})
+	}
+}
+
+func TestService_ManualInvoiceSyncDoesNotUseLegacyExemption(t *testing.T) {
+	t.Parallel()
+	for _, storeID := range []string{"store", "other-store"} {
+		t.Run(storeID, func(t *testing.T) {
+			t.Parallel()
+			provider := &fakeInvoiceProvider{invoice: &providers.ERPInvoice{InvoiceID: "invoice"}}
+			repo := &invoiceHistoryRepo{
+				mockRepo: &mockRepo{anchorStoreID: "store", anchorExtOrder: "order"},
+				legacy:   true,
+			}
+			core, observed := observer.New(zap.WarnLevel)
+			svc := NewService(repo, &mockCollab{provider: provider}, zap.New(core))
+			err := svc.SyncCartInvoiceFromERP(t.Context(), storeID, "cart", "invoice")
+			if repo.checks != 0 {
+				t.Fatal("manual request was passed through the webhook exemption")
+			}
+			if storeID != "store" {
+				if err == nil || provider.byID != 0 || repo.upserts != 0 {
+					t.Fatal("manual sync bypassed store authorization")
+				}
+				return
+			}
+			if err != nil || provider.byID != 1 || repo.upserts != 1 || observed.Len() != 1 {
+				t.Fatalf("explicit sync or missing-order warning changed: err=%v logs=%+v", err, observed.All())
+			}
+		})
+	}
+}
+
+func TestService_UnknownInvoiceOrderNeverReachesLegacyClassification(t *testing.T) {
+	t.Parallel()
+	repo := &invoiceHistoryRepo{mockRepo: &mockRepo{findErr: errors.New("not found")}, legacy: true}
+	svc := NewService(repo, &mockCollab{}, zap.NewNop())
+	state, err := svc.SyncCartInvoiceByExternalOrder(t.Context(), "store", "external", "invoice")
+	if state != nil || err != nil || repo.checks != 0 || repo.upserts != 0 {
+		t.Fatalf("unknown order performed work: state=%+v err=%v checks=%d writes=%d", state, err, repo.checks, repo.upserts)
+	}
 }

@@ -23,7 +23,7 @@ import (
 // Include quota waits while remaining below the browser and server budgets.
 // The UI uses 30s for listing and 50s for selected details; server writes use 60s.
 const (
-	erpSearchTimeout         = 25 * time.Second
+	erpSearchTimeout         = 12 * time.Second
 	erpProductDetailsTimeout = 45 * time.Second
 )
 
@@ -58,6 +58,9 @@ func (r SearchERPProductsRequest) ToInput(storeID, integrationID string) (Search
 func productSearchError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
 	}
 	var limited *ratelimit.ErrRateLimited
 	var networkError net.Error

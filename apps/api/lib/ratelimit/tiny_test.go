@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.uber.org/zap"
@@ -97,6 +98,178 @@ func TestTinyInteractivePriorityStillHonorsCooldownAndCancellation(t *testing.T)
 	if err := limiter.WaitRequest(cancelled, http.MethodGet); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled interactive request kept waiting: %v", err)
 	}
+}
+
+func TestTinyQueuedCatalogYieldsToInteractiveAndResumes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limiter := NewManager(zap.NewNop()).GetOrCreateTiny("queued")
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		if err := limiter.WaitRequest(ctx, http.MethodGet); err != nil {
+			t.Fatal(err)
+		}
+		background := make(chan error, 3)
+		for range 3 {
+			go func() { background <- limiter.WaitRequest(WithTinyCatalogRead(ctx), http.MethodGet) }()
+		}
+		synctest.Wait()
+		time.Sleep(100 * time.Millisecond)
+		if err := limiter.WaitRequest(WithTinyInteractiveRead(ctx), http.MethodGet); err != nil {
+			t.Fatalf("interactive lookup behind queued catalogue: %v", err)
+		}
+		select {
+		case err := <-background:
+			t.Fatalf("catalogue dispatched before the interactive lookup: %v", err)
+		default:
+		}
+		last := time.Now()
+		for range 3 {
+			if err := <-background; err != nil {
+				t.Fatalf("catalogue did not resume: %v", err)
+			}
+			if elapsed := time.Since(last); elapsed < 2500*time.Millisecond {
+				t.Fatalf("shared quota exceeded after lookup: %s", elapsed)
+			}
+			last = time.Now()
+		}
+	})
+}
+
+func TestTinyContinuousInteractiveTrafficAllowsBackgroundTurn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limiter := NewManager(zap.NewNop()).GetOrCreateTiny("fair")
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		interactive := WithTinyInteractiveRead(ctx)
+		if err := limiter.WaitRequest(interactive, http.MethodGet); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		type dispatch struct {
+			at  time.Time
+			err error
+		}
+		background := make(chan dispatch, 1)
+		go func() {
+			err := limiter.WaitRequest(WithTinyCatalogRead(ctx), http.MethodGet)
+			background <- dispatch{at: time.Now(), err: err}
+		}()
+		synctest.Wait()
+		// A busy screen repeatedly renews its priority while the stock reader is
+		// queued. It must still yield one slot after the bounded priority wait.
+		for time.Since(started) < tinyCatalogMaxPriorityWait+3*time.Second {
+			if err := limiter.WaitRequest(interactive, http.MethodGet); err != nil && !errors.Is(err, ErrNaoDespachado) {
+				t.Fatal(err)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		select {
+		case result := <-background:
+			if result.err != nil {
+				t.Fatalf("background fairness lost: %v", result.err)
+			}
+			if elapsed := result.at.Sub(started); elapsed > tinyCatalogMaxPriorityWait+2600*time.Millisecond {
+				t.Fatalf("background turn was delayed past the next eligible quota slot: %s", elapsed)
+			}
+		default:
+			t.Fatal("continuous searches starved stock recovery")
+		}
+		if err := limiter.WaitRequest(interactive, http.MethodGet); err != nil {
+			t.Fatalf("interactive lookup did not recover after background turn: %v", err)
+		}
+	})
+}
+
+func TestTinyCanceledWaitDoesNotReserveFutureCapacity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limiter := NewManager(zap.NewNop()).GetOrCreateTiny("cancelled")
+		if err := limiter.WaitRequest(t.Context(), http.MethodGet); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- limiter.WaitRequest(WithTinyInteractiveRead(ctx), http.MethodGet) }()
+		synctest.Wait()
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled wait: %v", err)
+		}
+		time.Sleep(2500 * time.Millisecond)
+		if res, err := limiter.claim(t.Context(), limiter.category(http.MethodGet)); err != nil || !res.Allowed {
+			t.Fatalf("cancelled waiter wasted next slot: %+v %v", res, err)
+		}
+	})
+}
+
+func TestTinyInteractiveQuotaWaitIsBoundedAndDoesNotRenewImpossibleLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limiter := NewManager(zap.NewNop()).GetOrCreateTiny("bounded")
+		ctx := t.Context()
+		if err := limiter.ObserveResponse(ctx, http.MethodGet, 429, quotaHeaders("30", "0", "60")); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		if err := limiter.WaitRequest(WithTinyInteractiveRead(ctx), http.MethodGet); !errors.Is(err, ErrNaoDespachado) {
+			t.Fatalf("expected safe refusal before dispatch: %v", err)
+		}
+		if time.Since(started) > tinyInteractiveMaxQuotaWait {
+			t.Fatal("interactive quota wait exceeded its budget")
+		}
+		budget := limiter.localBudget(limiter.category(http.MethodGet))
+		if !budget.interactiveUntil.IsZero() || !budget.nextAt.IsZero() {
+			t.Fatalf("impossible lookup changed priority/capacity: %+v", budget)
+		}
+		time.Sleep(time.Minute)
+		if err := limiter.WaitRequest(WithTinyCatalogRead(ctx), http.MethodGet); err != nil {
+			t.Fatal(err)
+		}
+		if err := limiter.WaitRequest(WithTinyInteractiveRead(ctx), http.MethodGet); err != nil {
+			t.Fatalf("next lookup did not recover after cooldown: %v", err)
+		}
+	})
+}
+
+func TestTinyFairTurnDoesNotDelayOrderReadsOrOtherAccounts(t *testing.T) {
+	limiter := NewManager(zap.NewNop()).GetOrCreateTiny("fair-normal")
+	now := time.Now()
+	limiter.now = func() time.Time { return now }
+	key := limiter.category(http.MethodGet)
+	budget := limiter.localBudget(key)
+	budget.catalogWaitSince = now.Add(-tinyCatalogMaxPriorityWait)
+	budget.catalogUntil = now.Add(tinyInteractiveLease)
+	if res, err := limiter.claim(WithTinyInteractiveRead(t.Context()), key); err != nil || res.Allowed {
+		t.Fatalf("lookup stole the background turn: %+v %v", res, err)
+	}
+	if res, err := limiter.claim(t.Context(), key); err != nil || !res.Allowed {
+		t.Fatalf("background turn blocked an order/comment read: %+v %v", res, err)
+	}
+	otherKey := "other:read"
+	if res, err := limiter.claim(WithTinyInteractiveRead(t.Context()), otherKey); err != nil || !res.Allowed {
+		t.Fatalf("priority leaked into another account: %+v %v", res, err)
+	}
+	now = now.Add(tinyInteractiveLease)
+	if res, err := limiter.claim(WithTinyInteractiveRead(t.Context()), key); err != nil || !res.Allowed {
+		t.Fatalf("abandoned background lease blocked a lookup: %+v %v", res, err)
+	}
+}
+
+func TestTinyImpossiblePriorityWaitDoesNotLeavePendingReader(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limiter := NewManager(zap.NewNop()).GetOrCreateTiny("impossible-priority")
+		key := limiter.category(http.MethodGet)
+		budget := limiter.localBudget(key)
+		budget.catalogWaitSince = time.Now().Add(-tinyCatalogMaxPriorityWait)
+		budget.catalogUntil = time.Now().Add(tinyInteractiveLease)
+		before := *budget
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		if err := limiter.WaitRequest(WithTinyInteractiveRead(ctx), http.MethodGet); !errors.Is(err, ErrNaoDespachado) {
+			t.Fatalf("expected refusal without dispatch: %v", err)
+		}
+		if *budget != before {
+			t.Fatalf("refused search renewed priority or spent capacity: before=%+v after=%+v", before, budget)
+		}
+	})
 }
 
 func TestTinyBurstAndOldSuccessCannotClearCooldown(t *testing.T) {

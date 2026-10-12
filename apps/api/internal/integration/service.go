@@ -2923,6 +2923,8 @@ func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateIn
 // Summary searches list previews; stock is read only after selection. Legacy
 // clients still receive details and available-stock filtering.
 func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput) (*SearchProductsOutput, error) {
+	ctx, cancel := context.WithTimeout(ctx, erpSearchTimeout)
+	defer cancel()
 	ctx = ratelimit.WithTinyInteractiveRead(ctx)
 	started := time.Now()
 	erpProvider, err := s.GetERPProvider(ctx, input.IntegrationID, input.StoreID)
@@ -2947,6 +2949,11 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 }
 
 func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.ERPProvider, input SearchProductsInput) (*SearchProductsOutput, error) {
+	ctx, cancel := context.WithTimeout(ratelimit.WithTinyInteractiveRead(ctx), erpSearchTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	pageSize := input.PageSize
 	if pageSize <= 0 || pageSize > 20 {
 		pageSize = 20
@@ -2969,8 +2976,17 @@ func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.E
 		params providers.ListProductsParams
 	}
 	lookup := func(job searchJob) searchResult {
+		if err := ctx.Err(); err != nil {
+			return searchResult{field: job.field, err: err}
+		}
 		started := time.Now()
 		r, err := erpProvider.ListProducts(ctx, job.params)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		if err == nil && r == nil {
+			err = errors.New("erp returned no product search response")
+		}
 		result := searchResult{field: job.field, err: err}
 		if err == nil && r != nil {
 			result.products, result.hasMore = r.Products, r.HasMore
@@ -3010,9 +3026,14 @@ func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.E
 		// A unique exact SKU is already the answer. Do not spend another quota
 		// slot (or wait for a full catalogue sync) searching its digits as a name.
 		sku := lookup(jobs[1])
+		if sku.err != nil {
+			// A failed lookup is not an empty match. A name fallback would
+			// compete for the same exhausted quota and keep abandoned searches alive.
+			return nil, fmt.Errorf("searching Tiny SKU: %w", sku.err)
+		}
 		results = append(results, sku)
 		jobs = jobs[:1]
-		if sku.err == nil && len(sku.products) == 1 &&
+		if len(sku.products) == 1 &&
 			strings.EqualFold(strings.TrimSpace(sku.products[0].SKU), strings.TrimSpace(input.Search)) {
 			jobs = nil
 		}
@@ -3029,6 +3050,9 @@ func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.E
 		}(i, j)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	hasMore := false
 	merged := make([]providers.ERPProduct, 0)
@@ -3134,6 +3158,9 @@ func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.E
 	enrichThrottled := false
 	var enrichmentErr error
 	for _, listed := range result.Products {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if input.SummaryOnly {
 			preview := newERPProductResponse(&listed)
 			preview.DetailsPending = true

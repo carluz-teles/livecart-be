@@ -1798,6 +1798,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		startRecovery("cart-expiry-recovery", integrationSvc.RecoverRecentCartExpiries, time.Minute)
 		startRecovery("erp-item-recovery", integrationSvc.RecoverPendingERPItems)
 		startRecovery("erp-resync-recovery", integrationSvc.RecoverERPResync, 30*time.Second)
+		startRecovery("erp-financial-review-recovery", integrationSvc.RecoverERPFinancialReviews, 5*time.Minute)
 	}
 
 	lifecycle.add("events-client", func() { _ = eventsClient.Close() })

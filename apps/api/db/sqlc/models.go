@@ -16,6 +16,8 @@ type ApiRateBudget struct {
 	IntervalMs       int64              `json:"interval_ms"`
 	BlockedUntil     pgtype.Timestamptz `json:"blocked_until"`
 	InteractiveUntil pgtype.Timestamptz `json:"interactive_until"`
+	CatalogWaitSince pgtype.Timestamptz `json:"catalog_wait_since"`
+	CatalogUntil     pgtype.Timestamptz `json:"catalog_until"`
 }
 
 type BillingLedgerEntry struct {
@@ -338,6 +340,7 @@ type ErpPaymentReview struct {
 	DetectedAt      pgtype.Timestamptz `json:"detected_at"`
 	CheckedAt       pgtype.Timestamptz `json:"checked_at"`
 	ResolvedAt      pgtype.Timestamptz `json:"resolved_at"`
+	NextCheckAt     pgtype.Timestamptz `json:"next_check_at"`
 }
 
 type ErpResyncJob struct {
@@ -527,6 +530,9 @@ type LiveCommentWork struct {
 	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	ErpBlockedAt      pgtype.Timestamptz `json:"erp_blocked_at"`
+	BindingWaitUntil  pgtype.Timestamptz `json:"binding_wait_until"`
+	BindingStoreIds   []pgtype.UUID      `json:"binding_store_ids"`
+	BindingSessionID  pgtype.UUID        `json:"binding_session_id"`
 }
 
 // Container for live sessions. Carts are tied to events, not sessions.

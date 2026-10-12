@@ -38,6 +38,8 @@ type tinyBudget struct {
 	interval             time.Duration
 	nextAt, blockedUntil time.Time
 	interactiveUntil     time.Time
+	catalogWaitSince     time.Time
+	catalogUntil         time.Time
 }
 
 func (m *Manager) SetSharedPool(pool *pgxpool.Pool) {
@@ -79,6 +81,14 @@ func (t *Tiny) WaitRequest(ctx context.Context, method string) error {
 }
 
 func (t *requestBudget) wait(ctx context.Context, key string) error {
+	priority := t.readPriority(ctx, key)
+	if priority == tinyInteractiveRead {
+		// An operator can retry a lookup; spending the whole HTTP budget queued
+		// behind account traffic leaves no time to read the result.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, tinyInteractiveMaxQuotaWait)
+		defer cancel()
+	}
 	for {
 		res, err := t.claim(ctx, key)
 		if err != nil {
@@ -91,8 +101,9 @@ func (t *requestBudget) wait(ctx context.Context, key string) error {
 		if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
 			return ErrNaoDespachado
 		}
-		if t.readPriority(ctx, key) == tinyInteractiveRead {
-			// Renew the short lease while waiting, including long quota windows.
+		if priority != tinyNormalRead {
+			// Both classes renew their pending-reader leases. Rechecking also
+			// lets a waiting scan take its fair turn during continuous searches.
 			wait = min(wait, time.Second)
 		}
 		timer := time.NewTimer(wait)
@@ -122,18 +133,10 @@ func (t *requestBudget) claim(ctx context.Context, key string) (*Reservation, er
 	if t.pool == nil {
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		budget, now := t.localBudget(key), t.now()
-		if priority == tinyInteractiveRead {
-			budget.interactiveUntil = now.Add(tinyInteractiveLease)
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrNaoDespachado, err)
 		}
-		wait := max(budget.nextAt.Sub(now), budget.blockedUntil.Sub(now), 0)
-		if priority == tinyCatalogRead {
-			wait = max(wait, budget.interactiveUntil.Sub(now))
-		}
-		if wait == 0 {
-			budget.nextAt = now.Add(budget.interval)
-		}
-		return &Reservation{Allowed: wait == 0, RetryAfter: wait, Remaining: -1}, nil
+		return t.localBudget(key).claim(ctx, priority, t.now()), nil
 	}
 	if _, err := t.pool.Exec(ctx, `INSERT INTO api_rate_budgets(account_key,interval_ms) VALUES($1,$2) ON CONFLICT DO NOTHING`, key, t.defaultIntervalMS); err != nil {
 		return nil, fmt.Errorf("reserving API budget: %w", err)
@@ -142,24 +145,81 @@ func (t *requestBudget) claim(ctx context.Context, key string) (*Reservation, er
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(context.WithoutCancel(ctx))
-	var delay float64
-	err = tx.QueryRow(ctx, `SELECT GREATEST(0,EXTRACT(EPOCH FROM GREATEST(next_at,blocked_until,
-  CASE WHEN $2 THEN interactive_until ELSE '-infinity'::timestamptz END)-clock_timestamp()))::float8
-  FROM api_rate_budgets WHERE account_key=$1 FOR UPDATE`, key, priority == tinyCatalogRead).Scan(&delay)
-	if err == nil && priority == tinyInteractiveRead {
-		_, err = tx.Exec(ctx, `UPDATE api_rate_budgets SET interactive_until=clock_timestamp()+$2*interval '1 millisecond' WHERE account_key=$1`, key, tinyInteractiveLease.Milliseconds())
-	}
-	if err == nil && delay <= 0 {
-		_, err = tx.Exec(ctx, `UPDATE api_rate_budgets SET next_at=clock_timestamp()+interval_ms*interval '1 millisecond' WHERE account_key=$1`, key)
-	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
+	var budget tinyBudget
+	var intervalMS int64
+	err = tx.QueryRow(ctx, `SELECT interval_ms,next_at,blocked_until,
+ GREATEST(interactive_until,'epoch'::timestamptz),
+ GREATEST(catalog_wait_since,'epoch'::timestamptz),GREATEST(catalog_until,'epoch'::timestamptz)
+ FROM api_rate_budgets WHERE account_key=$1 FOR UPDATE`, key).
+		Scan(&intervalMS, &budget.nextAt, &budget.blockedUntil,
+			&budget.interactiveUntil, &budget.catalogWaitSince, &budget.catalogUntil)
 	if err != nil {
+		return nil, fmt.Errorf("reading API budget: %w", err)
+	}
+	// Sample the shared clock after the row lock is acquired. Go's local clock
+	// must not decide dispatch times for other replicas.
+	var now time.Time
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return nil, err
+	}
+	budget.interval = time.Duration(intervalMS) * time.Millisecond
+	res := budget.claim(ctx, priority, now)
+	_, err = tx.Exec(ctx, `UPDATE api_rate_budgets SET next_at=$2,interactive_until=$3,
+ catalog_wait_since=$4,catalog_until=$5 WHERE account_key=$1`,
+		key, budget.nextAt, budget.interactiveUntil, budget.catalogWaitSince, budget.catalogUntil)
+	if err != nil {
+		return nil, fmt.Errorf("claiming API budget: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return &Reservation{Allowed: delay <= 0, RetryAfter: time.Duration(delay * float64(time.Second)), Remaining: -1}, nil
+	return res, nil
+}
+
+func (b *tinyBudget) claim(ctx context.Context, priority tinyReadPriority, now time.Time) *Reservation {
+	next := *b
+	wait := max(next.nextAt.Sub(now), next.blockedUntil.Sub(now), 0)
+	if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
+		// A request which cannot be dispatched must not renew priority leases.
+		return &Reservation{RetryAfter: wait, Remaining: -1}
+	}
+	if priority == tinyCatalogRead {
+		if !next.catalogUntil.After(now) {
+			next.catalogWaitSince = now
+		}
+		next.catalogUntil = now.Add(tinyInteractiveLease)
+	}
+	catalogDue := next.catalogUntil.After(now) && !now.Before(next.catalogWaitSince.Add(tinyCatalogMaxPriorityWait))
+	switch priority {
+	case tinyInteractiveRead:
+		next.interactiveUntil = now.Add(tinyInteractiveLease)
+		if catalogDue {
+			// The scan will usually take its turn before its lease expires.
+			// Recheck soon, while retaining the quota's actual minimum delay.
+			wait = max(wait, min(next.catalogUntil.Sub(now), time.Second))
+		}
+	case tinyCatalogRead:
+		if !catalogDue {
+			// Never sleep past the point where this live waiter gets its turn.
+			priorityWait := min(next.interactiveUntil.Sub(now),
+				next.catalogWaitSince.Add(tinyCatalogMaxPriorityWait).Sub(now))
+			wait = max(wait, priorityWait)
+		}
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
+		return &Reservation{RetryAfter: wait, Remaining: -1}
+	}
+	if wait == 0 {
+		next.nextAt = now.Add(next.interval)
+		if priority == tinyCatalogRead {
+			// Other background waiters start a new fair turn, rather than taking
+			// every slot once a single scan has aged.
+			next.catalogUntil = now
+		}
+	}
+	*b = next
+	return &Reservation{Allowed: wait == 0, RetryAfter: wait, Remaining: -1}
 }
 
 type tinyReadPriorityKey struct{}
@@ -169,7 +229,11 @@ const (
 	tinyNormalRead tinyReadPriority = iota
 	tinyCatalogRead
 	tinyInteractiveRead
-	tinyInteractiveLease = 5 * time.Second
+	tinyInteractiveLease        = 5 * time.Second
+	tinyInteractiveMaxQuotaWait = 5 * time.Second
+	// After this much priority waiting, a live background reader gets the next
+	// quota-eligible slot ahead of searches. Order/comment reads remain normal.
+	tinyCatalogMaxPriorityWait = 10 * time.Second
 )
 
 // WithTinyInteractiveRead lets an operator's lookup precede a catalogue scan,

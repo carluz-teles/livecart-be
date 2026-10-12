@@ -46,6 +46,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/jackc/pgx/v5"
+	"livecart/apps/api/internal/erp/erpwrite"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -1162,20 +1163,24 @@ func (s *Service) cancelERPOrderForCart(ctx context.Context, cartID, storeID str
 	}
 	// Read under the terminal-operation lock. Old queued expiry events must
 	// not cancel a reopened purchase or one protected after the event was sent.
-	if expiryOnly && (st.CartStatus != "expired" || st.ExpiryProtected ||
-		st.ExpiresAt == nil || st.ExpiresAt.After(time.Now())) {
+	cachedCancelled := st.OrderStatus == string(providers.ERPOrderStatusCancelado)
+	if expiryOnly && (!expiredCancellationDue(st) || (st.ExpiryProtected && !cachedCancelled)) {
 		logger.From(ctx, s.logger).Info("stale cart expiry ignored for protected purchase",
 			zap.String("cart_id", cartID), zap.String("status", st.CartStatus))
 		return nil
 	}
 	// A child's old expiry/cancellation must never cancel the owner's sale.
 	// Payment is authoritative even when a legacy ERP state still says open.
-	if (st.CartID != "" && st.CartID != cartID) || st.PurchaseClosed ||
-		st.PaymentStatus == "paid" || st.PaymentStatus == "refunded" || st.PaidAmountCents > 0 {
+	if cancellationProtected(st, cartID) {
 		if expiryOnly {
 			return nil
 		}
 		return fmt.Errorf("cart %s belongs to a closed, paid or joined purchase; cancellation requires reconciliation", cartID)
+	}
+	// The webhook may have arrived after a timed-out PUT but before its local
+	// compensation. A cancelled cache authorizes a GET, never another PUT.
+	if expiryOnly && cachedCancelled && st.State == OrderStateOpen {
+		return s.reconcileCancelledBinding(ctx, cartID, storeID, st)
 	}
 	switch st.State {
 	case OrderStateNone, OrderStateCancelled:
@@ -1200,13 +1205,22 @@ func (s *Service) cancelERPOrderForCart(ctx context.Context, cartID, storeID str
 	}
 	if st.ExternalOrderID == "" {
 		// converting sem pedido: nada a cancelar no ERP.
-		_, _ = s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, OrderStateCancelled)
-		return nil
+		_, err := s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, OrderStateCancelled)
+		return err
 	}
 
-	erpProvider, err := s.providerFor(ctx, storeID)
+	integration, err := s.activeERP(ctx, storeID)
 	if err != nil {
 		return err
+	}
+	erpProvider, err := s.collab.ResolveProvider(ctx, integration)
+	if err != nil {
+		return err
+	}
+	change := CancellationTransition{
+		CartID: cartID, StoreID: storeID, IntegrationID: integration.ID,
+		ExternalOrderID: st.ExternalOrderID, From: st.State, To: OrderStateCancelled,
+		CartStatus: st.CartStatus, OrderStatus: st.OrderStatus, ExpiresAt: st.ExpiresAt, ExpiryOnly: expiryOnly,
 	}
 
 	// REIVINDICA ANTES DE CANCELAR. A ordem inversa tem uma janela: enquanto o
@@ -1219,7 +1233,7 @@ func (s *Service) cancelERPOrderForCart(ctx context.Context, cartID, storeID str
 	//
 	// Com o estado já em 'cancelled', o CAS do comentário concorrente falha e
 	// ele desiste — que é o desfecho certo para um carrinho que venceu.
-	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, OrderStateCancelled)
+	won, err := s.transitionCancellation(ctx, change)
 	if err != nil {
 		return fmt.Errorf("claiming cart cancellation: %w", err)
 	}
@@ -1229,14 +1243,26 @@ func (s *Service) cancelERPOrderForCart(ctx context.Context, cartID, storeID str
 		logger.From(ctx, s.logger).Info("cart left its state concurrently, cancellation skipped",
 			zap.String("cart_id", cartID),
 		)
-		return nil
+		return ErrCartBusy
 	}
 
+	readAttempted := false
 	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
-		err := erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, providers.SituacaoCancelada)
+		// Payment or reopening can commit while this task waits for quota.
+		claimed := change
+		claimed.From = OrderStateCancelled
+		valid, err := s.transitionCancellation(ctx, claimed)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return ErrCartBusy
+		}
+		err = erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, providers.SituacaoCancelada)
 		if errors.Is(err, providers.ErrOrderNotFound) && erpProvider.Name() == providers.ProviderTiny {
 			// A failed PUT alone is not evidence that the sale is absent. Verify
 			// through its GET using the same account and exact external binding.
+			readAttempted = true
 			_, readErr := erpProvider.GetOrderSituacao(ctx, st.ExternalOrderID)
 			if errors.Is(readErr, providers.ErrOrderNotFound) {
 				logger.From(ctx, s.logger).Info("ERP cancellation reconciled: order already absent",
@@ -1249,25 +1275,45 @@ func (s *Service) cancelERPOrderForCart(ctx context.Context, cartID, storeID str
 		}
 		return err
 	}); err != nil {
-		// Devolve o estado para a retentativa refazer o ciclo inteiro. Deixá-lo
-		// em 'cancelled' com o pedido vivo no ERP seria pior: o carrinho pararia
-		// de ser reconciliado e a reserva ficaria presa lá para sempre.
 		fim, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-		defer cancel() // a compensação sobrevive ao prazo
-		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateCancelled, st.State); backErr != nil {
-			logger.From(fim, s.logger).Error("failed to return cart from cancelled after ERP refusal",
-				zap.String("cart_id", cartID),
-				zap.Error(backErr),
-			)
+		defer cancel()
+		// A timed-out write can have succeeded. Confirm against the exact
+		// account and sale before undoing the local claim. If the read also
+		// fails, compensation leaves the next task able to reconcile it.
+		verifyOutcome := !readAttempted && !errors.Is(err, erpwrite.ErrNotDispatched) && !errors.Is(err, ErrCartBusy)
+		if verifyOutcome {
+			if readErr := confirmRemoteCancellation(fim, erpProvider, st.ExternalOrderID); readErr == nil {
+				return s.completeCancellation(fim, change)
+			}
 		}
-		return fmt.Errorf("cancelling order: %w", err)
+		// A failed GET may consume all of its budget. Compensation needs its
+		// own short deadline or the provisional claim would become permanent.
+		cleanup, stopCleanup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer stopCleanup()
+		change.From, change.To = OrderStateCancelled, st.State
+		_, backErr := s.transitionCancellation(cleanup, change)
+		return fmt.Errorf("cancelling order: %w", errors.Join(err, backErr))
 	}
-	s.collab.EmitERPOrderCancelled(ctx, storeID, cartID, st.ExternalOrderID, "cancel")
+	return s.completeCancellation(ctx, change)
+}
+
+func (s *Service) completeCancellation(ctx context.Context, change CancellationTransition) error {
+	// Revalidate after the remote call, too: payment and binding changes can
+	// commit without acquiring the terminal-operation advisory lock.
+	change.From, change.To = OrderStateCancelled, OrderStateCancelled
+	won, err := s.transitionCancellation(ctx, change)
+	if err != nil {
+		return fmt.Errorf("confirming local cancellation: %w", err)
+	}
+	if !won {
+		return ErrCartBusy
+	}
+	s.collab.EmitERPOrderCancelled(ctx, change.StoreID, change.CartID, change.ExternalOrderID, "cancel")
 	logger.From(ctx, s.logger).Info("ERP order cancelled — reservation returned by the cancel itself",
-		zap.String("cart_id", cartID),
-		zap.String("external_order_id", st.ExternalOrderID),
+		zap.String("cart_id", change.CartID),
+		zap.String("external_order_id", change.ExternalOrderID),
 	)
-	s.collab.MirrorToOrder(ctx, cartID)
+	s.collab.MirrorToOrder(ctx, change.CartID)
 	return nil
 }
 

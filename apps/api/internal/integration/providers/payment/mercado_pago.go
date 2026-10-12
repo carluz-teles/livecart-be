@@ -176,7 +176,7 @@ func (m *MercadoPago) RefreshToken(ctx context.Context) (*Credentials, error) {
 
 	resource, err := oauth.NewClient(cfg).Refresh(ctx, m.credentials.RefreshToken)
 	if err != nil {
-		return nil, fmt.Errorf("refreshing token: %w", err)
+		return nil, mercadoPagoError("refreshing token", err)
 	}
 
 	return &Credentials{
@@ -264,7 +264,7 @@ func (m *MercadoPago) CreateCheckout(ctx context.Context, order CheckoutOrder) (
 
 	resource, err := preference.NewClient(cfg).Create(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("creating checkout: %w", err)
+		return nil, mercadoPagoError("creating checkout", err)
 	}
 
 	// Sandbox URL falls back when init_point is empty (test credentials).
@@ -301,7 +301,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 
 	resource, err := payment.NewClient(cfg).Get(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("getting payment: %w", err)
+		return nil, mercadoPagoError("getting payment", err)
 	}
 
 	var paidAt *time.Time
@@ -389,7 +389,7 @@ func (m *MercadoPago) RefundPayment(ctx context.Context, paymentID string, amoun
 		resource, err = client.Create(ctx, id)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("refunding payment: %w", err)
+		return nil, mercadoPagoError("refunding payment", err)
 	}
 
 	createdAt := resource.DateCreated
@@ -508,29 +508,13 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 
 	resource, err := payment.NewClient(cfg).Create(ctx, req)
 	if err != nil {
-		// MP non-2xx responses come back as *mperror.ResponseError. Log the raw
-		// body + the request payload (token redacted) because MP's
-		// `internal_error` often has an empty `cause` and only the exact field
-		// set reveals the trigger (wrong payment_method_id, malformed
-		// identification, etc.).
 		var mpErr *mperror.ResponseError
 		if errors.As(err, &mpErr) {
-			safe := payment.Request{
-				TransactionAmount:   req.TransactionAmount,
-				Token:               "[redacted]",
-				Installments:        req.Installments,
-				Payer:               req.Payer,
-				ExternalReference:   req.ExternalReference,
-				NotificationURL:     req.NotificationURL,
-				StatementDescriptor: req.StatementDescriptor,
-				PaymentMethodID:     req.PaymentMethodID,
-				IssuerID:            req.IssuerID,
-				Metadata:            req.Metadata,
-			}
-			logger.From(ctx, m.Logger).Error("mercado pago card payment failed",
+			logger.From(ctx, m.Logger).Warn("mercado pago card payment request failed",
 				zap.Int("status_code", mpErr.StatusCode),
-				zap.String("body", mpErr.Message),
-				zap.Any("request_payload", safe),
+				zap.String("cart_id", input.CartID),
+				zap.Int64("amount_cents", input.TotalAmount),
+				zap.Int("installments", input.Installments),
 			)
 			// 5xx (and 429) is provider-side, not a real card rejection —
 			// the buyer's card was never charged. Surface it as a transport
@@ -540,7 +524,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 			// HTTP 200 with resource.Status="rejected" and don't hit this
 			// branch at all.
 			if mpErr.StatusCode >= 500 || mpErr.StatusCode == 429 {
-				return nil, fmt.Errorf("mercado pago indisponível (HTTP %d): %s", mpErr.StatusCode, mpErr.Message)
+				return nil, paymentResponseError("mercado pago indisponível", mpErr.StatusCode, mpErr.Message)
 			}
 			return &CardPaymentResult{
 				Status:       PaymentRejected,
@@ -595,7 +579,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 	if !resource.MoneyReleaseDate.IsZero() {
 		moneyReleaseDateStr = resource.MoneyReleaseDate.Format(time.RFC3339)
 	}
-	logger.From(ctx, m.Logger).Info("mercado pago card payment captured",
+	logCardPaymentOutcome(logger.From(ctx, m.Logger), "mercado pago", result.Status, []zap.Field{
 		zap.String("payment_id", result.PaymentID),
 		zap.String("cart_id", input.CartID),
 		zap.String("status", string(result.Status)),
@@ -608,7 +592,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		zap.String("money_release_date", moneyReleaseDateStr),
 		zap.Bool("has_paid_at", result.PaidAt != nil),
 		zap.Any("fees_breakdown", feesField),
-	)
+	})
 
 	return result, nil
 }
@@ -714,7 +698,7 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 	if err != nil {
 		var mpErr *mperror.ResponseError
 		if errors.As(err, &mpErr) {
-			return nil, fmt.Errorf("pix generation failed: %s", mpErr.Message)
+			return nil, paymentResponseError("mercado pago pix generation failed", mpErr.StatusCode, mpErr.Message)
 		}
 		return nil, fmt.Errorf("generating pix payment: %w", err)
 	}
@@ -758,7 +742,7 @@ func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
 	entries, err := paymentmethod.NewClient(cfg).List(ctx)
 	if err != nil {
 		logger.From(ctx, m.Logger).Warn("mercado pago payment_methods lookup failed, falling back to card-only",
-			zap.Error(err),
+			zap.Error(mercadoPagoError("listing payment methods", err)),
 		)
 		return []string{"card"}, nil
 	}

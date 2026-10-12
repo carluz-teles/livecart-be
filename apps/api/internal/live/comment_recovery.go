@@ -14,6 +14,30 @@ import (
 var ErrCommentBusy = errors.New("comment processing is already in progress")
 var ErrCommentERPBlocked = errors.New("comment requires ERP reconciliation: order closed for new items")
 var ErrCommentERPPending = errors.New("comment is waiting for ERP confirmation")
+var ErrCommentAwaitingBinding = errors.New("comment is waiting for live session binding")
+
+const CommentBindingGracePeriod = 5 * time.Minute
+
+// CommentBindingWork keeps the original delivery immutable across webhook,
+// polling and retries. A binding deadline never extends with a new delivery.
+type CommentBindingWork struct {
+	Input     ProcessInstagramCommentInput
+	WaitUntil *time.Time
+	SessionID string
+}
+
+type CommentBindingRepository interface {
+	LoadCommentBindingWork(context.Context, string, string) (CommentBindingWork, error)
+	AwaitCommentBinding(context.Context, string, string) (bool, error)
+	ResolveCommentBinding(context.Context, string, string) (string, error)
+}
+
+type commentBindingKey struct{}
+
+type commentBindingContext struct {
+	owner string
+	work  CommentBindingWork
+}
 
 // CommentWorkRepository keeps retries independent of the delivery queue's retry
 // budget. A lease coordinates webhook, polling and recovery workers.
@@ -31,7 +55,9 @@ type CommentWorkRepository interface {
 // work completed: the current owner/recovery worker still owes the ERP result.
 func (s *Service) ProcessInstagramCommentDelivery(ctx context.Context, input ProcessInstagramCommentInput) error {
 	err := s.ProcessInstagramComment(ctx, input)
-	if err == ErrCommentBusy {
+	// Only acknowledge these exact durable outcomes. A joined persistence error
+	// must reach the delivery queue instead of being hidden by errors.Is.
+	if err == ErrCommentBusy || err == ErrCommentAwaitingBinding {
 		return nil
 	}
 	return err
@@ -56,8 +82,18 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	defer func() {
 		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer finishCancel()
-		err = errors.Join(err, work.FinishCommentWork(finishCtx, input.CommentID, owner, err))
+		if finishErr := work.FinishCommentWork(finishCtx, input.CommentID, owner, err); finishErr != nil {
+			err = errors.Join(err, finishErr)
+		}
 	}()
+	var binding CommentBindingWork
+	if bindings, ok := s.ingestRepo.(CommentBindingRepository); ok {
+		binding, err = bindings.LoadCommentBindingWork(ctx, input.CommentID, owner)
+		if err != nil {
+			return err
+		}
+		input = binding.Input
+	}
 	accepted, err := work.CommentWasAccepted(ctx, input.CommentID)
 	if err != nil {
 		return err
@@ -68,8 +104,57 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			return err
 		}
 		ctx = context.WithValue(ctx, acceptedCommentKey{}, plan)
+	} else if binding.WaitUntil != nil {
+		// Check before looking up media: a binding that appears after the grace
+		// period must not revive a purchase that was never accepted.
+		if !time.Now().Before(*binding.WaitUntil) {
+			s.logger.Info("comment binding grace expired", zap.String("comment_id", input.CommentID))
+			return nil
+		}
+		bindings := s.ingestRepo.(CommentBindingRepository)
+		binding.SessionID, err = bindings.ResolveCommentBinding(ctx, input.CommentID, owner)
+		if err != nil {
+			return err
+		}
+		if binding.SessionID == "" {
+			return ErrCommentAwaitingBinding
+		}
 	}
+	ctx = context.WithValue(ctx, commentBindingKey{}, commentBindingContext{owner: owner, work: binding})
 	return s.processInstagramComment(ctx, input)
+}
+
+func (s *Service) awaitCommentBinding(ctx context.Context, input ProcessInstagramCommentInput) error {
+	bindings, ok := s.ingestRepo.(CommentBindingRepository)
+	state, leased := ctx.Value(commentBindingKey{}).(commentBindingContext)
+	if !ok || !leased {
+		return nil
+	}
+	waiting, err := bindings.AwaitCommentBinding(ctx, input.CommentID, state.owner)
+	if err != nil {
+		return err
+	}
+	if waiting {
+		return ErrCommentAwaitingBinding
+	}
+	return nil
+}
+
+func commentBindingMatches(ctx context.Context, session *SessionOutput, event *EventOutput) bool {
+	state, _ := ctx.Value(commentBindingKey{}).(commentBindingContext)
+	if state.work.WaitUntil == nil || commentWasAccepted(ctx) {
+		return true
+	}
+	return time.Now().Before(*state.work.WaitUntil) && session.ID == state.work.SessionID && session.EventID == event.ID
+}
+
+func recoveredCommentTime(ctx context.Context, input ProcessInstagramCommentInput) *time.Time {
+	state, _ := ctx.Value(commentBindingKey{}).(commentBindingContext)
+	if state.work.WaitUntil == nil || input.Timestamp <= 0 {
+		return nil
+	}
+	createdAt := time.Unix(input.Timestamp, 0)
+	return &createdAt
 }
 
 type acceptedCommentKey struct{}
@@ -121,6 +206,9 @@ func (s *Service) RecoverPendingComments(ctx context.Context) {
 		case errors.Is(err, ErrCommentERPBlocked):
 			deferred++
 			s.logger.Info("comment awaits ERP reconciliation", zap.String("comment_id", input.CommentID))
+		case err == ErrCommentAwaitingBinding:
+			deferred++
+			s.logger.Info("comment awaits live session binding", zap.String("comment_id", input.CommentID))
 		case err != nil:
 			deferred++
 			s.logger.Warn("comment remains pending", zap.String("comment_id", input.CommentID), zap.Error(err))

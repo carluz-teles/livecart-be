@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"go.uber.org/zap"
 	"livecart/apps/api/internal/integration/providers"
@@ -167,6 +170,137 @@ func TestSearchEmptySuccessCannotHideFailedLookup(t *testing.T) {
 	var status *httpx.ServiceError
 	if !errors.As(productSearchError(err), &status) || status.Code != 503 {
 		t.Fatalf("failed search was reported as absence: %v", err)
+	}
+}
+
+func TestTinySKUFailureDoesNotSpendQuotaOnFallbacks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "quota wait", err: &providers.RequestNotSentError{Err: ratelimit.ErrNaoDespachado}},
+		{name: "provider throttled", err: &ratelimit.ErrRateLimited{RetryAfter: time.Minute}},
+		{name: "timeout", err: context.DeadlineExceeded},
+		{name: "cancelled", err: context.Canceled},
+		{name: "upstream failure", err: errors.New("upstream unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &barcodeSearchProvider{list: func(params providers.ListProductsParams) (*providers.ProductListResult, error) {
+				if params.SKU == "" {
+					t.Error("failed SKU lookup issued an unrelated fallback")
+				}
+				return nil, tc.err
+			}}
+			_, err := (&Service{logger: zap.NewNop()}).searchERPProducts(t.Context(), p,
+				SearchProductsInput{Search: "produto", SummaryOnly: true})
+			if !errors.Is(err, tc.err) || p.lists.Load() != 1 || httpx.IsNotFound(productSearchError(err)) {
+				t.Fatalf("error=%v calls=%d", err, p.lists.Load())
+			}
+		})
+	}
+}
+
+type contextSearchProvider struct {
+	searchProvider
+	list func(context.Context, providers.ListProductsParams) (*providers.ProductListResult, error)
+}
+
+func (p *contextSearchProvider) ListProducts(ctx context.Context, params providers.ListProductsParams) (*providers.ProductListResult, error) {
+	p.lists.Add(1)
+	return p.list(ctx, params)
+}
+
+func TestProductSearchCancellationStopsAllFurtherReads(t *testing.T) {
+	for _, when := range []string{"before first lookup", "after first lookup"} {
+		t.Run(when, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			p := &contextSearchProvider{list: func(context.Context, providers.ListProductsParams) (*providers.ProductListResult, error) {
+				cancel()
+				return &providers.ProductListResult{Products: []providers.ERPProduct{{ID: "1", SKU: "different"}}}, nil
+			}}
+			wantCalls := int64(1)
+			if when == "before first lookup" {
+				cancel()
+				wantCalls = 0
+			}
+			_, err := (&Service{logger: zap.NewNop()}).searchERPProducts(ctx, p, SearchProductsInput{Search: "item"})
+			if !errors.Is(productSearchError(err), context.Canceled) || p.lists.Load() != wantCalls || p.details.Load() != 0 {
+				t.Fatalf("cancelled search: error=%v list calls=%d detail calls=%d", err, p.lists.Load(), p.details.Load())
+			}
+		})
+	}
+}
+
+func TestProductSearchDeadlineIncludesProviderTimeAndPreventsFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := &contextSearchProvider{list: func(ctx context.Context, _ providers.ListProductsParams) (*providers.ProductListResult, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}}
+		started := time.Now()
+		_, err := (&Service{logger: zap.NewNop()}).searchERPProducts(t.Context(), p,
+			SearchProductsInput{Search: "item", SummaryOnly: true})
+		var status *httpx.ServiceError
+		if !errors.As(productSearchError(err), &status) || status.Code != 503 {
+			t.Fatalf("slow provider response became not-found: %v", err)
+		}
+		if elapsed := time.Since(started); elapsed != erpSearchTimeout || p.lists.Load() != 1 {
+			t.Fatalf("unbounded lookup: elapsed=%s calls=%d", elapsed, p.lists.Load())
+		}
+	})
+}
+
+func TestProductSearchQuotaRefusalRecoversOnNextLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limiter := ratelimit.NewManager(zap.NewNop()).GetOrCreateTiny("product-search")
+		headers := http.Header{}
+		headers.Set("Retry-After", "6")
+		if err := limiter.ObserveResponse(t.Context(), http.MethodGet, http.StatusTooManyRequests, headers); err != nil {
+			t.Fatal(err)
+		}
+		dispatched := 0
+		p := &contextSearchProvider{list: func(ctx context.Context, params providers.ListProductsParams) (*providers.ProductListResult, error) {
+			if err := limiter.WaitRequest(ctx, http.MethodGet); err != nil {
+				return nil, &providers.RequestNotSentError{Err: err}
+			}
+			dispatched++
+			return &providers.ProductListResult{Products: []providers.ERPProduct{{ID: "1", SKU: params.SKU, Active: true}}}, nil
+		}}
+		svc := &Service{logger: zap.NewNop()}
+		input := SearchProductsInput{Search: "LC-1", SummaryOnly: true}
+		_, err := svc.searchERPProducts(t.Context(), p, input)
+		var status *httpx.ServiceError
+		if !errors.As(productSearchError(err), &status) || status.Code != 503 || dispatched != 0 || p.lists.Load() != 1 {
+			t.Fatalf("quota refusal: err=%v dispatched=%d lookups=%d", err, dispatched, p.lists.Load())
+		}
+		time.Sleep(6 * time.Second)
+		result, err := svc.searchERPProducts(t.Context(), p, input)
+		if err != nil || len(result.Products) != 1 || dispatched != 1 || p.lists.Load() != 2 {
+			t.Fatalf("lookup after quota recovery: result=%+v err=%v dispatched=%d", result, err, dispatched)
+		}
+	})
+}
+
+func TestProductSearchOnlyCompleteEmptyResponsesMeanNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response *providers.ProductListResult
+		notFound bool
+	}{
+		{name: "complete empty results", response: &providers.ProductListResult{}, notFound: true},
+		{name: "missing provider response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &barcodeSearchProvider{list: func(providers.ListProductsParams) (*providers.ProductListResult, error) {
+				return tc.response, nil
+			}}
+			_, err := (&Service{logger: zap.NewNop()}).searchERPProducts(t.Context(), p,
+				SearchProductsInput{Search: "no-match", SummaryOnly: true})
+			if err == nil || httpx.IsNotFound(err) != tc.notFound {
+				t.Fatalf("provider response classification: %v", err)
+			}
+		})
 	}
 }
 

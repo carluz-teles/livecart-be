@@ -75,6 +75,9 @@ func (c *Client) Enqueue(ctx context.Context, env Envelope, opts ...asynq.Option
 	if env.Name == ERPWebhookProcess {
 		baseOpts = append(baseOpts, asynq.MaxRetry(ERPWebhookMaxRetries))
 	}
+	if env.Name == CartExpired {
+		baseOpts = append(baseOpts, asynq.MaxRetry(CartExpiredMaxRetries))
+	}
 	// Use the event id as the task id so a duplicated relay enqueue is a no-op
 	// on the queue itself (belt-and-suspenders with the outbox published flag).
 	if env.EventID != "" {

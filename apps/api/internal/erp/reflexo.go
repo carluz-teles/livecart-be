@@ -114,6 +114,11 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 		cartID = st.CartID
 		rel.CartID = cartID
 	}
+	if st.CartStatus == "expired" || st.CartStatus == "cancelled" ||
+		st.OrderStatus == string(providers.ERPOrderStatusCancelado) {
+		rel.Skipped = "compra encerrada não recebe reflexo"
+		return rel, nil
+	}
 	casa := st.State
 	if !podeMutar(casa) || st.ExternalOrderID == "" {
 		rel.Skipped = "carrinho não aceita reflexo no estado " + st.State
@@ -154,6 +159,20 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading order items for reflection: %w", err)
+	}
+	// The ERP GET can outlive a cart expiry or cancellation. Avoid importing
+	// products for a sale that has become terminal while the request was in flight.
+	fresh, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return nil, fmt.Errorf("rechecking purchase before reflection: %w", err)
+	}
+	if fresh.CartStatus == "expired" || fresh.CartStatus == "cancelled" ||
+		fresh.OrderStatus == string(providers.ERPOrderStatusCancelado) {
+		rel.Skipped = "compra encerrada durante o reflexo"
+		return rel, nil
+	}
+	if fresh.ExternalOrderID != st.ExternalOrderID || (fresh.CartID != "" && fresh.CartID != cartID) {
+		return nil, fmt.Errorf("purchase binding changed during reflection: %w", ErrCartBusy)
 	}
 	if grouped, ok := s.cartSync.(CartPurchaseSyncCollaborators); ok {
 		rel, err := grouped.ReflectCartPurchase(ctx, cartID, storeID, st.ExternalOrderID, doPedido)

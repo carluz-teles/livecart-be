@@ -277,6 +277,9 @@ var EventTimeouts = map[Name]time.Duration{
 	// reservation under the same per-account API quota as order.paid.
 	CartPaid:      90 * time.Second,
 	OrderRefunded: 90 * time.Second,
+	// Expiry bursts share Tiny's write quota. Leave room for the queued PUT
+	// and a confirming GET when its response is lost.
+	CartExpired: 90 * time.Second,
 	// `comment.received` passou a criar o pedido de venda no ERP — antes ele só
 	// lançava um movimento de estoque. O trabalho agora é resolver o contato do
 	// comprador (busca + criação, para quem é novo) e criar o pedido, tudo em
@@ -293,6 +296,9 @@ var EventTimeouts = map[Name]time.Duration{
 // events retain their existing queue policy. Expired webhook tasks remain in
 // the dead-letter queue for inspection rather than being retried indefinitely.
 const ERPWebhookMaxRetries = 25
+
+// Several quota windows may be needed after a simultaneous event expiry.
+const CartExpiredMaxRetries = 10
 const ERPWebhookRetryWindow = 72 * time.Hour
 
 func (e Envelope) ERPWebhookExpired(now time.Time) bool {

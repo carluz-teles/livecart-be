@@ -1125,6 +1125,11 @@ func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCom
 	if err != nil {
 		return "", fmt.Errorf("creating live comment: %w", err)
 	}
+	if params.CreatedAt != nil {
+		if _, err := tx.Exec(ctx, `UPDATE live_comments SET created_at=$2 WHERE id=$1`, row.ID, *params.CreatedAt); err != nil {
+			return "", fmt.Errorf("preserving original comment timestamp: %w", err)
+		}
+	}
 	if err := qtx.IncrementLiveSessionComments(ctx, sessionID); err != nil {
 		return "", err
 	}

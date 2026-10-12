@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -96,6 +97,7 @@ type IngestRepository interface {
 // aliases it (type CreateLiveCommentParams = live.CreateLiveCommentParams) so its
 // Repository keeps building the same value and every existing caller is unchanged.
 type CreateLiveCommentParams struct {
+	CreatedAt         *time.Time
 	SessionID         string
 	EventID           string
 	Platform          string
