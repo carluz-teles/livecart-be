@@ -272,6 +272,12 @@ type ERPInvoice struct {
 	XMLContent []byte           // optional XML payload; ERPs that need a separate fetch leave this empty
 }
 
+// ERPRecordedPaymentVerifier confirms externally settled money using reads only.
+// Implementations must not create receivables or rewrite the merchant's schedule.
+type ERPRecordedPaymentVerifier interface {
+	VerifyRecordedOrderPayment(context.Context, string, int64) error
+}
+
 // ERPInvoiceProvider is an optional capability for ERP integrations that
 // expose access to the NFe issued for an order. LiveCart never triggers
 // emission — the merchant always emits in the ERP's panel — but it does

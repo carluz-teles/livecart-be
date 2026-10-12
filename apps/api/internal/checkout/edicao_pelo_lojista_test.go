@@ -134,6 +134,27 @@ func TestEdicaoPeloLojista_PrazoVencidoTemCodigoDeExpirado(t *testing.T) {
 	}
 }
 
+func TestCartMutationConflictReportsActionableReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cart CartRow
+		code httpx.Code
+	}{
+		{"buyer editing disabled", CartRow{Status: "checkout", PaymentStatus: "pending"}, httpx.CodeCartEditUnavailable},
+		{"paid cart", CartRow{Status: "checkout", PaymentStatus: "paid"}, httpx.CodeCartAlreadyPaid},
+		{"cancelled cart", CartRow{Status: "cancelled", PaymentStatus: "pending"}, httpx.CodeCartNotPayable},
+		{"closed purchase", CartRow{Status: "checkout", PurchaseClosed: true}, httpx.CodeCartNotPayable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := assertCartMutable(&tc.cart, toggleGovernsBuyerItemEdit, time.Now())
+			var serviceErr *httpx.ServiceError
+			if !errors.As(err, &serviceErr) || serviceErr.Code != 409 || serviceErr.Reason != string(tc.code) {
+				t.Fatalf("expected HTTP 409/%s, got %#v", tc.code, err)
+			}
+		})
+	}
+}
+
 // ─── M3 ─────────────────────────────────────────────────────────────────────
 
 func TestEdicaoPeloLojista_AuditoriaDistingueQuemEditou(t *testing.T) {

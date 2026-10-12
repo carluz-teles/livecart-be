@@ -80,7 +80,7 @@ const (
 	CodeOrderCheckoutLocked      Code = "ORDER_CHECKOUT_LOCKED"      // order/service.go:550,568 (regenerate on paid/shipped)
 	CodeNfeSyncUnavailable       Code = "NFE_SYNC_UNAVAILABLE"       // order/service.go:126
 	CodeErpRetryUnavailable      Code = "ERP_RETRY_UNAVAILABLE"      // order/service.go:140
-	CodeCartEditUnavailable      Code = "CART_EDIT_UNAVAILABLE"      // order/item_edit.go (checkout service not wired)
+	CodeCartEditUnavailable      Code = "CART_EDIT_UNAVAILABLE"      // checkout/service.go; order/item_edit.go
 	CodeManualPaymentUnavailable Code = "MANUAL_PAYMENT_UNAVAILABLE" // order/item_edit.go (payment service not wired)
 
 	// --- LIVE (internal/live/service.go) ---

@@ -72,14 +72,19 @@ func reflectCartPurchaseTx(
 	report := &erp.CartSyncReport{CartID: cartID}
 	var err error
 	var valid bool
+	var terminal bool
 	if err = tx.QueryRow(ctx, `SELECT c.joined_to_cart_id IS NULL AND c.external_order_id=$2
-        AND c.erp_order_state='reflecting' AND c.status NOT IN ('cancelled','expired')
-        AND COALESCE(c.store_id,e.store_id)=$3::uuid
-        FROM carts c JOIN live_events e ON e.id=c.event_id WHERE c.id=$1 FOR UPDATE OF c`, cartID, orderID, storeID).Scan(&valid); err != nil {
+        AND c.erp_order_state='reflecting' AND COALESCE(c.store_id,e.store_id)=$3::uuid,
+        c.status IN ('cancelled','expired') OR COALESCE(c.erp_order_status,'')='cancelado'
+        FROM carts c JOIN live_events e ON e.id=c.event_id WHERE c.id=$1 FOR UPDATE OF c`, cartID, orderID, storeID).Scan(&valid, &terminal); err != nil {
 		return nil, err
 	}
 	if !valid {
 		return nil, fmt.Errorf("purchase binding changed during ERP reflection: %w", erp.ErrCartBusy)
+	}
+	if terminal {
+		report.Skipped = "compra encerrada não recebe reflexo"
+		return report, nil
 	}
 	if _, err = tx.Exec(ctx, `SELECT id FROM carts WHERE joined_to_cart_id=$1 ORDER BY id FOR UPDATE`, cartID); err != nil {
 		return nil, err

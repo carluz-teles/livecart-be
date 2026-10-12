@@ -1,6 +1,8 @@
 package logger
 
 import (
+	"time"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -36,7 +38,21 @@ func New() (*zap.Logger, error) {
 		}
 	}
 
-	log, err := cfg.Build()
+	// Sanitize before encoding, including fields attached through With. Keep
+	// sampling outside that core so its Check still controls repeated entries.
+	sampling := cfg.Sampling
+	cfg.Sampling = nil
+	log, err := cfg.Build(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+		core = &redactingCore{Core: core}
+		if sampling != nil {
+			opts := []zapcore.SamplerOption{}
+			if sampling.Hook != nil {
+				opts = append(opts, zapcore.SamplerHook(sampling.Hook))
+			}
+			core = zapcore.NewSamplerWithOptions(core, time.Second, sampling.Initial, sampling.Thereafter, opts...)
+		}
+		return core
+	}))
 	if err != nil {
 		return nil, err
 	}

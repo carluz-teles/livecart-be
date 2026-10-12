@@ -53,6 +53,12 @@ type ShipmentInvoiceRef struct {
 	InvoiceKey string
 }
 
+// Optional on older adapters: without positive historical evidence, preserve
+// normal invoice synchronization and its missing-materialization warning.
+type legacyInvoiceRepository interface {
+	IsLegacyCartWithoutInvoiceWorkflow(ctx context.Context, storeID, cartID, externalOrderID string) (bool, error)
+}
+
 // SyncCartInvoiceFromERP pulls the NFe state for a paid cart from the active
 // ERP integration (today: Tiny) and persists it on the Order's payment row.
 //
@@ -187,6 +193,20 @@ func (s *Service) SyncCartInvoiceByExternalOrder(ctx context.Context, storeID, e
 			zap.Error(err),
 		)
 		return nil, nil
+	}
+	if history, ok := s.repo.(legacyInvoiceRepository); ok {
+		legacy, err := history.IsLegacyCartWithoutInvoiceWorkflow(ctx, storeID, cartID, externalOrderID)
+		if err != nil {
+			return nil, fmt.Errorf("checking invoice history before webhook sync: %w", err)
+		}
+		if legacy {
+			logger.From(ctx, s.logger).Info("nota fiscal kept in ERP for legacy cart without current invoice workflow",
+				zap.String("store_id", storeID),
+				zap.String("cart_id", cartID),
+				zap.String("external_order_id", externalOrderID),
+			)
+			return nil, nil
+		}
 	}
 	return s.fetchAndPersistCartInvoice(ctx, storeID, cartID, invoiceID)
 }

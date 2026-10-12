@@ -449,7 +449,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 		if it.WeightGrams <= 0 || it.HeightCm <= 0 || it.WidthCm <= 0 || it.LengthCm <= 0 {
 			missingDims = true
 			logger.From(ctx, s.logger).Info("shipping quote: item missing dimensions, delivery skipped",
-				zap.String("cart_token", input.Token),
+				zap.String("cart_id", shipCtx.CartID),
 				zap.String("product", it.Name),
 			)
 			break
@@ -500,7 +500,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	deliveryPossible := shipCtx.OriginZip != "" && !missingDims && len(active) > 0
 	if !deliveryPossible {
 		logger.From(ctx, s.logger).Info("shipping quote: delivery not possible",
-			zap.String("cart_token", input.Token),
+			zap.String("cart_id", shipCtx.CartID),
 			zap.Bool("has_origin_zip", shipCtx.OriginZip != ""),
 			zap.Bool("missing_dims", missingDims),
 			zap.Int("active_providers", len(active)),
@@ -526,7 +526,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 			logger.From(ctx, s.logger).Error("shipping quote failed for provider",
 				zap.String("provider", string(provider.Name())),
 				zap.String("store_id", shipCtx.StoreID),
-				zap.String("cart_token", input.Token),
+				zap.String("cart_id", shipCtx.CartID),
 				zap.Error(qerr),
 			)
 			continue

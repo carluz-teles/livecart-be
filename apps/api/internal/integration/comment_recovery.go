@@ -69,10 +69,13 @@ func (r *Repository) FinishCommentWork(ctx context.Context, commentID, owner str
 	_, err := r.pool.Exec(ctx, `WITH finished AS (UPDATE live_comment_work SET lease_owner=NULL,lease_until=NULL,last_error=$3,
         erp_blocked_at=CASE WHEN $4 THEN now() ELSE NULL END,
 		completed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,
-        next_attempt_at=now()+make_interval(secs=>LEAST(900,5*power(2,LEAST(attempts,8)))::double precision)
+        next_attempt_at=CASE WHEN $5 THEN LEAST(now()+interval '10 seconds',binding_wait_until)
+			ELSE now()+make_interval(secs=>LEAST(900,5*power(2,LEAST(attempts,8)))::double precision) END
         WHERE platform_comment_id=$1 AND lease_owner=$2 RETURNING platform_comment_id)
         UPDATE webhook_events SET processed=($3::text IS NULL),processed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,error_message=$3
-		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished)`, commentID, owner, message, errors.Is(processingErr, live.ErrCommentERPBlocked))
+		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished)`,
+		commentID, owner, message, errors.Is(processingErr, live.ErrCommentERPBlocked),
+		errors.Is(processingErr, live.ErrCommentAwaitingBinding))
 	return err
 }
 
@@ -102,9 +105,30 @@ func (r *Repository) CommentWasAccepted(ctx context.Context, id string) (bool, e
 	return accepted, err
 }
 func (r *Repository) AcceptComment(ctx context.Context, id string, plan []byte) error {
-	_, err := r.pool.Exec(ctx, `UPDATE live_comment_work SET accepted_at=now(),accepted_plan=$2 WHERE platform_comment_id=$1 AND accepted_at IS NULL`, id, string(plan))
+	result, err := r.pool.Exec(ctx, `UPDATE live_comment_work w SET accepted_at=now(),accepted_plan=$2
+		WHERE platform_comment_id=$1 AND accepted_at IS NULL
+		AND (binding_wait_until IS NULL OR (
+			binding_session_id=($2::jsonb->'session'->>'ID')::uuid
+			AND binding_session_id IN (`+awaitedCommentSession+`
+				AND s.event_id=($2::jsonb->'event'->>'ID')::uuid
+				AND e.store_id=($2::jsonb->'event'->>'StoreID')::uuid
+				AND s.status<>'ended' AND NOT s.processing_paused AND e.status<>'ended'
+				AND e.ends_at>clock_timestamp()
+				AND (COALESCE(e.starts_at,e.scheduled_at) IS NULL
+					OR COALESCE(e.starts_at,e.scheduled_at)<=to_timestamp((w.payload->>'Timestamp')::double precision))
+				AND (e.status<>'scheduled' OR COALESCE(e.starts_at,e.scheduled_at) IS NOT NULL))))`,
+		id, string(plan))
 	if err != nil {
 		return fmt.Errorf("accepting comment recovery plan: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		accepted, err := r.CommentWasAccepted(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !accepted {
+			return live.ErrCommentAwaitingBinding
+		}
 	}
 	return nil
 }

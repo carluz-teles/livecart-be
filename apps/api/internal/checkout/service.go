@@ -1465,15 +1465,15 @@ func assertCartMutable(cart *CartRow, storeToggleApplies bool, now time.Time) er
 	// mutação de item: editar aqui mexeria em estoque e reservas de ERP de um
 	// carrinho morto — o estorno já devolveu tudo.
 	if cart.Status == "cancelled" {
-		return httpx.ErrConflict("carrinho cancelado")
+		return httpx.DomainError(409, httpx.CodeCartNotPayable, "carrinho cancelado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return httpx.ErrConflict("carrinho já foi pago")
+		return httpx.DomainError(409, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// O toggle da loja só entra nas ações que ele governa — ver as constantes
 	// toggleGoverns*. Pago, cancelado e expirado, acima, valem para TODAS.
 	if storeToggleApplies && !cart.AllowEdit {
-		return httpx.ErrConflict("edição do carrinho desabilitada para esta loja")
+		return httpx.DomainError(409, httpx.CodeCartEditUnavailable, "edição do carrinho desabilitada para esta loja")
 	}
 	if cart.ExpiresAt != nil && cart.ExpiresAt.Before(now) {
 		return httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")

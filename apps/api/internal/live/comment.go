@@ -197,14 +197,14 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 	if session == nil {
-		// Unlinked media is outside the merchant's sales flow. Returning nil
-		// completes durable work so recovery and duplicate deliveries skip it.
-		logger.From(ctx, s.logger).Info("comment ignored: media has no session",
+		// Instagram can deliver comments before discovery links the broadcast.
+		// The durable grace period is bounded and never guesses an event.
+		logger.From(ctx, s.logger).Info("comment media has no session",
 			zap.String("comment_id", input.CommentID),
 			zap.String("account_id", input.AccountID),
 			zap.String("media_id", input.MediaID),
 		)
-		return nil
+		return s.awaitCommentBinding(ctx, input)
 	}
 
 	// Get the event (which has store_id) from the session
@@ -220,6 +220,9 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 			zap.String("media_id", input.MediaID),
 		)
 		return nil
+	}
+	if !commentBindingMatches(ctx, session, event) {
+		return ErrCommentAwaitingBinding
 	}
 
 	// Store resolved (media_id → event): carry it on the ctx so every log below
@@ -277,6 +280,7 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 
 		// Save comment with "paused" result but don't process cart
 		_, err := s.ingestRepo.CreateLiveComment(ctx, CreateLiveCommentParams{
+			CreatedAt:         recoveredCommentTime(ctx, input),
 			SessionID:         session.ID,
 			EventID:           event.ID,
 			Platform:          "instagram",
@@ -312,6 +316,7 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 			zap.String("comment_id", input.CommentID),
 		)
 		_, err := s.ingestRepo.CreateLiveComment(ctx, CreateLiveCommentParams{
+			CreatedAt:         recoveredCommentTime(ctx, input),
 			SessionID:         session.ID,
 			EventID:           event.ID,
 			Platform:          "instagram",
@@ -389,6 +394,14 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 	// Só vale com intenção de compra: comentário qualquer em campanha encerrada
 	// não merece resposta automática.
 	if hasPurchaseIntent && !commentWasAccepted(ctx) {
+		if originalTime := recoveredCommentTime(ctx, input); originalTime != nil {
+			switch WindowAt(event.Status, event.ScheduledAt, event.EndsAt, *originalTime) {
+			case WindowNotStarted:
+				return s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
+			case WindowEnded:
+				return s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
+			}
+		}
 		switch WindowAt(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
 		case WindowNotStarted:
 			trace.Info(TracePrefix + "decision: refused, event window has not opened")
@@ -472,6 +485,7 @@ func (s *Service) processInstagramComment(ctx context.Context, input ProcessInst
 	}
 	// Save ALL comments to DB
 	commentID, err := s.ingestRepo.CreateLiveComment(ctx, CreateLiveCommentParams{
+		CreatedAt:         recoveredCommentTime(ctx, input),
 		SessionID:         session.ID,
 		EventID:           event.ID,
 		Platform:          "instagram",
@@ -682,6 +696,7 @@ func (s *Service) resolverPedidos(
 		return nil
 	}
 	log := logger.From(ctx, s.logger)
+	binding, _ := ctx.Value(commentBindingKey{}).(commentBindingContext)
 
 	resolvidos := make([]pedidoResolvido, 0, len(pedidos))
 	for _, item := range pedidos {
@@ -703,6 +718,10 @@ func (s *Service) resolverPedidos(
 					zap.String("store_id", event.StoreID),
 				)
 			}
+		} else if binding.work.WaitUntil != nil {
+			// The highlight may have changed before discovery bound this live.
+			// Without a product code there is no historical product attribution.
+			log.Info("recovered comment requires an explicit product code", zap.String("session_id", session.ID))
 		} else if session.CurrentActiveProductID != nil && *session.CurrentActiveProductID != "" {
 			// Pedido sem código: quem escolhe é o destaque da transmissão (D17).
 			log.Info("purchase without a code, using the featured product",
@@ -1465,6 +1484,7 @@ func (s *Service) resolvePostEventProduct(
 // savePostComment persists a post comment that was fully handled by the rules.
 func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string, input ProcessInstagramCommentInput, result string) error {
 	if _, err := s.ingestRepo.CreateLiveComment(ctx, CreateLiveCommentParams{
+		CreatedAt:         recoveredCommentTime(ctx, input),
 		SessionID:         sessionID,
 		EventID:           eventID,
 		Platform:          "instagram",

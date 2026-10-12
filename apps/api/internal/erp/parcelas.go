@@ -197,9 +197,7 @@ func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, stor
 				return split, fmt.Errorf("tiny: pagamentos de origens distintas exigem conciliação financeira")
 			}
 		}
-		verifier, ok := erpProvider.(interface {
-			VerifyRecordedOrderPayment(context.Context, string, int64) error
-		})
+		verifier, ok := erpProvider.(providers.ERPRecordedPaymentVerifier)
 		if !ok {
 			return split, fmt.Errorf("tiny: verificação de recebimentos externos indisponível")
 		}

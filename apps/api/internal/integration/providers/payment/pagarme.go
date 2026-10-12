@@ -311,7 +311,7 @@ func (p *Pagarme) CreateWebhookTestOrder(ctx context.Context, code string) (*Web
 		return nil, fmt.Errorf("creating test order: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return nil, fmt.Errorf("creating test order: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+		return nil, pagarmeResponseError("creating test order", resp.StatusCode, parsePagarmeError(body))
 	}
 	var outOrder pagarmeOrderResponse
 	if err := json.Unmarshal(body, &outOrder); err != nil {
@@ -425,7 +425,7 @@ func (p *Pagarme) CreateCheckout(ctx context.Context, order CheckoutOrder) (*Che
 		return nil, fmt.Errorf("creating checkout: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return nil, fmt.Errorf("create checkout failed: status %d, body: %s", resp.StatusCode, string(body))
+		return nil, pagarmeResponseError("creating checkout", resp.StatusCode, parsePagarmeError(body))
 	}
 
 	var pgResp pagarmeOrderResponse
@@ -659,7 +659,7 @@ func (p *Pagarme) RefundPayment(ctx context.Context, chargeID string, amount *in
 		return nil, fmt.Errorf("refunding charge: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return nil, fmt.Errorf("refund failed: status %d, body: %s", resp.StatusCode, string(body))
+		return nil, pagarmeResponseError("refunding charge", resp.StatusCode, parsePagarmeError(body))
 	}
 
 	var pgCharge struct {
@@ -692,7 +692,7 @@ func (p *Pagarme) resolveOrderCharge(ctx context.Context, orderID string) (strin
 		return "", fmt.Errorf("fetching order for refund: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return "", fmt.Errorf("fetching order for refund: status %d, body: %s", resp.StatusCode, string(body))
+		return "", pagarmeResponseError("fetching order for refund", resp.StatusCode, parsePagarmeError(body))
 	}
 	var pgOrder pagarmeOrderResponse
 	if err := json.Unmarshal(body, &pgOrder); err != nil {
@@ -962,15 +962,10 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	// independentemente do tipo de conta.
 	customerID, err := p.createCustomer(ctx, customer)
 	if err != nil {
-		logger.From(ctx, p.Logger).Error("pagarme create customer failed",
-			zap.String("cart_id", input.CartID), zap.Error(err))
 		return nil, fmt.Errorf("criando cliente no Pagar.me: %w", err)
 	}
 	cardID, err := p.createCardFromToken(ctx, customerID, input.Token, input.Customer.Address)
 	if err != nil {
-		logger.From(ctx, p.Logger).Error("pagarme create card failed",
-			zap.String("cart_id", input.CartID),
-			zap.String("customer_id", customerID), zap.Error(err))
 		return nil, fmt.Errorf("registrando cartão no Pagar.me: %w", err)
 	}
 
@@ -1040,11 +1035,11 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		errMsg := parsePagarmeError(body)
-		safe := redactCardPayload(payload)
-		logger.From(ctx, p.Logger).Error("pagarme card payment failed",
+		logger.From(ctx, p.Logger).Warn("pagarme card payment request failed",
 			zap.Int("status_code", resp.StatusCode),
-			zap.String("body", string(body)),
-			zap.Any("request_payload", safe),
+			zap.String("cart_id", input.CartID),
+			zap.Int64("amount_cents", input.TotalAmount),
+			zap.Int("installments", input.Installments),
 		)
 		// 5xx (and 429) means Pagar.me itself is unhappy — the buyer's card
 		// was not charged. Bubble it up as a transport error so the checkout
@@ -1053,7 +1048,7 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		// Genuine card declines come back as 2xx with status="failed" on the
 		// charge and are handled below.
 		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-			return nil, fmt.Errorf("pagar.me indisponível (HTTP %d): %s", resp.StatusCode, errMsg)
+			return nil, pagarmeResponseError("pagar.me indisponível", resp.StatusCode, errMsg)
 		}
 		return &CardPaymentResult{
 			Status:  PaymentRejected,
@@ -1084,7 +1079,6 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 
 	var (
 		statusDetail       string
-		acquirerName       string
 		acquirerMessage    string
 		acquirerReturnCode string
 		gatewayResp        map[string]any
@@ -1096,7 +1090,6 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		if charge.LastTransaction != nil {
 			lt := charge.LastTransaction
 			statusDetail = lt.Status
-			acquirerName = lt.AcquirerName
 			acquirerMessage = lt.AcquirerMessage
 			acquirerReturnCode = lt.AcquirerReturnCode
 			gatewayResp = lt.GatewayResponse
@@ -1159,31 +1152,12 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		zap.Int64("amount_cents", result.Amount),
 		zap.String("authorization_code", result.AuthorizationCode),
 		zap.Bool("has_paid_at", result.PaidAt != nil),
-		zap.String("acquirer_name", acquirerName),
-		zap.String("acquirer_message", acquirerMessage),
 		zap.String("acquirer_return_code", acquirerReturnCode),
-		zap.Any("gateway_response", gatewayResp),
-		zap.Any("antifraud_response", antifraudResp),
+		zap.Int("gateway_status_code", pagarmeGatewayStatusCode(gatewayResp)),
+		zap.Bool("antifraud_reproved", antifraudReproved(antifraudResp)),
 		zap.Bool("antifraud_disabled", antifraudDisabled),
 	}
-	// Log at Error level on rejection so the message + return code
-	// surface in error dashboards alongside the 5xx transport failures.
-	// Approved/pending payments stay at Info. On rejection also dump the
-	// (redacted) request payload + the raw body so we can correlate the
-	// dashboard's validation_error path against what we actually sent —
-	// the captured path is hit even when the gateway's gateway_response
-	// is HTTP 400 wrapped inside a 200, so this is the only place that
-	// surfaces the request body for that case.
-	if result.Status == PaymentRejected {
-		safe := redactCardPayload(payload)
-		logFields = append(logFields,
-			zap.Any("request_payload", safe),
-			zap.String("response_body", string(body)),
-		)
-		logger.From(ctx, p.Logger).Error("pagarme card payment captured", logFields...)
-	} else {
-		logger.From(ctx, p.Logger).Info("pagarme card payment captured", logFields...)
-	}
+	logCardPaymentOutcome(logger.From(ctx, p.Logger), "pagarme", result.Status, logFields)
 
 	return result, nil
 }
@@ -1198,7 +1172,7 @@ func (p *Pagarme) createCustomer(ctx context.Context, customer map[string]any) (
 		return "", fmt.Errorf("creating customer: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return "", fmt.Errorf("creating customer: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+		return "", pagarmeResponseError("creating customer", resp.StatusCode, parsePagarmeError(body))
 	}
 	var out struct {
 		ID string `json:"id"`
@@ -1239,7 +1213,7 @@ func (p *Pagarme) createCardFromToken(ctx context.Context, customerID, token str
 		return "", fmt.Errorf("creating card: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return "", fmt.Errorf("creating card: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+		return "", pagarmeResponseError("creating card", resp.StatusCode, parsePagarmeError(body))
 	}
 	var out struct {
 		ID string `json:"id"`
@@ -1313,11 +1287,10 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		errMsg := parsePagarmeError(body)
 		logger.From(ctx, p.Logger).Error("pagarme rejected pix generation",
 			zap.Int("status_code", resp.StatusCode),
-			zap.String("body", string(body)),
 			zap.String("cart_id", input.CartID),
 			zap.Int64("amount_cents", input.TotalAmount),
 		)
-		return nil, fmt.Errorf("%s", errMsg)
+		return nil, pagarmeResponseError("generating pix", resp.StatusCode, errMsg)
 	}
 
 	var pgResp struct {
@@ -1384,8 +1357,8 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		zap.String("expires_at", expiresAt.Format(time.RFC3339)),
 		zap.Int("qr_code_len", len(qrCode)),
 		zap.Int("qr_code_text_len", len(qrCodeText)),
-		zap.Any("gateway_response", gatewayResp),
-		zap.Any("antifraud_response", antifraudResp),
+		zap.Int("gateway_status_code", pagarmeGatewayStatusCode(gatewayResp)),
+		zap.Bool("antifraud_reproved", antifraudReproved(antifraudResp)),
 	}
 
 	// Pagar.me v5 retorna HTTP 200 mesmo quando o charge nasce failed
@@ -1397,7 +1370,6 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 	qrEmpty := qrCode == "" || qrCodeText == ""
 
 	if chargeFailed || qrEmpty {
-		logFields = append(logFields, zap.String("response_body", string(body)))
 		logger.From(ctx, p.Logger).Warn("pagarme pix generated with empty qr code", logFields...)
 	} else {
 		logger.From(ctx, p.Logger).Info("pagarme pix generated", logFields...)
@@ -1408,7 +1380,7 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		if msg == "" {
 			msg = "Pagar.me recusou a geração do PIX. Verifique se a conta tem PIX habilitado."
 		}
-		return nil, fmt.Errorf("%s", msg)
+		return nil, pagarmeResponseError("generating pix", resp.StatusCode, msg)
 	}
 
 	if qrEmpty {
@@ -1505,7 +1477,7 @@ func buildPagarmeLine1(street, number, neighborhood string) string {
 // error response. The shape is `{ "message": "...", "errors": { "field":
 // ["msg1", "msg2"], ... } }` — we surface the first field-level message
 // when present (more actionable than the generic top-level `message`),
-// falling back to `message` and finally to the raw body.
+// falling back to `message` and finally to a generic rejection.
 func parsePagarmeError(body []byte) string {
 	var parsed struct {
 		Message string              `json:"message"`
@@ -1521,42 +1493,7 @@ func parsePagarmeError(body []byte) string {
 			return parsed.Message
 		}
 	}
-	if len(body) > 0 {
-		return string(body)
-	}
 	return "pagamento rejeitado pela Pagar.me"
-}
-
-// redactCardPayload strips the card token from a payload before logging.
-// Pagar.me's card_token is single-use but leaking it in logs still risks
-// it being replayed before the gateway invalidates it.
-func redactCardPayload(payload map[string]any) map[string]any {
-	clone := make(map[string]any, len(payload))
-	for k, v := range payload {
-		clone[k] = v
-	}
-	if payments, ok := clone["payments"].([]map[string]any); ok && len(payments) > 0 {
-		safePayments := make([]map[string]any, 0, len(payments))
-		for _, pmt := range payments {
-			cp := make(map[string]any, len(pmt))
-			for k, v := range pmt {
-				cp[k] = v
-			}
-			if cc, ok := cp["credit_card"].(map[string]any); ok {
-				ccc := make(map[string]any, len(cc))
-				for k, v := range cc {
-					ccc[k] = v
-				}
-				if _, ok := ccc["card_token"]; ok {
-					ccc["card_token"] = "[redacted]"
-				}
-				cp["credit_card"] = ccc
-			}
-			safePayments = append(safePayments, cp)
-		}
-		clone["payments"] = safePayments
-	}
-	return clone
 }
 
 // GetPaymentMethods returns the available payment methods.
