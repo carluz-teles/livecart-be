@@ -10,6 +10,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ActiveCartErpItemBlock struct {
+	CartID          pgtype.UUID        `json:"cart_id"`
+	IntegrationID   pgtype.UUID        `json:"integration_id"`
+	ExternalOrderID string             `json:"external_order_id"`
+	BlockedAt       pgtype.Timestamptz `json:"blocked_at"`
+	RetryAt         pgtype.Timestamptz `json:"retry_at"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+}
+
 type ApiRateBudget struct {
 	AccountKey       string             `json:"account_key"`
 	NextAt           pgtype.Timestamptz `json:"next_at"`
@@ -173,6 +182,14 @@ type CartErpEditRequest struct {
 	ProductID        pgtype.UUID        `json:"product_id"`
 	RetainedQuantity int32              `json:"retained_quantity"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+type CartErpItemBlock struct {
+	CartID          pgtype.UUID        `json:"cart_id"`
+	IntegrationID   pgtype.UUID        `json:"integration_id"`
+	ExternalOrderID string             `json:"external_order_id"`
+	BlockedAt       pgtype.Timestamptz `json:"blocked_at"`
+	RetryAt         pgtype.Timestamptz `json:"retry_at"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -1075,15 +1092,17 @@ type Subscription struct {
 }
 
 type TinyCheckoutOperation struct {
-	ID            pgtype.UUID        `json:"id"`
-	CartID        pgtype.UUID        `json:"cart_id"`
-	IntegrationID pgtype.UUID        `json:"integration_id"`
-	SourceOrderID string             `json:"source_order_id"`
-	TargetOrderID pgtype.Text        `json:"target_order_id"`
-	Progress      json.RawMessage    `json:"progress"`
-	Completed     bool               `json:"completed"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID               pgtype.UUID        `json:"id"`
+	CartID           pgtype.UUID        `json:"cart_id"`
+	IntegrationID    pgtype.UUID        `json:"integration_id"`
+	SourceOrderID    string             `json:"source_order_id"`
+	TargetOrderID    pgtype.Text        `json:"target_order_id"`
+	Progress         json.RawMessage    `json:"progress"`
+	Completed        bool               `json:"completed"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	RecoveryAfter    pgtype.Timestamptz `json:"recovery_after"`
+	RecoveryAttempts int32              `json:"recovery_attempts"`
 }
 
 type User struct {

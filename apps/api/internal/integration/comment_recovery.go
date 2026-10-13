@@ -26,7 +26,9 @@ const commentRecoveryReady = `(w.erp_blocked_at IS NULL OR NOT EXISTS (
       AND (NOT erp_order_accepts_items(COALESCE(host.erp_order_status,c.erp_order_status))
         OR c.purchase_closed OR COALESCE(host.purchase_closed,false)
         OR COALESCE(host.payment_status,c.payment_status,'pending') IN ('paid','refunded')
-        OR COALESCE(host.status,c.status) IN ('cancelled','expired'))))`
+        OR COALESCE(host.status,c.status) IN ('cancelled','expired')
+        OR EXISTS(SELECT 1 FROM active_cart_erp_item_blocks b
+          WHERE b.cart_id=COALESCE(c.joined_to_cart_id,c.id) AND b.retry_at>now()))))`
 
 func (r *Repository) BeginCommentWork(ctx context.Context, commentID string, payload []byte) (string, bool, error) {
 	// Existing comments predate the recovery protocol and must never be replayed

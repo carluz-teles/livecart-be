@@ -37,6 +37,17 @@ func (s *Service) PrepareTinyPaidOrder(ctx context.Context, provider providers.E
 	if cart.StoreID != storeID {
 		return "", fmt.Errorf("checkout cart belongs to another store")
 	}
+	// Recheck under the finalisation lock: a refund or a binding change may
+	// have happened since a worker selected this checkout.
+	var eligible bool
+	if err := s.repo.pool.QueryRow(ctx, `SELECT payment_status='paid'
+        AND NOT payment_review_required AND status NOT IN ('cancelled','expired')
+        AND external_order_id=$2 FROM carts WHERE id=$1`, cartID, sourceID).Scan(&eligible); err != nil {
+		return "", fmt.Errorf("checking paid Tiny checkout eligibility: %w", err)
+	}
+	if !eligible {
+		return "", fmt.Errorf("tiny checkout requires a paid, reconciled cart with the current ERP binding")
+	}
 	checkout, err := s.loadTinyPaidCheckout(ctx, cartID, storeID)
 	if err != nil {
 		return "", err

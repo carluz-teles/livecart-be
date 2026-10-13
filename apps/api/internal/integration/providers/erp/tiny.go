@@ -1493,6 +1493,10 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (result *OrderRe
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		if order.Checkout != nil && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusConflict {
+			if isFormaEnvioRejection(body) {
+				return nil, &tinyCreateRejected{status: resp.StatusCode,
+					detail: providers.ErrOrderShippingConfiguration.Error(), cause: providers.ErrOrderShippingConfiguration}
+			}
 			return nil, &tinyCreateRejected{status: resp.StatusCode, detail: tinyErrorDetail(body)}
 		}
 		return nil, fmt.Errorf("create order failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))

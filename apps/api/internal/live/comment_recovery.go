@@ -9,10 +9,11 @@ import (
 
 	"go.uber.org/zap"
 	"livecart/apps/api/internal/erp"
+	"livecart/apps/api/internal/integration/providers"
 )
 
 var ErrCommentBusy = errors.New("comment processing is already in progress")
-var ErrCommentERPBlocked = errors.New("comment requires ERP reconciliation: order closed for new items")
+var ErrCommentERPBlocked = errors.New("comment requires ERP reconciliation: order blocked for new items")
 var ErrCommentERPPending = errors.New("comment is waiting for ERP confirmation")
 var ErrCommentAwaitingBinding = errors.New("comment is waiting for live session binding")
 
@@ -327,7 +328,7 @@ func (s *Service) applyPersistentCommentItem(ctx context.Context, writer comment
 		if err := s.stockReserver.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID,
 			product.ID, available, product.Price, input.Username); err != nil {
 			pending = true
-			blocked = errors.Is(err, erp.ErrPedidoFaturado)
+			blocked = errors.Is(err, erp.ErrPedidoFaturado) || errors.Is(err, providers.ErrOrderAccountsLaunched)
 			s.logger.Warn("comment ERP synchronization remains pending", zap.String("cart_id", result.CartID), zap.String("comment_id", input.CommentID), zap.String("product_id", product.ID), zap.Bool("requires_reconciliation", blocked), zap.Error(err))
 		} else if err := s.ingestRepo.ConfirmarItemNoERP(ctx, result.CartID, product.ID); err != nil {
 			return nil, err
