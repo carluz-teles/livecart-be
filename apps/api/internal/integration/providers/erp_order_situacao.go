@@ -169,3 +169,5 @@ func (s ERPOrderStatus) VoltouAViver() bool {
 var ErrOrderStockLaunched = errors.New("pedido bloqueado para edição: estoque lançado")
 
 var ErrOrderAccountsLaunched = errors.New("pedido bloqueado para edição: contas lançadas")
+
+var ErrOrderShippingConfiguration = errors.New("forma de envio indisponível no Tiny: habilite o cadastro da transportadora no ERP e tente novamente; o pagamento recebido foi preservado")

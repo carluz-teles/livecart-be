@@ -25,19 +25,24 @@ type Reader interface {
 }
 
 type Status struct {
-	Pending    bool   `json:"pending"`
-	Processing bool   `json:"processing"`
-	Blocked    bool   `json:"blocked"`
-	LastError  string `json:"lastError,omitempty"`
-	Attempts   int    `json:"attempts"`
+	Pending     bool   `json:"pending"`
+	Processing  bool   `json:"processing"`
+	Blocked     bool   `json:"blocked"`
+	LastError   string `json:"lastError,omitempty"`
+	Attempts    int    `json:"attempts"`
+	BlockReason string `json:"blockReason,omitempty"`
 }
 
 func Read(ctx context.Context, db Reader, cartID string) (*Status, error) {
 	var s Status
-	err := db.QueryRow(ctx, `SELECT revision>synced_revision,
-		COALESCE(lease_until>now(),false),COALESCE(last_error,''),attempts,blocked_at IS NOT NULL AND revision>synced_revision
-        FROM cart_erp_edits WHERE cart_id=(SELECT COALESCE(joined_to_cart_id,id) FROM carts WHERE id=$1)`, cartID).
-		Scan(&s.Pending, &s.Processing, &s.LastError, &s.Attempts, &s.Blocked)
+	err := db.QueryRow(ctx, `SELECT COALESCE(w.revision>w.synced_revision,false) OR b.cart_id IS NOT NULL,
+        COALESCE(w.lease_until>now(),false),COALESCE(w.last_error,''),COALESCE(w.attempts,0),
+        COALESCE(w.blocked_at IS NOT NULL AND w.revision>w.synced_revision,false) OR b.cart_id IS NOT NULL,
+        CASE WHEN b.cart_id IS NOT NULL THEN 'accounts_launched' ELSE '' END
+        FROM carts c LEFT JOIN cart_erp_edits w ON w.cart_id=COALESCE(c.joined_to_cart_id,c.id)
+        LEFT JOIN active_cart_erp_item_blocks b ON b.cart_id=COALESCE(c.joined_to_cart_id,c.id)
+        WHERE c.id=$1`, cartID).
+		Scan(&s.Pending, &s.Processing, &s.LastError, &s.Attempts, &s.Blocked, &s.BlockReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &s, nil
 	}

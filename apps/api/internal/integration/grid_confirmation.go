@@ -91,6 +91,8 @@ func (s *Service) RecoverPendingERPItems(ctx context.Context) {
             OR host.payment_status IN ('paid','refunded') OR host.status IN ('cancelled','expired')))
         AND NOT EXISTS (SELECT 1 FROM cart_erp_edits w WHERE w.cart_id=COALESCE(c.joined_to_cart_id,c.id) AND w.revision>w.synced_revision)
         AND (c.erp_items_retry_at IS NULL OR c.erp_items_retry_at<now())
+        AND NOT EXISTS(SELECT 1 FROM active_cart_erp_item_blocks b
+            WHERE b.cart_id=COALESCE(c.joined_to_cart_id,c.id) AND b.retry_at>now())
         AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id=c.id
             AND ci.erp_pending_since<now()-interval '30 seconds' AND ci.erp_confirmed_quantity IS NOT NULL)
         ORDER BY c.erp_items_retry_at NULLS FIRST,c.id LIMIT 10 FOR UPDATE SKIP LOCKED

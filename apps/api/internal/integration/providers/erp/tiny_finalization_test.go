@@ -76,6 +76,7 @@ type checkoutTestTiny struct {
 	shippingForms                                                                           []tinyCheckoutReference
 	writes                                                                                  int
 	rejectCreate                                                                            bool
+	rejectShipping                                                                          bool
 	mu                                                                                      sync.Mutex
 	orders                                                                                  map[string]*tinyCheckoutOrder
 	accounts                                                                                map[string][]tinyReceivable
@@ -188,6 +189,12 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 		return
 	}
 	if r.URL.Path == "/pedidos" && r.Method == http.MethodPost {
+		if f.rejectShipping {
+			f.rejectShipping = false
+			w.WriteHeader(http.StatusBadRequest)
+			write(map[string]any{"detalhes": []any{map[string]any{"campo": "transportador.formaEnvio.id", "mensagem": "Forma de envio não habilitada"}}})
+			return
+		}
 		if f.rejectCreate {
 			f.rejectCreate = false
 			w.Header().Set("Retry-After", "120")
@@ -203,6 +210,16 @@ func (f *checkoutTestTiny) serve(t *testing.T, w http.ResponseWriter, r *http.Re
 		body, _ := json.Marshal(data)
 		if err := json.Unmarshal(body, order); err != nil {
 			t.Fatal(err)
+		}
+		// Tiny's creation DTO uses enderecoNro; its GET DTO returns numero.
+		if order.Address != nil {
+			var delivery struct {
+				Number string `json:"enderecoNro"`
+			}
+			if err := json.Unmarshal(data["enderecoEntrega"], &delivery); err != nil {
+				t.Fatal(err)
+			}
+			order.Address.Number = delivery.Number
 		}
 		order.Customer = f.orders["1"].Customer
 		if f.contacts != nil {
@@ -661,5 +678,37 @@ func TestTinyFinalizationResumesReplacementUsingCustomerDeliveryAddress(t *testi
 				t.Fatal("completed retry repeated replacement or stock movements")
 			}
 		})
+	}
+}
+
+func TestTinyDisabledShippingKeepsReservationAndResumesSameOperation(t *testing.T) {
+	provider, fake, op := checkoutFinalizationFixture(t)
+	fake.rejectShipping = true
+	fake.shippingForms = []tinyCheckoutReference{{ID: 11, Name: "Loggi"}}
+	op.Order.Checkout.Address = &providers.ERPShippingAddress{Street: "Rua Teste", Number: "10", Neighborhood: "Centro", ZipCode: "01001000", City: "São Paulo", State: "SP"}
+	fake.orders["1"].Customer.Address = &tinyCheckoutAddress{Street: "Rua Teste", Number: "10", Neighborhood: "Centro", Zip: "01001000", City: "São Paulo", State: "SP"}
+	op.Order.Checkout.Shipping = &providers.ERPOrderShipping{Carrier: "Loggi", Service: "Loggi", CostCents: 1859}
+	op.Order.Shipping = op.Order.Checkout.Shipping
+	op.Order.ShippingAddress = op.Order.Checkout.Address
+	journal := &checkoutTestJournal{}
+	_, err := provider.FinalizePaidCheckout(t.Context(), op, journal)
+	if !errors.Is(err, providers.ErrOrderShippingConfiguration) {
+		t.Fatalf("missing actionable error: %v", err)
+	}
+	restored := journal.resume(t)
+	if restored.CreateStarted || restored.Completed || fake.posts != 0 || fake.cancels != 0 || fake.stockReversals != 0 {
+		t.Fatal("shipping rejection lost reservation or became ambiguous")
+	}
+	if _, err := provider.FinalizePaidCheckout(t.Context(), restored, journal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.FinalizePaidCheckout(t.Context(), restored, journal); err != nil {
+		t.Fatal(err)
+	}
+	if fake.posts != 1 || fake.cancels != 1 || journal.bound != "2" {
+		t.Fatal("recovery duplicated finalization")
+	}
+	if fake.orders["2"].Shipping.Form.ID != 11 {
+		t.Fatal("shipping mapping was silently removed")
 	}
 }

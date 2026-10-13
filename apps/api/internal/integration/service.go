@@ -5208,7 +5208,17 @@ func parseGraphTimestamp(v string) int64 {
 // call sites internos continuam chamando integration.Service. A troca dos call
 // sites para erp.Service direto é B2e.
 func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
-	return s.erpStock().ReserveStockInERP(ctx, storeID, cartID, eventID, productID, quantity, unitPrice, platformHandle)
+	orderID, integrationID, err := s.repo.checkERPItemAccountsBlock(ctx, cartID, storeID)
+	if err != nil {
+		return err
+	}
+	err = s.erpStock().ReserveStockInERP(ctx, storeID, cartID, eventID, productID, quantity, unitPrice, platformHandle)
+	if errors.Is(err, providers.ErrOrderAccountsLaunched) && orderID != "" && integrationID != "" {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		return errors.Join(err, s.repo.blockERPItemAccounts(cleanup, cartID, storeID, orderID, integrationID))
+	}
+	return err
 }
 
 // AdjustStockReservationDelta applies a quantity delta (positive or negative)
