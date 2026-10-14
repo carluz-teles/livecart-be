@@ -682,6 +682,17 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		return EventOutput{}, err
 	}
 
+	expirationMinutes, err := s.repo.GetEffectiveCartExpirationMinutes(ctx, event.ID)
+	if err != nil {
+		return EventOutput{}, fmt.Errorf("reading event closing deadline: %w", err)
+	}
+	// End uses the store setting when the request has no explicit override.
+	// The event's nullable SendOnLiveEnd is not the decision used by that action.
+	autoSendLinks, err := s.repo.GetStoreAutoSendSetting(ctx, storeID)
+	if err != nil {
+		return EventOutput{}, fmt.Errorf("reading event closing notification setting: %w", err)
+	}
+
 	if pct, err := s.repo.GetPixDiscountPercent(ctx, event.ID); err == nil {
 		event.PixDiscountPercent = pct
 	}
@@ -791,21 +802,23 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 	}
 
 	return EventOutput{
-		ID:                     event.ID,
-		StoreID:                event.StoreID,
-		Title:                  event.Title,
-		Status:                 event.Status,
-		TotalOrders:            event.TotalOrders,
-		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
-		CartExpirationMinutes:  event.CartExpirationMinutes,
-		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
-		SendOnLiveEnd:          event.SendOnLiveEnd,
-		PixDiscountPercent:     event.PixDiscountPercent,
-		ScheduledAt:            event.ScheduledAt,
-		EndsAt:                 event.EndsAt,
-		Description:            event.Description,
-		UpsellCount:            upsellCount,
-		Sessions:               sessions,
+		EffectiveCartExpirationMinutes: &expirationMinutes,
+		AutoSendCheckoutLinks:          &autoSendLinks,
+		ID:                             event.ID,
+		StoreID:                        event.StoreID,
+		Title:                          event.Title,
+		Status:                         event.Status,
+		TotalOrders:                    event.TotalOrders,
+		CloseCartOnEventEnd:            event.CloseCartOnEventEnd,
+		CartExpirationMinutes:          event.CartExpirationMinutes,
+		CartMaxQuantityPerItem:         event.CartMaxQuantityPerItem,
+		SendOnLiveEnd:                  event.SendOnLiveEnd,
+		PixDiscountPercent:             event.PixDiscountPercent,
+		ScheduledAt:                    event.ScheduledAt,
+		EndsAt:                         event.EndsAt,
+		Description:                    event.Description,
+		UpsellCount:                    upsellCount,
+		Sessions:                       sessions,
 
 		WaitlistNotifiedTTLMinutes: event.WaitlistNotifiedTTLMinutes,
 		CreatedAt:                  event.CreatedAt,
