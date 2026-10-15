@@ -26,6 +26,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/stats", h.GetStats)
 	g.Post("/", h.Create)
 	g.Post("/upload-image", h.UploadImage)
+	g.Post("/import/preview", h.PreviewImports)
+	g.Post("/import", h.ApplyImports)
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
 	g.Delete("/:id", h.Delete)

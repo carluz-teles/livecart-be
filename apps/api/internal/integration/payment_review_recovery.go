@@ -129,6 +129,7 @@ func (r *Repository) resolveVerifiedExternalPaymentReview(
 // RecoverERPFinancialReviews uses only Tiny's read-only receipt verifier. It
 // cannot create orders, rewrite installments, record money or emit order.paid.
 func (s *Service) RecoverERPFinancialReviews(ctx context.Context) {
+	s.RecoverTinyApprovals(ctx)
 	checks, err := s.repo.claimExternalPaymentReviews(ctx)
 	if err != nil {
 		s.logger.Error("listing external payment observations for verification", zap.Error(err))

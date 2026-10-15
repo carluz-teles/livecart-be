@@ -3625,6 +3625,76 @@ definitions:
       name:
         type: string
     type: object
+  apps_api_internal_product.ImportProductResult:
+    properties:
+      action:
+        type: string
+      errors:
+        items:
+          type: string
+        type: array
+      keyword:
+        type: string
+      name:
+        type: string
+      price:
+        type: integer
+      row:
+        type: integer
+      stock:
+        type: integer
+      warnings:
+        items:
+          type: string
+        type: array
+    type: object
+  apps_api_internal_product.ImportProductRow:
+    properties:
+      active:
+        type: boolean
+      barcode:
+        type: string
+      keyword:
+        type: string
+      name:
+        type: string
+      price:
+        type: integer
+      row:
+        type: integer
+      sku:
+        type: string
+      stock:
+        type: integer
+    type: object
+  apps_api_internal_product.ImportProductsRequest:
+    properties:
+      matchBy:
+        type: string
+      revision:
+        type: string
+      rows:
+        items:
+          $ref: '#/definitions/apps_api_internal_product.ImportProductRow'
+        type: array
+    type: object
+  apps_api_internal_product.ImportProductsResponse:
+    properties:
+      applied:
+        type: boolean
+      created:
+        type: integer
+      invalid:
+        type: integer
+      revision:
+        type: string
+      rows:
+        items:
+          $ref: '#/definitions/apps_api_internal_product.ImportProductResult'
+        type: array
+      updated:
+        type: integer
+    type: object
   apps_api_internal_product.ListProductsResponse:
     properties:
       data:
@@ -4306,6 +4376,8 @@ definitions:
     properties:
       attempts:
         type: integer
+      blockReason:
+        type: string
       blocked:
         type: boolean
       lastError:
@@ -10878,6 +10950,84 @@ paths:
       security:
       - BearerAuth: []
       summary: Detach image from product/variant
+      tags:
+      - products
+  /api/v1/stores/{storeId}/products/import:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Rows and revision returned by preview
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_product.ImportProductsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ImportProductsResponse'
+              type: object
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Atomically apply a previously reviewed product import
+      tags:
+      - products
+  /api/v1/stores/{storeId}/products/import/preview:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Mapped rows, at most 500
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_product.ImportProductsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ImportProductsResponse'
+              type: object
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Preview a product spreadsheet import without saving
       tags:
       - products
   /api/v1/stores/{storeId}/products/stats:

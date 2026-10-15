@@ -1,0 +1,1 @@
+DROP TABLE tiny_approval_reconciliations;

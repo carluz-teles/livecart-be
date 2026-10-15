@@ -15,9 +15,11 @@ type Code string
 func (c Code) String() string { return string(c) }
 
 const (
-	CodeErpProductInactive   Code = "ERP_PRODUCT_INACTIVE"
-	CodeProductAlreadyExists Code = "PRODUCT_ALREADY_EXISTS"
-	CodeProductGroupChanged  Code = "PRODUCT_GROUP_CHANGED"
+	CodeProductImportChanged  Code = "PRODUCT_IMPORT_CHANGED"
+	CodeERPObservationChanged Code = "ERP_OBSERVATION_CHANGED"
+	CodeErpProductInactive    Code = "ERP_PRODUCT_INACTIVE"
+	CodeProductAlreadyExists  Code = "PRODUCT_ALREADY_EXISTS"
+	CodeProductGroupChanged   Code = "PRODUCT_GROUP_CHANGED"
 
 	// --- generic (non-domain, client-safe) ---
 	CodeInternal         Code = "INTERNAL"          // repo/infra failures collapse to this on the wire

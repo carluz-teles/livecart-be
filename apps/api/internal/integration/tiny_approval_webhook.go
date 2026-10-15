@@ -10,6 +10,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
+	"livecart/apps/api/internal/cartedit"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -64,8 +65,23 @@ func (s *Service) ProcessTinyApproval(ctx context.Context, command TinyApprovalC
 	if err != nil {
 		return err
 	}
+	state, err := cartedit.Read(ctx, s.repo.pool, cartID)
+	if err != nil {
+		return err
+	}
+	deferred, err := s.repo.tinyApprovalDeferred(ctx, cartID, command)
+	if err != nil {
+		return err
+	}
+	if state.Pending || deferred {
+		return s.repo.deferTinyApproval(ctx, cartID, command)
+	}
 	ctx = logger.WithStore(ctx, command.StoreID, "")
 	if err := s.ERP().ReflectApprovedPayment(ctx, command.StoreID, cartID, command.OrderID); err != nil {
+		var domainErr *httpx.ServiceError
+		if errors.As(err, &domainErr) && domainErr.Reason == string(httpx.CodeCartERPSyncPending) {
+			return s.repo.deferTinyApproval(ctx, cartID, command)
+		}
 		return err
 	}
 	logger.From(ctx, s.logger).Info("Tiny approval processing completed", zap.String("cart_id", cartID), zap.String("external_order_id", command.OrderID))

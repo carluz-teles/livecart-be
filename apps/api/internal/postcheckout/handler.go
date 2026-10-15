@@ -170,6 +170,7 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 	// Product images are private-bucket keys; presign so the receipt page can
 	// render them. ERP/external URLs pass through unchanged.
 	if h.s3Client != nil {
+		resp.StoreLogoURL = h.s3Client.PresignImageURL(c.Context(), resp.StoreLogoURL)
 		for i := range resp.Items {
 			if resp.Items[i].ProductImageURL != "" {
 				resp.Items[i].ProductImageURL = h.s3Client.PresignImageURL(c.Context(), resp.Items[i].ProductImageURL)

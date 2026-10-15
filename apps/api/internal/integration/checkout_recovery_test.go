@@ -41,7 +41,7 @@ func TestAccountsBlockPreservesCommentAndResumesAfterCooldown(t *testing.T) {
 	if err := testRepo.FinishCommentWork(ctx, id, owner, live.ErrCommentERPBlocked); err != nil {
 		t.Fatal(err)
 	}
-	makeCommentRetryDue(t, id)
+	checkoutRecoveryExec(t, `UPDATE live_comment_work SET next_attempt_at=now() WHERE platform_comment_id=$1`, id)
 	if _, _, err := testRepo.BeginCommentWork(ctx, id, []byte(`{}`)); !errors.Is(err, live.ErrCommentBusy) {
 		t.Fatalf("financial block retried: %v", err)
 	}
