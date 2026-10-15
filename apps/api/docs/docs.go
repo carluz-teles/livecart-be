@@ -6251,7 +6251,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Returns a single live event by its UUID with all sessions",
+                "description": "Returns a single live event with all sessions, its effective cart deadline in minutes and the automatic link setting used when ending without overrides.",
                 "produces": [
                     "application/json"
                 ],
@@ -14409,6 +14409,9 @@ const docTemplate = `{
         "apps_api_internal_live.EventResponse": {
             "type": "object",
             "properties": {
+                "autoSendCheckoutLinks": {
+                    "type": "boolean"
+                },
                 "cartExpirationMinutes": {
                     "type": "integer"
                 },
@@ -14423,6 +14426,10 @@ const docTemplate = `{
                 },
                 "description": {
                     "type": "string"
+                },
+                "effectiveCartExpirationMinutes": {
+                    "description": "Resolved settings for ending the event without request overrides.",
+                    "type": "integer"
                 },
                 "endsAt": {
                     "type": "string"

@@ -23,6 +23,9 @@ import (
 type EventResponse struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+	// Resolved settings for ending the event without request overrides.
+	EffectiveCartExpirationMinutes *int  `json:"effectiveCartExpirationMinutes,omitempty"`
+	AutoSendCheckoutLinks          *bool `json:"autoSendCheckoutLinks,omitempty"`
 	// `type` SAIU do contrato (000122). A espécie da campanha está em
 	// `sessionTypes`, mais abaixo: uma campanha mista não tem tipo único, e
 	// devolver um rótulo derivado seria a mesma mentira em outro lugar.
@@ -96,16 +99,18 @@ type EndEventOutput struct {
 }
 
 type EventOutput struct {
-	ID                     string
-	StoreID                string
-	Title                  string
-	Status                 string
-	TotalOrders            int
-	CloseCartOnEventEnd    bool
-	CartExpirationMinutes  *int
-	CartMaxQuantityPerItem *int
-	SendOnLiveEnd          *bool
-	PixDiscountPercent     int
+	EffectiveCartExpirationMinutes *int
+	AutoSendCheckoutLinks          *bool
+	ID                             string
+	StoreID                        string
+	Title                          string
+	Status                         string
+	TotalOrders                    int
+	CloseCartOnEventEnd            bool
+	CartExpirationMinutes          *int
+	CartMaxQuantityPerItem         *int
+	SendOnLiveEnd                  *bool
+	PixDiscountPercent             int
 	// RN-10 — janela extra do promovido da fila, em minutos.
 	WaitlistNotifiedTTLMinutes int
 	// Scheduling

@@ -256,7 +256,7 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 
 // GetByID godoc
 // @Summary      Get live event by ID
-// @Description  Returns a single live event by its UUID with all sessions
+// @Description  Returns a single live event with all sessions, its effective cart deadline in minutes and the automatic link setting used when ending without overrides.
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -845,23 +845,25 @@ func toEventResponse(o EventOutput) EventResponse {
 	}
 
 	return EventResponse{
-		ID:                     o.ID,
-		Title:                  o.Title,
-		Status:                 EffectiveStatus(o.Status, o.ScheduledAt, o.EndsAt),
-		TotalOrders:            o.TotalOrders,
-		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,
-		CartExpirationMinutes:  o.CartExpirationMinutes,
-		CartMaxQuantityPerItem: o.CartMaxQuantityPerItem,
-		SendOnLiveEnd:          o.SendOnLiveEnd,
-		PixDiscountPercent:     o.PixDiscountPercent,
-		ScheduledAt:            o.ScheduledAt,
-		EndsAt:                 o.EndsAt,
-		Description:            o.Description,
-		UpsellCount:            o.UpsellCount,
-		Sessions:               sessions,
-		SessionTypes:           distinctSessionTypes(o.Sessions),
-		CreatedAt:              o.CreatedAt,
-		UpdatedAt:              o.UpdatedAt,
+		EffectiveCartExpirationMinutes: o.EffectiveCartExpirationMinutes,
+		AutoSendCheckoutLinks:          o.AutoSendCheckoutLinks,
+		ID:                             o.ID,
+		Title:                          o.Title,
+		Status:                         EffectiveStatus(o.Status, o.ScheduledAt, o.EndsAt),
+		TotalOrders:                    o.TotalOrders,
+		CloseCartOnEventEnd:            o.CloseCartOnEventEnd,
+		CartExpirationMinutes:          o.CartExpirationMinutes,
+		CartMaxQuantityPerItem:         o.CartMaxQuantityPerItem,
+		SendOnLiveEnd:                  o.SendOnLiveEnd,
+		PixDiscountPercent:             o.PixDiscountPercent,
+		ScheduledAt:                    o.ScheduledAt,
+		EndsAt:                         o.EndsAt,
+		Description:                    o.Description,
+		UpsellCount:                    o.UpsellCount,
+		Sessions:                       sessions,
+		SessionTypes:                   distinctSessionTypes(o.Sessions),
+		CreatedAt:                      o.CreatedAt,
+		UpdatedAt:                      o.UpdatedAt,
 
 		WaitlistNotifiedTtlMinutes: o.WaitlistNotifiedTTLMinutes,
 	}
