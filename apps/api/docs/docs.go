@@ -10420,6 +10420,138 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/v1/stores/{storeId}/products/import": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "products"
+                ],
+                "summary": "Atomically apply a previously reviewed product import",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Rows and revision returned by preview",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_product.ImportProductsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_product.ImportProductsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/products/import/preview": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "products"
+                ],
+                "summary": "Preview a product spreadsheet import without saving",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Mapped rows, at most 500",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_product.ImportProductsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_product.ImportProductsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/stores/{storeId}/products/stats": {
             "get": {
                 "security": [
@@ -16614,6 +16746,113 @@ const docTemplate = `{
                 }
             }
         },
+        "apps_api_internal_product.ImportProductResult": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string"
+                },
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "keyword": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "price": {
+                    "type": "integer"
+                },
+                "row": {
+                    "type": "integer"
+                },
+                "stock": {
+                    "type": "integer"
+                },
+                "warnings": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "apps_api_internal_product.ImportProductRow": {
+            "type": "object",
+            "properties": {
+                "active": {
+                    "type": "boolean"
+                },
+                "barcode": {
+                    "type": "string"
+                },
+                "keyword": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "price": {
+                    "type": "integer"
+                },
+                "row": {
+                    "type": "integer"
+                },
+                "sku": {
+                    "type": "string"
+                },
+                "stock": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_product.ImportProductsRequest": {
+            "type": "object",
+            "properties": {
+                "matchBy": {
+                    "type": "string"
+                },
+                "revision": {
+                    "type": "string"
+                },
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_product.ImportProductRow"
+                    }
+                }
+            }
+        },
+        "apps_api_internal_product.ImportProductsResponse": {
+            "type": "object",
+            "properties": {
+                "applied": {
+                    "type": "boolean"
+                },
+                "created": {
+                    "type": "integer"
+                },
+                "invalid": {
+                    "type": "integer"
+                },
+                "revision": {
+                    "type": "string"
+                },
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_product.ImportProductResult"
+                    }
+                },
+                "updated": {
+                    "type": "integer"
+                }
+            }
+        },
         "apps_api_internal_product.ListProductsResponse": {
             "type": "object",
             "properties": {
@@ -17603,6 +17842,9 @@ const docTemplate = `{
             "properties": {
                 "attempts": {
                     "type": "integer"
+                },
+                "blockReason": {
+                    "type": "string"
                 },
                 "blocked": {
                     "type": "boolean"
