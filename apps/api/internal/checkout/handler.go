@@ -601,9 +601,8 @@ func toCheckoutShippingAddress(a *CartShippingAddressInfo) *CheckoutShippingAddr
 }
 
 // toCheckoutPayment projects the persisted payment metadata onto the public
-// response shape. Method is normalized to the public values "pix" | "card";
-// unknown raw values fall back to "card" so the receipt page always has a
-// usable label. Returns nil when there is no method recorded at all
+// response shape, preserving non-card methods recorded by ERP confirmations.
+// Unknown methods use a generic receipt label. Returns nil when no method is recorded
 // (e.g. paid carts from before payment_method was tracked).
 //
 // paymentID is the gateway transaction identifier — the cart row stores it
@@ -625,6 +624,8 @@ func toCheckoutPayment(p *CartPaymentInfo, paidAt *time.Time, paymentID *string)
 	}
 	if method == "card" {
 		info.Installments = p.Installments
+	}
+	if method == "card" || method == "debit_card" {
 		info.CardBrand = p.CardBrand
 		info.LastFourDigits = p.LastFourDigits
 		info.AuthorizationCode = p.AuthorizationCode
@@ -632,19 +633,18 @@ func toCheckoutPayment(p *CartPaymentInfo, paidAt *time.Time, paymentID *string)
 	return info
 }
 
-// normalizePaymentMethod maps the persisted carts.payment_method value (set
-// by the providers — "pix", "credit_card", "debit_card", "boleto", ...) to
-// the public-facing "pix" | "card" enum used by the comprovante page.
+// normalizePaymentMethod keeps the legacy "card" alias for credit cards without
+// presenting manual, boleto, debit or unrecognized payments as credit cards.
 // Returns "" when there's nothing recorded so the caller can omit the block.
 func normalizePaymentMethod(raw string) string {
-	switch raw {
-	case "":
-		return ""
-	case "pix":
-		return "pix"
-	default:
-		// credit_card / debit_card / and any future card-like value.
+	method := strings.ToLower(strings.TrimSpace(raw))
+	switch method {
+	case "", "pix", "debit_card", "boleto", "manual", "erp_manual":
+		return method
+	case "card", "credit_card":
 		return "card"
+	default:
+		return "unknown"
 	}
 }
 

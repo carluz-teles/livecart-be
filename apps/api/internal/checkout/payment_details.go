@@ -36,10 +36,8 @@ type CartShippingAddressInfo struct {
 }
 
 // CartPaymentInfo is the payment confirmation snapshot for a paid cart.
-// Method is the normalized public-facing value ("pix" or "card"); the
-// card-specific fields are only populated for card payments through the
-// transparent checkout flow (CardBrand/LastFourDigits/Installments/
-// AuthorizationCode).
+// RawMethod and card fields retain their persisted values. The public response
+// mapper normalizes the method and omits card fields for non-card payments.
 type CartPaymentInfo struct {
 	RawMethod         string // raw value from carts.payment_method (pix, credit_card, ...)
 	CardBrand         string
