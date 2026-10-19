@@ -8,6 +8,9 @@ import (
 	"livecart/apps/api/internal/integration/providers"
 )
 
+// Includes credential resolution, provider quota waits and all lookup batches.
+const erpHealthCheckTimeout = 30 * time.Second
+
 // =============================================================================
 // ERP HEALTH CHECK — moved from internal/integration (Bloco B2d). integration
 // keeps a one-liner delegation; the HTTP handler call site migrates in B2e.
@@ -30,6 +33,9 @@ type ERPHealthCheckResponse struct {
 // underlying ERP provider doesn't implement the optional ERPHealthChecker
 // capability, so the FE can hide the section instead of erroring.
 func (s *Service) RunERPHealthCheck(ctx context.Context, integrationID, storeID string) (*ERPHealthCheckResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, erpHealthCheckTimeout)
+	defer cancel()
+
 	erpProvider, err := s.collab.ResolveERPProviderByID(ctx, integrationID, storeID)
 	if err != nil {
 		return nil, err

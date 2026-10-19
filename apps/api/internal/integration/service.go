@@ -42,6 +42,9 @@ import (
 	"livecart/apps/api/lib/storage"
 )
 
+// Credential probes run before an integration row exists.
+const probeIntegrationID = "probe"
+
 // ProductSyncer syncs products from external ERP systems into the local database.
 type ProductSyncer interface {
 	HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error)
@@ -1894,7 +1897,7 @@ func (s *Service) ConnectSmartEnvios(ctx context.Context, input ConnectSmartEnvi
 	// Validate the token with a real call so we never persist garbage.
 	creds := &providers.Credentials{AccessToken: token}
 	probe, err := s.factory.CreateShippingProvider(providers.ProviderConfig{
-		IntegrationID: "probe",
+		IntegrationID: probeIntegrationID,
 		StoreID:       input.StoreID,
 		Type:          providers.ProviderTypeShipping,
 		Name:          providers.ProviderSmartEnvios,
@@ -2041,7 +2044,7 @@ func (s *Service) ConnectPagarme(ctx context.Context, input ConnectPagarmeInput)
 	}
 
 	probe, err := s.factory.CreatePaymentProvider(providers.ProviderConfig{
-		IntegrationID: "probe",
+		IntegrationID: probeIntegrationID,
 		StoreID:       input.StoreID,
 		Type:          providers.ProviderTypePayment,
 		Name:          providers.ProviderPagarme,
@@ -6448,7 +6451,7 @@ func (s *Service) handleProviderError(ctx context.Context, integrationID string,
 // e é um UPDATE condicional que não acerta linha nenhuma quando já está
 // saudável — barato o bastante para o caminho quente.
 func (s *Service) noteProviderSuccess(ctx context.Context, integrationID string) {
-	if integrationID == "" {
+	if integrationID == "" || integrationID == probeIntegrationID {
 		return
 	}
 	healed, err := s.repo.HealFromError(ctx, integrationID)
