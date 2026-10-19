@@ -15,6 +15,43 @@ import (
 	"livecart/apps/api/lib/logger"
 )
 
+func TestIntegrationProbeLogsWithoutHealingTransientID(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		integrationID string
+		status        string
+		wantHealWarn  int
+		operationLog  string
+	}{
+		{"successful probe", "probe", "success", 0, "integration operation completed"},
+		{"rejected probe remains visible", "probe", "error", 0, "integration operation failed"},
+		{"no persisted integration", "", "success", 0, "integration operation completed"},
+		{"unexpected malformed ID remains visible", "invalid-id", "success", 1, "integration operation completed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, entries := observer.New(zap.DebugLevel)
+			// No database: transient IDs have no row to heal. The malformed-ID
+			// control still reaches repository validation and reports the defect.
+			svc := &Service{repo: &Repository{}, logger: zap.New(core)}
+			err := svc.LogIntegrationOperation(t.Context(), providers.IntegrationLog{
+				IntegrationID: tc.integrationID,
+				Status:        tc.status,
+				Direction:     "outbound",
+				Method:        http.MethodGet,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := entries.FilterMessage("failed to heal integration status after success").Len(); got != tc.wantHealWarn {
+				t.Fatalf("healing warnings = %d, want %d", got, tc.wantHealWarn)
+			}
+			if got := entries.FilterMessage(tc.operationLog).Len(); got != 1 {
+				t.Fatalf("operation log count = %d, want 1", got)
+			}
+		})
+	}
+}
+
 func TestIntegrationOperationLogsMetadataWithoutPayloads(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

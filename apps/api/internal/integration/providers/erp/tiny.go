@@ -3106,13 +3106,11 @@ func max(a, b int) int {
 // parcela falls into "Conta a Receber" or the shipment uses Tiny's default
 // carrier instead of the one the customer chose at checkout.
 //
-// All Tiny lookups run in parallel via errgroup — sequentially this took
-// ~1.5s per audit (7 round trips × ~200ms each), and the FE banner stays
-// invisible until the result lands. Going concurrent collapses the wall
-// time to roughly the slowest single lookup. Best-effort: any item whose
-// lookup errors out is reported as missing rather than failing the whole
-// check, so the merchant always sees the rest.
+// Lookups run with bounded concurrency and share the caller's deadline,
+// including quota waits. A failed lookup is unknown, preserving the other
+// results without claiming that an unverified cadastro is missing.
 func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult, error) {
+	start := time.Now()
 	type job struct {
 		category     providers.ERPHealthCheckCategory
 		expectedName string
@@ -3196,17 +3194,13 @@ func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult
 			id, err := j.run(gctx)
 			items[i] = healthCheckItem(j.category, j.expectedName, id, err, j.description, j.panelPath)
 			// Lookup-level failures are reported on the item itself
-			// (status=missing). Returning nil keeps the rest of the
+			// (status=unknown). Returning nil keeps the rest of the
 			// audit running even when one endpoint blips.
 			return nil
 		})
 	}
 
-	start := time.Now()
 	if err := g.Wait(); err != nil {
-		// errgroup returns the first non-nil error from a goroutine —
-		// because each Go func above returns nil unconditionally, this
-		// path is only reached if the parent context is cancelled.
 		return nil, fmt.Errorf("running tiny health check: %w", err)
 	}
 
