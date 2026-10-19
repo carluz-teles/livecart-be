@@ -19,12 +19,14 @@ import (
 // returns a canned error so send()'s failure path can be exercised without a
 // real HTTP call.
 type fakeSender struct {
-	sent []any
-	err  error
+	calls int
+	sent  []any
+	err   error
 }
 
-func (f *fakeSender) SendEvent(_ context.Context, event any) error {
-	f.sent = append(f.sent, event)
+func (f *fakeSender) SendEvents(_ context.Context, events []any) error {
+	f.calls++
+	f.sent = append(f.sent, events...)
 	return f.err
 }
 
@@ -797,5 +799,17 @@ func assertSingleSent[T any](t *testing.T, sender *fakeSender, want T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("payload = %+v, want %+v", got, want)
+	}
+}
+
+func TestListenersPaidSaleUsesOneBatch(t *testing.T) {
+	sender := &fakeSender{}
+	listeners, _ := newTestListeners(sender, true)
+	items := make([]sqlc.ListCartItemsRow, 26)
+	enricher, _ := newTestEnricher(&fakeEnrichQueries{items: items})
+	listeners.SetEnricher(enricher)
+	listeners.OnCartPaid(t.Context(), envelopeWithPayload(t, events.CartPaid, map[string]string{"cart_id": testCartID}))
+	if sender.calls != 1 || len(sender.sent) != 28 {
+		t.Fatalf("requests=%d events=%d", sender.calls, len(sender.sent))
 	}
 }

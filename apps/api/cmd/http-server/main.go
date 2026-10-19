@@ -1795,6 +1795,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	}
 	startRecovery("comment-recovery", liveSvc.RecoverPendingComments)
 	if integrationSvc != nil {
+		startRecovery("cart-invoice-recovery", integrationSvc.RecoverCartInvoices, time.Minute)
 		startRecovery("cart-expiry-recovery", integrationSvc.RecoverRecentCartExpiries, time.Minute)
 		startRecovery("erp-item-recovery", integrationSvc.RecoverPendingERPItems)
 		startRecovery("tiny-paid-checkout-recovery", integrationSvc.RecoverTinyPaidCheckouts, time.Minute)

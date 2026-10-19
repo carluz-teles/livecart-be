@@ -1963,30 +1963,6 @@ func (r *Repository) GetCartERPInvoice(ctx context.Context, cartID string) (*Car
 // keeps compiling unchanged.
 type UpsertCartERPInvoiceParams = erp.UpsertCartERPInvoiceParams
 
-// UpsertCartERPInvoice persists the NFe pulled from the ERP onto the Order's
-// payment row (authoritative since Fatia 11b, resolved from cart_id). Idempotent
-// — both the webhook handler and the manual sync endpoint go through it so
-// re-running the same fetch never produces a different state. Returns the number
-// of rows written: 0 means no Order exists for the cart yet (benign skip — NF is
-// always post-confirmation, so the caller logs and moves on).
-func (r *Repository) UpsertCartERPInvoice(ctx context.Context, p UpsertCartERPInvoiceParams) (int64, error) {
-	id, err := parseUUID(p.CartID)
-	if err != nil {
-		return 0, err
-	}
-	var emitted pgtype.Timestamptz
-	if p.EmittedAt != nil && !p.EmittedAt.IsZero() {
-		emitted = pgtype.Timestamptz{Time: *p.EmittedAt, Valid: true}
-	}
-	return r.queries.UpsertOrderERPInvoice(ctx, sqlc.UpsertOrderERPInvoiceParams{
-		CartID:        id,
-		InvoiceID:     pgtype.Text{String: p.InvoiceID, Valid: p.InvoiceID != ""},
-		InvoiceKey:    pgtype.Text{String: p.InvoiceKey, Valid: p.InvoiceKey != ""},
-		InvoiceStatus: pgtype.Text{String: p.InvoiceStatus, Valid: p.InvoiceStatus != ""},
-		EmittedAt:     emitted,
-	})
-}
-
 // FindCartByExternalOrderID locates the cart linked to an ERP pedido id for a
 // given store. Used by the Tiny webhook handler — Tiny only sends the pedido
 // id on nota_fiscal events, so we have to bridge back to the LiveCart cart

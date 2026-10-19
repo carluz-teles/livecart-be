@@ -21,7 +21,8 @@ func (r *Repository) RecordERPFinancialReview(
         ON CONFLICT(cart_id) DO UPDATE SET external_order_id=EXCLUDED.external_order_id,
           reason=EXCLUDED.reason,paid_cents=EXCLUDED.paid_cents,order_total_cents=EXCLUDED.order_total_cents,
           detected_at=CASE WHEN erp_payment_reviews.resolved_at IS NOT NULL THEN now()
-            ELSE erp_payment_reviews.detected_at END,checked_at=EXCLUDED.checked_at,resolved_at=NULL
+            ELSE erp_payment_reviews.detected_at END,checked_at=EXCLUDED.checked_at,resolved_at=NULL,
+          check_attempts=0,next_check_at=now()+interval '15 minutes'
           WHERE erp_payment_reviews.checked_at<=EXCLUDED.checked_at`,
 		cartID, storeID, review.ExternalOrderID, review.Reason, review.PaidCents, review.OrderTotalCents, review.CheckedAt)
 	if err != nil {

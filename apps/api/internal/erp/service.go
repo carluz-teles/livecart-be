@@ -130,8 +130,8 @@ type ERPRepository interface {
 	// (which stays integration-owned to avoid the import cycle).
 	GetCartInvoiceAnchor(ctx context.Context, cartID string) (storeID, externalOrderID string, err error)
 	// UpsertCartERPInvoice persists the NFe onto the Order's payment row (resolved
-	// from cart_id). Idempotent; returns 0 rows when no Order exists yet (benign
-	// skip — the NF is always post-confirmation).
+	// from cart_id) and durably retains it when no Order exists yet. Returns the
+	// number of Order payment rows updated; zero means deferred materialisation.
 	UpsertCartERPInvoice(ctx context.Context, params UpsertCartERPInvoiceParams) (int64, error)
 	// FindCartByExternalOrderID locates the cart linked to an ERP pedido id for a
 	// store — the bridge the Tiny nota_fiscal webhook needs (Tiny only sends the

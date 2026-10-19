@@ -46,6 +46,8 @@ type externalPaymentReviewCheck struct {
 
 // One sale per store per batch prevents a busy merchant from consuming all of
 // the batch budget. SKIP LOCKED and next_check_at also coordinate API replicas.
+// Repeated observations back off 1/2/4/8/16/24h; a newer webhook resets this
+// schedule without clearing the review or changing any recorded payment.
 func (r *Repository) claimExternalPaymentReviews(ctx context.Context) ([]externalPaymentReviewCheck, error) {
 	rows, err := r.pool.Query(ctx, `WITH candidates AS MATERIALIZED (
  SELECT r.cart_id,c.store_id,i.id AS integration_id,r.next_check_at,
@@ -59,7 +61,9 @@ func (r *Repository) claimExternalPaymentReviews(ctx context.Context) ([]externa
  WHERE k.position=1 AND r.resolved_at IS NULL AND r.next_check_at<=now()
  ORDER BY k.next_check_at,r.cart_id LIMIT 5 FOR UPDATE OF r SKIP LOCKED
  ), claimed AS (
- UPDATE erp_payment_reviews r SET next_check_at=now()+interval '1 hour'
+ UPDATE erp_payment_reviews r
+ SET next_check_at=now()+make_interval(hours => LEAST(24, 1 << LEAST(r.check_attempts,5))),
+     check_attempts=LEAST(6,r.check_attempts+1)
  FROM picked p WHERE r.cart_id=p.cart_id
  RETURNING r.cart_id,r.external_order_id,r.checked_at,p.integration_id
  ) SELECT q.cart_id::text,c.store_id::text,q.integration_id::text,q.external_order_id,

@@ -200,6 +200,19 @@ type CartInitialItem struct {
 	UnitPrice int64       `json:"unit_price"`
 }
 
+type CartInvoiceObservation struct {
+	CartID          pgtype.UUID        `json:"cart_id"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+	IntegrationID   pgtype.UUID        `json:"integration_id"`
+	ExternalOrderID string             `json:"external_order_id"`
+	InvoiceID       string             `json:"invoice_id"`
+	InvoiceKey      string             `json:"invoice_key"`
+	InvoiceStatus   string             `json:"invoice_status"`
+	EmittedAt       pgtype.Timestamptz `json:"emitted_at"`
+	ObservedAt      pgtype.Timestamptz `json:"observed_at"`
+	AppliedAt       pgtype.Timestamptz `json:"applied_at"`
+}
+
 type CartItem struct {
 	ID                 pgtype.UUID `json:"id"`
 	CartID             pgtype.UUID `json:"cart_id"`
@@ -358,6 +371,7 @@ type ErpPaymentReview struct {
 	CheckedAt       pgtype.Timestamptz `json:"checked_at"`
 	ResolvedAt      pgtype.Timestamptz `json:"resolved_at"`
 	NextCheckAt     pgtype.Timestamptz `json:"next_check_at"`
+	CheckAttempts   int32              `json:"check_attempts"`
 }
 
 type ErpResyncJob struct {
@@ -1089,6 +1103,17 @@ type Subscription struct {
 	ManualOverride       bool               `json:"manual_override"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 	BillingInterval      string             `json:"billing_interval"`
+}
+
+type TinyApprovalReconciliation struct {
+	CartID          pgtype.UUID        `json:"cart_id"`
+	IntegrationID   pgtype.UUID        `json:"integration_id"`
+	ExternalOrderID string             `json:"external_order_id"`
+	Reason          string             `json:"reason"`
+	DetectedAt      pgtype.Timestamptz `json:"detected_at"`
+	CheckedAt       pgtype.Timestamptz `json:"checked_at"`
+	NextCheckAt     pgtype.Timestamptz `json:"next_check_at"`
+	ResolvedAt      pgtype.Timestamptz `json:"resolved_at"`
 }
 
 type TinyCheckoutOperation struct {

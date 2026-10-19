@@ -630,8 +630,8 @@ type UpsertOrderERPInvoiceParams struct {
 }
 
 // NF autoritativa em order_payments. emitted_at é COALESCEd (só carimba a
-// primeira emissão autorizada). :execrows para o caller logar o skip benigno
-// quando não há Order para o external_order_id (NF é sempre pós-confirmação).
+// primeira emissão autorizada). :execrows permite ao caller manter a observação
+// pendente quando a Order ainda não foi materializada.
 func (q *Queries) UpsertOrderERPInvoice(ctx context.Context, arg UpsertOrderERPInvoiceParams) (int64, error) {
 	result, err := q.db.Exec(ctx, upsertOrderERPInvoice,
 		arg.InvoiceID,

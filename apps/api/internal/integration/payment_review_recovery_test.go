@@ -279,3 +279,38 @@ func TestPaymentReviewRecoveryWaitsForConcurrentCartMutation(t *testing.T) {
 		t.Fatalf("concurrent change lost financial alert: %+v %v", review, err)
 	}
 }
+
+func TestPaymentReviewBackoffPersistsAndNewObservationRearms(t *testing.T) {
+	requireDB(t)
+	fx := seedRecoverablePaymentReview(t)
+	before := paymentLedgerSnapshot(t, fx.cartID)
+	for _, hours := range []int{1, 2, 4, 8, 16, 24, 24} {
+		approvalExec(t, `UPDATE erp_payment_reviews SET next_check_at=now()-interval '1 minute' WHERE cart_id=$1`, fx.cartID)
+		checks, err := testRepo.claimExternalPaymentReviews(t.Context())
+		if err != nil || len(checks) != 1 || checks[0].CartID != fx.cartID {
+			t.Fatalf("claim=%v err=%v", checks, err)
+		}
+		var scheduled bool
+		if err := testPool.QueryRow(t.Context(), `SELECT next_check_at BETWEEN now()+make_interval(hours=>$2)-interval '1 minute'
+   AND now()+make_interval(hours=>$2)+interval '1 minute' FROM erp_payment_reviews WHERE cart_id=$1`, fx.cartID, hours).Scan(&scheduled); err != nil || !scheduled {
+			t.Fatalf("expected %dh backoff: scheduled=%v err=%v", hours, scheduled, err)
+		}
+	}
+	paid, total := int64(1000), int64(1000)
+	review := erp.PaymentReview{ExternalOrderID: "recorded-order", Reason: "installments_unverified", PaidCents: &paid, OrderTotalCents: &total, CheckedAt: time.Now()}
+	if err := testRepo.RecordERPFinancialReview(t.Context(), fx.cartID, fx.storeID, review); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	var rearmed bool
+	if err := testPool.QueryRow(t.Context(), `SELECT check_attempts,next_check_at<=now()+interval '16 minutes' FROM erp_payment_reviews WHERE cart_id=$1`, fx.cartID).Scan(&attempts, &rearmed); err != nil || attempts != 0 || !rearmed {
+		t.Fatalf("rearm: attempts=%d due=%v err=%v", attempts, rearmed, err)
+	}
+	review.CheckedAt = time.Now().Add(-time.Hour)
+	if err := testRepo.RecordERPFinancialReview(t.Context(), fx.cartID, fx.storeID, review); !errors.Is(err, erp.ErrCartBusy) {
+		t.Fatalf("outdated observation accepted: %v", err)
+	}
+	if after := paymentLedgerSnapshot(t, fx.cartID); after != before {
+		t.Fatal("backoff modified commercial state")
+	}
+}

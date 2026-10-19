@@ -23,7 +23,7 @@ type slowSender struct {
 	calls int
 }
 
-func (s *slowSender) SendEvent(ctx context.Context, _ any) error {
+func (s *slowSender) SendEvents(ctx context.Context, _ []any) error {
 	select {
 	case <-time.After(s.delay):
 	case <-ctx.Done():
