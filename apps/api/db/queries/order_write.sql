@@ -176,8 +176,8 @@ WHERE o.cart_id = $1;
 
 -- name: UpsertOrderERPInvoice :execrows
 -- NF autoritativa em order_payments. emitted_at é COALESCEd (só carimba a
--- primeira emissão autorizada). :execrows para o caller logar o skip benigno
--- quando não há Order para o external_order_id (NF é sempre pós-confirmação).
+-- primeira emissão autorizada). :execrows permite ao caller manter a observação
+-- pendente quando a Order ainda não foi materializada.
 UPDATE order_payments op
 SET invoice_id         = sqlc.narg('invoice_id'),
     invoice_key        = sqlc.narg('invoice_key'),

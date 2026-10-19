@@ -237,7 +237,7 @@ func TestService_InvoiceWebhookClassifiesOnlyVerifiedLegacy(t *testing.T) {
 		wantResult bool
 	}{
 		{name: "verified history skips all provider and persistence operations", legacy: true, wantInfo: 1},
-		{name: "current missing order remains actionable", wantFetch: 1, wantWarn: 1, wantResult: true},
+		{name: "current missing order is retained", wantFetch: 1, wantInfo: 1, wantResult: true},
 		{name: "failed classification is retriable and never treated as history", legacy: true, err: classificationErr},
 	}
 	for _, tc := range cases {
@@ -282,7 +282,7 @@ func TestService_ManualInvoiceSyncDoesNotUseLegacyExemption(t *testing.T) {
 				mockRepo: &mockRepo{anchorStoreID: "store", anchorExtOrder: "order"},
 				legacy:   true,
 			}
-			core, observed := observer.New(zap.WarnLevel)
+			core, observed := observer.New(zap.InfoLevel)
 			svc := NewService(repo, &mockCollab{provider: provider}, zap.New(core))
 			err := svc.SyncCartInvoiceFromERP(t.Context(), storeID, "cart", "invoice")
 			if repo.checks != 0 {
@@ -295,7 +295,7 @@ func TestService_ManualInvoiceSyncDoesNotUseLegacyExemption(t *testing.T) {
 				return
 			}
 			if err != nil || provider.byID != 1 || repo.upserts != 1 || observed.Len() != 1 {
-				t.Fatalf("explicit sync or missing-order warning changed: err=%v logs=%+v", err, observed.All())
+				t.Fatalf("explicit sync or retained-invoice diagnostic changed: err=%v logs=%+v", err, observed.All())
 			}
 		})
 	}

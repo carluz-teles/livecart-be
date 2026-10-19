@@ -15,7 +15,7 @@ import (
 // New Relic would have received, without spinning up an httptest server —
 // NRClient's HTTP/retry behaviour is tested separately in client_test.go.
 type eventSender interface {
-	SendEvent(ctx context.Context, event any) error
+	SendEvents(ctx context.Context, events []any) error
 }
 
 // Listeners routes canonical LiveCart facts to their New Relic custom event.
@@ -179,7 +179,7 @@ func (l *Listeners) OnCartPaid(ctx context.Context, env events.Envelope) {
 			cart.CheckoutDurationMs = snap.CheckoutDurationMs
 		}
 	}
-	l.send(ctx, env, cart)
+	batch := []any{cart}
 
 	payment := NewLiveCommercePaymentPayload(l.cfg.Environment)
 	payment.LiveEventID = env.LiveEventID
@@ -191,13 +191,14 @@ func (l *Listeners) OnCartPaid(ctx context.Context, env events.Envelope) {
 	payment.Outcome = "approved"
 	payment.AmountCents = p.GMVCents
 	payment.Timestamp = ts
-	l.send(ctx, env, payment)
+	batch = append(batch, payment)
 
 	if l.enricher != nil {
 		for _, item := range l.enricher.CartItemBreakdown(ctx, p.CartID, env.LiveEventID, p.StoreID, l.cfg.Environment, ts) {
-			l.send(ctx, env, item)
+			batch = append(batch, item)
 		}
 	}
+	l.send(ctx, env, batch...)
 }
 
 // OnPaymentFailed exports payment.failed as LiveCommercePayment{outcome:
@@ -555,8 +556,8 @@ func (l *Listeners) decode(ctx context.Context, env events.Envelope, dst any) bo
 // send posts event to New Relic, logging (never returning) any failure — see
 // events.Exporter's single-responsibility doc: telemetry can't break the
 // pipeline that fed it.
-func (l *Listeners) send(ctx context.Context, env events.Envelope, event any) {
-	if err := l.client.SendEvent(ctx, event); err != nil {
+func (l *Listeners) send(ctx context.Context, env events.Envelope, batch ...any) {
+	if err := l.client.SendEvents(ctx, batch); err != nil {
 		logger.From(ctx, l.logger).Error("new relic exporter: sending event failed",
 			zap.String("event", string(env.Name)),
 			zap.String("event_id", env.EventID),

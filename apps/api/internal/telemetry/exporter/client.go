@@ -7,6 +7,7 @@ package exporter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -60,9 +61,47 @@ func NewNRClient(cfg Config, log *zap.Logger) *NRClient {
 // Insights Event API always expects a JSON array). event is typically one of
 // the payloads.go structs, which each carry their own "eventType" field.
 func (c *NRClient) SendEvent(ctx context.Context, event any) error {
+	return c.SendEvents(ctx, []any{event})
+}
+
+// SendEvents keeps a sale's cart, payment and items in the same request. Split
+// large batches below 100 KB, well within the Event API's 1 MB hard limit.
+// The caller's deadline bounds the entire dispatch, including retries.
+func (c *NRClient) SendEvents(ctx context.Context, events []any) error {
+	const maxBatchBytes = 100_000
+	batch := []json.RawMessage{}
+	size := 2 // JSON array delimiters.
+	for _, event := range events {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("encoding new relic event: %w", err)
+		}
+		if len(encoded)+2 > maxBatchBytes {
+			return fmt.Errorf("new relic event exceeds batch size limit")
+		}
+		if len(batch) > 0 && size+len(encoded)+1 > maxBatchBytes {
+			if err := c.sendBatch(ctx, batch); err != nil {
+				return err
+			}
+			batch = []json.RawMessage{}
+			size = 2
+		}
+		batch = append(batch, encoded)
+		size += len(encoded) + 1
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+	return c.sendBatch(ctx, batch)
+}
+
+func (c *NRClient) sendBatch(ctx context.Context, batch []json.RawMessage) error {
 	headers := map[string]string{"Api-Key": c.apiKey}
 
-	resp, respBody, err := c.DoRequestWithRetry(ctx, maxRetries, http.MethodPost, c.url, []any{event}, headers)
+	resp, respBody, err := c.DoRequestWithRetry(ctx, maxRetries, http.MethodPost, c.url, batch, headers)
 	if err != nil {
 		return fmt.Errorf("posting new relic event: %w", err)
 	}

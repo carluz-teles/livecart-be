@@ -1,9 +1,12 @@
 package exporter
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -124,4 +127,66 @@ func newTestNRClient(t *testing.T, url, apiKey string) *NRClient {
 	client.url = url
 
 	return client
+}
+
+func TestNRClient_SendEventsBatchAndLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		count, size, wantCalls int
+	}{
+		{"sale with 26 items", 28, 20, 1},
+		{"split before size limit", 4, 40000, 2},
+		{"empty", 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls, received int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if len(raw) > 100000 {
+					t.Errorf("batch too large: %d", len(raw))
+				}
+				var batch []map[string]any
+				if err := json.Unmarshal(raw, &batch); err != nil {
+					t.Error(err)
+					return
+				}
+				calls++
+				received += len(batch)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+			events := []any{}
+			for range tc.count {
+				events = append(events, map[string]any{"eventType": "Test", "value": strings.Repeat("x", tc.size)})
+			}
+			if err := newTestNRClient(t, srv.URL, "test").SendEvents(t.Context(), events); err != nil {
+				t.Fatal(err)
+			}
+			if calls != tc.wantCalls || received != tc.count {
+				t.Fatalf("requests=%d events=%d", calls, received)
+			}
+		})
+	}
+}
+
+func TestNRClient_SendEventsStopsAfterCancellation(t *testing.T) {
+	var calls atomic.Int32
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); cancel(); w.WriteHeader(http.StatusOK) }))
+	defer srv.Close()
+	events := []any{}
+	for range 5 {
+		events = append(events, map[string]any{"eventType": "Test", "value": strings.Repeat("x", 60000)})
+	}
+	if err := newTestNRClient(t, srv.URL, "test").SendEvents(ctx, events); err == nil {
+		t.Fatal("cancelled dispatch succeeded")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("continued dispatch after cancellation: %d", calls.Load())
+	}
 }

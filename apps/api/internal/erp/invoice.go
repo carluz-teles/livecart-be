@@ -36,11 +36,15 @@ type CartInvoiceState struct {
 // writes it lives here); internal/integration aliases it so the Repository (which
 // owns the SQL) keeps compiling unchanged.
 type UpsertCartERPInvoiceParams struct {
-	CartID        string
-	InvoiceID     string
-	InvoiceKey    string
-	InvoiceStatus string
-	EmittedAt     *time.Time
+	CartID          string
+	StoreID         string
+	IntegrationID   string
+	ExternalOrderID string
+	ObservedAt      time.Time
+	InvoiceID       string
+	InvoiceKey      string
+	InvoiceStatus   string
+	EmittedAt       *time.Time
 }
 
 // ShipmentInvoiceRef is the slim view of an existing shipment the NFe sync needs
@@ -54,7 +58,7 @@ type ShipmentInvoiceRef struct {
 }
 
 // Optional on older adapters: without positive historical evidence, preserve
-// normal invoice synchronization and its missing-materialization warning.
+// normal invoice synchronization and durable retention before materialisation.
 type legacyInvoiceRepository interface {
 	IsLegacyCartWithoutInvoiceWorkflow(ctx context.Context, storeID, cartID, externalOrderID string) (bool, error)
 }
@@ -83,6 +87,7 @@ func (s *Service) SyncCartInvoiceFromERP(ctx context.Context, storeID, cartID, i
 // state it returns is consumed by the webhook path for logging, but not
 // surfaced past the ERP package boundary.
 func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartID, invoiceID string) (*CartInvoiceState, error) {
+	observedAt := time.Now().UTC()
 	// Only the store and the ERP order id anchor the fetch — the full CartRow
 	// stays integration-owned to keep this package free of the integration import
 	// (cycle guard). GetCartInvoiceAnchor returns exactly those two fields.
@@ -96,7 +101,7 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 	// Without an ERP order id we have no anchor on the Tiny side and nothing
 	// to fetch. Returning nil lets the caller render "Aguardando criação no
 	// ERP" without surfacing a generic error.
-	if externalOrderID == "" && invoiceID == "" {
+	if externalOrderID == "" {
 		return nil, nil
 	}
 
@@ -134,22 +139,24 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 		return nil, httpx.InfrastructureError(fetchErr, "sync_cart_invoice")
 	}
 
-	// Fatia 11b: the NFe is written authoritatively to order_payments (resolved
-	// from cart_id). 0 rows = no Order for this cart yet — a benign skip (NF is
-	// always post-confirmation, so the Order should already exist; we log rather
-	// than error so a stray webhook never dead-letters).
+	// Retain the observation even when order.paid has not materialised the order
+	// yet. Persistence validates the original binding again after the ERP read.
 	rows, err := s.repo.UpsertCartERPInvoice(ctx, UpsertCartERPInvoiceParams{
-		CartID:        cartID,
-		InvoiceID:     invoice.InvoiceID,
-		InvoiceKey:    invoice.AccessKey,
-		InvoiceStatus: string(invoice.Status),
-		EmittedAt:     invoiceTimePtr(invoice.IssuedAt),
+		CartID:          cartID,
+		StoreID:         storeID,
+		IntegrationID:   integration.ID,
+		ExternalOrderID: externalOrderID,
+		ObservedAt:      observedAt,
+		InvoiceID:       invoice.InvoiceID,
+		InvoiceKey:      invoice.AccessKey,
+		InvoiceStatus:   string(invoice.Status),
+		EmittedAt:       invoiceTimePtr(invoice.IssuedAt),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("persisting order NFe: %w", err)
 	}
 	if rows == 0 {
-		logger.From(ctx, s.logger).Warn("nota fiscal received for cart without a materialised order, skipping invoice persist",
+		logger.From(ctx, s.logger).Info("nota fiscal retained until order materialisation",
 			zap.String("cart_id", cartID),
 			zap.String("external_order_id", externalOrderID),
 			zap.String("invoice_id", invoice.InvoiceID),
