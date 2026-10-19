@@ -76,14 +76,14 @@ type CheckoutShippingAddressInfo struct {
 
 // CheckoutPaymentInfo is the payment confirmation snapshot for a paid cart.
 //
-// `method` is the public-facing value: "pix" or "card". `paymentId` is the
+// `method` preserves the recorded payment type, with "credit_card" exposed as
+// "card" for compatibility and unrecognized methods as "unknown". `paymentId` is the
 // gateway transaction id (Mercado Pago payment id, Pagar.me order id, etc.) —
 // safe to expose: the customer / suporte uses it to look the payment up.
-// CardBrand / LastFourDigits / Installments / AuthorizationCode are only set
-// for card payments processed through the transparent checkout — missing on
-// PIX, on redirect-checkout flows, and on carts paid before this field set
-// existed. Older paid carts may also be missing `paymentId` if they predate
-// the transparent flow.
+// CardBrand / LastFourDigits / AuthorizationCode are only set for credit or
+// debit card payments; Installments is exclusive to credit cards. These fields
+// can be absent in redirect-checkout flows and older carts. Manual confirmations
+// and older paid carts may also be missing `paymentId`.
 type CheckoutPaymentInfo struct {
 	Method            string    `json:"method"`
 	PaidAt            time.Time `json:"paidAt"`
