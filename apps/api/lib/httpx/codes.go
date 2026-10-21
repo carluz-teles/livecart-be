@@ -12,6 +12,13 @@ package httpx
 // 2e5b1d9.
 type Code string
 
+const (
+	CodeCommentRecoveryConflict  Code = "COMMENT_RECOVERY_CONFLICT"
+	CodeCommentRecoveryInvalid   Code = "COMMENT_RECOVERY_INVALID"
+	CodeCommentRecoveryForbidden Code = "COMMENT_RECOVERY_FORBIDDEN"
+	CodeCommentNotFound          Code = "COMMENT_NOT_FOUND"
+)
+
 func (c Code) String() string { return string(c) }
 
 const (
@@ -26,6 +33,7 @@ const (
 	CodeValidationFailed Code = "VALIDATION_FAILED" // ozzo/fields channel (errorhandler.go)
 
 	// --- CART / CHECKOUT (internal/checkout/service.go, internal/coupon/service.go) ---
+	CodeCartMerged         Code = "CART_MERGED"           // old checkout incorporated into a VIP cart; no destination implied
 	CodeCartExpired        Code = "CART_EXPIRED"          // checkout/service.go:132,384,579,746,952,1430,1445; coupon/service.go:250
 	CodeCartAlreadyPaid    Code = "CART_ALREADY_PAID"     // checkout/service.go:387,582,749,955,1439; checkout/shipping.go:598
 	CodeCartNotPayable     Code = "CART_NOT_PAYABLE"      // checkout/service.go:391,586,753,959 ("não está disponível para checkout")

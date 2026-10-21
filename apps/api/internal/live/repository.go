@@ -1232,9 +1232,14 @@ func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID, sessionID
 		       COALESCE(lc.result, '')          AS result,
 		       COALESCE(p.name, '')             AS product_name,
 		       COALESCE(p.keyword, '')          AS product_keyword,
-		       COALESCE(lc.matched_quantity, 0) AS quantity
+		       COALESCE(lc.matched_quantity, 0) AS quantity,
+		       CASE WHEN w.manual_recovery IS NULL THEN ''
+		         WHEN w.recovery_reason IS NOT NULL THEN 'rejected'
+		         WHEN w.completed_at IS NULL THEN 'pending' ELSE 'completed' END,
+		       COALESCE(w.recovery_reason,'')
 		FROM live_comments lc
 		LEFT JOIN products p ON p.id = lc.matched_product_id
+		LEFT JOIN live_comment_work w ON w.platform_comment_id=lc.platform_comment_id
 		WHERE lc.event_id = $1 AND lc.deleted_at IS NULL
 		  AND ($4::uuid IS NULL OR lc.session_id = $4)
 		ORDER BY lc.created_at
@@ -1252,7 +1257,7 @@ func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID, sessionID
 		var createdAt pgtype.Timestamptz
 		if err := rows.Scan(&id, &sessionID, &c.PlatformCommentID, &c.PlatformUserID,
 			&c.PlatformHandle, &c.Text, &c.HasPurchaseIntent, &c.Hidden, &createdAt,
-			&c.Result, &c.ProductName, &c.ProductKeyword, &c.Quantity); err != nil {
+			&c.Result, &c.ProductName, &c.ProductKeyword, &c.Quantity, &c.RecoveryStatus, &c.RecoveryReason); err != nil {
 			return nil, fmt.Errorf("scanning comment row: %w", err)
 		}
 		c.ID = id.String()

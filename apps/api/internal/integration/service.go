@@ -3011,10 +3011,10 @@ func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.E
 		p.GTIN = input.Search
 		if erpProvider.Name() == providers.ProviderTiny {
 			// A scanned barcode should not wait for unrelated name/SKU queries.
-			// Only fall back after a successful empty GTIN response; an unavailable
-			// GTIN lookup must never masquerade as "not found".
+			// A failed strategy may still have a useful SKU/name fallback. Keep
+			// its error so an empty fallback cannot masquerade as "not found".
 			exact := lookup(searchJob{"gtin", p})
-			if exact.err != nil {
+			if tinySearchMustStop(ctx, exact.err) {
 				return nil, fmt.Errorf("searching Tiny barcode: %w", exact.err)
 			}
 			results = append(results, exact)
@@ -3029,9 +3029,8 @@ func (s *Service) searchERPProducts(ctx context.Context, erpProvider providers.E
 		// A unique exact SKU is already the answer. Do not spend another quota
 		// slot (or wait for a full catalogue sync) searching its digits as a name.
 		sku := lookup(jobs[1])
-		if sku.err != nil {
-			// A failed lookup is not an empty match. A name fallback would
-			// compete for the same exhausted quota and keep abandoned searches alive.
+		if tinySearchMustStop(ctx, sku.err) {
+			// Shared quota exhaustion cannot be recovered by a different filter.
 			return nil, fmt.Errorf("searching Tiny SKU: %w", sku.err)
 		}
 		results = append(results, sku)

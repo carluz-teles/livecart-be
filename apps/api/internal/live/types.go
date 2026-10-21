@@ -510,6 +510,8 @@ type PlatformRow struct {
 
 // Repository layer - Comment
 type CommentRow struct {
+	RecoveryStatus    string
+	RecoveryReason    string
 	ID                string
 	SessionID         string
 	PlatformCommentID string
@@ -539,7 +541,9 @@ type CommentRow struct {
 // CommentModerationResponse is a comment returned to the moderation UI, including
 // the Instagram comment ID needed to reply / hide / delete via the Graph API.
 type CommentModerationResponse struct {
-	ID string `json:"id"`
+	RecoveryStatus string `json:"recoveryStatus,omitempty"`
+	RecoveryReason string `json:"recoveryReason,omitempty"`
+	ID             string `json:"id"`
 	// SessionID é a transmissão em que a fala aconteceu.
 	//
 	// Uma campanha guarda-chuva tem várias — a live de segunda, o story de

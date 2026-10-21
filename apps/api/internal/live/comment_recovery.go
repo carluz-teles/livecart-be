@@ -87,6 +87,15 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			err = errors.Join(err, finishErr)
 		}
 	}()
+	if s.repo != nil {
+		manual, err := s.repo.loadManualRecovery(ctx, input.CommentID, owner)
+		if err != nil {
+			return err
+		}
+		if manual != nil {
+			return s.processManualRecovery(ctx, manual)
+		}
+	}
 	var binding CommentBindingWork
 	if bindings, ok := s.ingestRepo.(CommentBindingRepository); ok {
 		binding, err = bindings.LoadCommentBindingWork(ctx, input.CommentID, owner)
@@ -292,7 +301,8 @@ func (s *Service) applyPersistentCommentItem(ctx context.Context, writer comment
 	if err != nil {
 		return nil, err
 	}
-	if result.Quantity == 0 && result.SkipReason == "max_quantity_reached" {
+	_, manual := ctx.Value(manualRecoveryKey{}).(*manualCommentRecovery)
+	if result.Quantity == 0 && result.SkipReason == "max_quantity_reached" && !manual {
 		s.sendMaxQuantityReply(ctx, event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, result.MaxQuantity, true)
 	}
 	if result.Quantity == 0 {

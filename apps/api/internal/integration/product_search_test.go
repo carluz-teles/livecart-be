@@ -180,9 +180,7 @@ func TestTinySKUFailureDoesNotSpendQuotaOnFallbacks(t *testing.T) {
 	}{
 		{name: "quota wait", err: &providers.RequestNotSentError{Err: ratelimit.ErrNaoDespachado}},
 		{name: "provider throttled", err: &ratelimit.ErrRateLimited{RetryAfter: time.Minute}},
-		{name: "timeout", err: context.DeadlineExceeded},
 		{name: "cancelled", err: context.Canceled},
-		{name: "upstream failure", err: errors.New("upstream unavailable")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &barcodeSearchProvider{list: func(params providers.ListProductsParams) (*providers.ProductListResult, error) {
@@ -195,6 +193,55 @@ func TestTinySKUFailureDoesNotSpendQuotaOnFallbacks(t *testing.T) {
 				SearchProductsInput{Search: "produto", SummaryOnly: true})
 			if !errors.Is(err, tc.err) || p.lists.Load() != 1 || httpx.IsNotFound(productSearchError(err)) {
 				t.Fatalf("error=%v calls=%d", err, p.lists.Load())
+			}
+		})
+	}
+}
+
+func TestTinySearchRetainsOtherStrategiesAfterLookupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, term, failedField, resultField string
+		failure                              error
+		wantCalls                            int64
+	}{
+		{
+			name: "SKU rejected but name matches", term: "Vela Azul",
+			failedField: "sku", resultField: "name", failure: errors.New("invalid codigo"), wantCalls: 2,
+		},
+		{
+			name: "GTIN rejected but numeric SKU matches", term: "7893979655073",
+			failedField: "gtin", resultField: "sku", failure: errors.New("invalid gtin"), wantCalls: 2,
+		},
+		{
+			name: "individual request timeout leaves search budget", term: "Vela Azul",
+			failedField: "sku", resultField: "name", failure: context.DeadlineExceeded, wantCalls: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &barcodeSearchProvider{list: func(params providers.ListProductsParams) (*providers.ProductListResult, error) {
+				field := "name"
+				if params.GTIN != "" {
+					field = "gtin"
+				} else if params.SKU != "" {
+					field = "sku"
+				}
+				if field == tc.failedField {
+					return nil, tc.failure
+				}
+				if field == tc.resultField {
+					return &providers.ProductListResult{Products: []providers.ERPProduct{
+						{ID: "match", SKU: tc.term, Active: true},
+					}}, nil
+				}
+				return &providers.ProductListResult{}, nil
+			}}
+			result, err := (&Service{logger: zap.NewNop()}).searchERPProducts(t.Context(), p,
+				SearchProductsInput{Search: tc.term, SummaryOnly: true})
+			if err != nil || len(result.Products) != 1 || result.Products[0].ID != "match" {
+				t.Fatalf("another strategy could answer: result=%+v err=%v", result, err)
+			}
+			if p.lists.Load() != tc.wantCalls || p.details.Load() != 0 {
+				t.Fatalf("unnecessary calls: lists=%d details=%d", p.lists.Load(), p.details.Load())
 			}
 		})
 	}

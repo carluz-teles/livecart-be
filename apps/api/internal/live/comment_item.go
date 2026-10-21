@@ -18,6 +18,15 @@ import (
 var _ commentItemWriter = (*Service)(nil)
 
 func (s *Service) ApplyCommentItem(ctx context.Context, input AddToCartInput, commentID string) (CommentItemResult, error) {
+	if manual, ok := ctx.Value(manualRecoveryKey{}).(*manualCommentRecovery); ok {
+		var cart CartRow
+		err := s.repo.pool.QueryRow(ctx, `SELECT id::text,token FROM carts WHERE id=$1`, manual.CartID).
+			Scan(&cart.ID, &cart.Token)
+		if err != nil {
+			return CommentItemResult{}, err
+		}
+		return s.repo.applyCommentItem(ctx, input, commentID, &cart, false)
+	}
 	if previous, err := s.repo.appliedCommentItem(ctx, s.repo.pool, commentID, input.ProductID); err == nil {
 		return previous, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -81,6 +90,11 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "comment:"+commentID); err != nil {
 		return result, err
 	}
+	if manual, ok := ctx.Value(manualRecoveryKey{}).(*manualCommentRecovery); ok {
+		if err := validateManualRecovery(ctx, tx, manual); err != nil {
+			return result, err
+		}
+	}
 	if previous, e := r.appliedCommentItem(ctx, tx, commentID, input.ProductID); e == nil {
 		return previous, nil
 	} else if !errors.Is(e, pgx.ErrNoRows) {
@@ -90,6 +104,11 @@ func (r *Repository) applyCommentItem(ctx context.Context, input AddToCartInput,
 	// The same lock prevents a new buyer from overtaking an older waiting lot.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "waitlist_product:"+input.ProductID); err != nil {
 		return result, err
+	}
+	if manual, ok := ctx.Value(manualRecoveryKey{}).(*manualCommentRecovery); ok {
+		if err := validateRecoveryCart(ctx, tx, manual); err != nil {
+			return result, err
+		}
 	}
 	var ownerCartID string
 	if err = tx.QueryRow(ctx, `SELECT COALESCE(joined_to_cart_id,id)::text FROM carts WHERE id=$1`, cart.ID).Scan(&ownerCartID); err != nil {

@@ -145,6 +145,23 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// Rota pública (sem middleware de store): o store é resolvido pelo token.
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
+	// Cancellation explains why this link stopped working, even after its
+	// former deadline. A merged cart does not necessarily retain a destination.
+	if cart.Status == "cancelled" {
+		switch cart.CancelledReason {
+		case "customer_blocked":
+			return nil, httpx.ErrNotFound("carrinho não encontrado")
+		case "merged_into_vip_cart":
+			return nil, httpx.DomainError(
+				422,
+				httpx.CodeCartMerged,
+				"Este carrinho foi incorporado a um carrinho VIP. Fale com a loja para receber o link do carrinho VIP.",
+			)
+		default:
+			return nil, httpx.ErrUnprocessable("Este carrinho foi cancelado pela loja. Fale com a loja para receber um novo link.")
+		}
+	}
+
 	// Validate cart status (allow viewing paid carts so frontend can show "paid" message)
 	if cart.Status == "expired" {
 		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
@@ -154,19 +171,6 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// mesmo depois que o expires_at passa.
 	if cart.PaymentStatus != "paid" && cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
 		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
-	}
-	// Carts cancelled because the buyer was blocked should look like they
-	// never existed — return 404 so the public /cart/[token] page hits the
-	// generic "carrinho não existe" branch.
-	if cart.Status == "cancelled" && cart.CancelledReason == "customer_blocked" {
-		return nil, httpx.ErrNotFound("carrinho não encontrado")
-	}
-	// Cancelado pela loja: nada do carrinho é devolvido (nem itens, nem valores)
-	// — o comprador vê só a mensagem. Ela diz CANCELADO, e não "expirado", que é
-	// justamente a confusão que essa distinção existe para evitar: ninguém
-	// perdeu prazo nenhum aqui.
-	if cart.Status == "cancelled" {
-		return nil, httpx.ErrUnprocessable("Este carrinho foi cancelado pela loja. Fale com a loja para receber um novo link.")
 	}
 	// Note: paid carts are allowed - frontend will show a "paid" dialog
 

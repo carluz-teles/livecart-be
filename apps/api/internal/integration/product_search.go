@@ -71,6 +71,18 @@ func productSearchError(err error) error {
 	return err
 }
 
+// Only shared admission failures and cancellation rule out another strategy.
+// A request timeout with search budget remaining is local to that strategy.
+func tinySearchMustStop(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	var notSent *providers.RequestNotSentError
+	var limited *ratelimit.ErrRateLimited
+	return ctx.Err() != nil || errors.Is(err, context.Canceled) ||
+		errors.As(err, &notSent) || errors.As(err, &limited)
+}
+
 // GetERPProductDetails only reads the selected product. Available stock still
 // comes from the ERP stock endpoint, never from a list's absent stock field.
 func (s *Service) GetERPProductDetails(ctx context.Context, storeID, integrationID, productID string) (product *providers.ERPProduct, err error) {

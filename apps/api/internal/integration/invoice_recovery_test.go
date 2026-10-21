@@ -127,11 +127,11 @@ func TestInvoiceConcurrentOlderObservationCannotUndoCancellation(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		if err != nil && !errors.Is(err, erp.ErrCartBusy) {
+		if err != nil && !errors.Is(err, erp.ErrInvoiceObservationSuperseded) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := testRepo.UpsertCartERPInvoice(t.Context(), old); !errors.Is(err, erp.ErrCartBusy) {
+	if _, err := testRepo.UpsertCartERPInvoice(t.Context(), old); !errors.Is(err, erp.ErrInvoiceObservationSuperseded) {
 		t.Fatalf("stale invoice accepted: %v", err)
 	}
 	scaleService().RecoverCartInvoices(t.Context())
