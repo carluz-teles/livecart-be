@@ -3,6 +3,7 @@ package erp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -308,5 +309,47 @@ func TestService_UnknownInvoiceOrderNeverReachesLegacyClassification(t *testing.
 	state, err := svc.SyncCartInvoiceByExternalOrder(t.Context(), "store", "external", "invoice")
 	if state != nil || err != nil || repo.checks != 0 || repo.upserts != 0 {
 		t.Fatalf("unknown order performed work: state=%+v err=%v checks=%d writes=%d", state, err, repo.checks, repo.upserts)
+	}
+}
+
+func TestService_InvoiceObservationOutcomes(t *testing.T) {
+	t.Parallel()
+	persistErr := errors.New("invoice database unavailable")
+	cases := []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{name: "newer durable observation supersedes this one", err: fmt.Errorf("retaining invoice: %w", ErrInvoiceObservationSuperseded)},
+		{name: "changed binding remains an error", err: ErrCartBusy, wantErr: ErrCartBusy},
+		{name: "database failure remains an error", err: persistErr, wantErr: persistErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			provider := &fakeInvoiceProvider{invoice: &providers.ERPInvoice{
+				InvoiceID: "old-invoice", AccessKey: "old-key", Status: providers.ERPInvoiceStatusAuthorized,
+			}}
+			repo := &mockRepo{
+				findCartID: "cart", anchorStoreID: "store", anchorExtOrder: "order",
+				upsertErr: tc.err, shipment: &ShipmentInvoiceRef{ID: "shipment"},
+			}
+			core, logs := observer.New(zap.InfoLevel)
+			svc := NewService(repo, &mockCollab{provider: provider}, zap.New(core))
+			state, err := svc.SyncCartInvoiceByExternalOrder(t.Context(), "store", "order", "old-invoice")
+			if !errors.Is(err, tc.wantErr) || state != nil {
+				t.Fatalf("invoice outcome: state=%+v err=%v", state, err)
+			}
+			if repo.upserts != 1 || repo.invoiceMirrors != 0 {
+				t.Fatalf("old or unpersisted invoice reached shipment: upserts=%d mirrors=%d", repo.upserts, repo.invoiceMirrors)
+			}
+			if tc.wantErr == nil {
+				if logs.Len() != 1 || logs.FilterMessage("older invoice observation superseded").Len() != 1 {
+					t.Fatalf("expected a single superseded diagnostic: %+v", logs.All())
+				}
+			} else if logs.Len() != 0 {
+				t.Fatalf("propagated failure logged twice: %+v", logs.All())
+			}
+		})
 	}
 }

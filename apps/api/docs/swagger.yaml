@@ -1652,6 +1652,10 @@ definitions:
         type: string
       quantity:
         type: integer
+      recoveryReason:
+        type: string
+      recoveryStatus:
+        type: string
       result:
         description: O desfecho cru; o front traduz para cor e frase.
         type: string
@@ -2317,6 +2321,16 @@ definitions:
       platform:
         type: string
       platformLiveId:
+        type: string
+    type: object
+  apps_api_internal_live.RecoverCommentRequest:
+    properties:
+      confirmed:
+        type: boolean
+    type: object
+  apps_api_internal_live.RecoverCommentResponse:
+    properties:
+      status:
         type: string
     type: object
   apps_api_internal_live.SessionMetricsResponse:
@@ -8427,6 +8441,65 @@ paths:
       security:
       - BearerAuth: []
       summary: List comments for an event (moderation)
+      tags:
+      - lives
+  /api/v1/stores/{storeId}/lives/{id}/comments/{commentId}/recover:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Event UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Internal comment UUID
+        in: path
+        name: commentId
+        required: true
+        type: string
+      - description: Explicit merchant confirmation
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_live.RecoverCommentRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.RecoverCommentResponse'
+              type: object
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Recover a no_product comment (owner/admin)
       tags:
       - lives
   /api/v1/stores/{storeId}/lives/{id}/end:

@@ -116,8 +116,8 @@ func (s ERPOrderStatus) Terminal() bool {
 		s == ERPOrderStatusNaoEntregue || s == ERPOrderStatusNaoEncontrado
 }
 
-// FechadoParaNovosItens diz se o pedido já virou documento fiscal e por isso não
-// recebe mais item.
+// FechadoParaNovosItens diz se o pedido não pode mais receber itens, por ter
+// virado documento fiscal, sido cancelado ou deixado de existir no ERP.
 //
 // Este é o limite que o lojista reconhece: enquanto está "Em aberto" ou
 // "Aprovado" — pago, mas ainda não faturado — ele soma a compra de hoje na de
@@ -133,12 +133,14 @@ func (s ERPOrderStatus) Terminal() bool {
 // O ERP não impõe nada disso: em 26/08/2026 a API aceitou (204) editar os itens
 // de um pedido em situação "Faturada". A recusa tem de ser nossa.
 //
-// Cancelado entra na lista pelo motivo oposto: não há pedido vivo a que somar.
+// Cancelado e não encontrado entram porque não há pedido vivo a que somar.
+// Observar a ausência não autoriza reabrir a compra nem recriar seu pedido.
+// Manter em sincronia com erp_order_accepts_items e seus índices parciais.
 func (s ERPOrderStatus) FechadoParaNovosItens() bool {
 	switch s {
 	case ERPOrderStatusPreparandoEnvio, ERPOrderStatusFaturado, ERPOrderStatusProntoEnvio,
 		ERPOrderStatusEnviado, ERPOrderStatusEntregue, ERPOrderStatusNaoEntregue,
-		ERPOrderStatusCancelado:
+		ERPOrderStatusCancelado, ERPOrderStatusNaoEncontrado:
 		return true
 	}
 	return false

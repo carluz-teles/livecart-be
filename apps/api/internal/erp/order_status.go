@@ -24,6 +24,7 @@ import (
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/logger"
+	"livecart/apps/api/lib/ratelimit"
 )
 
 // Fonte de uma observação de situação. A diferença importa no diagnóstico: uma
@@ -301,8 +302,8 @@ func (s *Service) SeedOrderStatusOnCreate(ctx context.Context, storeID, cartID, 
 // tentativas, e apaga a URL depois de falhas seguidas; nos dois casos o silêncio
 // é indistinguível de "nada aconteceu".
 //
-// Uma consulta por pedido, com o mesmo limitador das escritas: a varredura não
-// pode consumir a cota que a live precisa.
+// Uma consulta por pedido, cedendo a vez às buscas interativas na cota de
+// leitura do Tiny. A serialização por carrinho continua preservada.
 func (s *Service) RunERPOrderStatusSweep(ctx context.Context, staleAfter time.Duration, limit int) {
 	if s.status == nil {
 		return
@@ -318,14 +319,13 @@ func (s *Service) RunERPOrderStatusSweep(ctx context.Context, staleAfter time.Du
 		if provErr != nil {
 			continue
 		}
-		// A leitura passa pela mesma cota das escritas: o balde do ERP conta os
-		// dois, e uma varredura de duzentos pedidos consumiria sozinha a cota de
-		// uma live inteira. Chave por carrinho, para não disputar com as escritas
-		// de outro pedido.
+		// Preservar a fila por carrinho; somente o GET periódico recebe a
+		// prioridade de manutenção. Observação e reflexo de pagamento mantêm
+		// o contexto original, assim como as leituras da live.
 		var situacao int
 		readErr := s.escreverNoERP(itemCtx, p.StoreID, p.CartID, func(ctx context.Context) error {
 			var err error
-			situacao, err = erpProvider.GetOrderSituacao(ctx, p.ExternalOrderID)
+			situacao, err = erpProvider.GetOrderSituacao(ratelimit.WithTinyCatalogRead(ctx), p.ExternalOrderID)
 			return err
 		})
 		// O ERP RESPONDEU: o pedido não existe mais. Registrar isso é o que

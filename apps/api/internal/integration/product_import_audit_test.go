@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -176,5 +177,71 @@ func TestAuditVariantReReadCannotTurnUnknownStockIntoZero(t *testing.T) {
 	got := parent.Variants[0]
 	if got.Stock == 0 && got.StockKnown {
 		t.Errorf("BUG: unknown second reading became known zero: %+v", got)
+	}
+}
+
+func TestAuditConcurrentTinyImportsRespectRealQuotaAndRejectUnknownStock(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stockBody string
+		wantKnown int
+	}{
+		{name: "quota refusal leaves four stocks unknown", stockBody: `{"disponivel":3}`, wantKnown: 2},
+		{name: "physical stock cannot replace missing available stock", stockBody: `{"saldo":99}`, wantKnown: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var metadata, stock atomic.Int64
+				transport := auditTransport(func(r *http.Request) (int, string) {
+					if strings.Contains(r.URL.Path, "/estoque/") {
+						stock.Add(1)
+						return http.StatusOK, tc.stockBody
+					}
+					metadata.Add(1)
+					time.Sleep(time.Second)
+					return http.StatusOK, `{"id":123,"situacao":"A","estoque":{"quantidade":99}}`
+				})
+				limiter := ratelimit.NewManager(zap.NewNop()).GetOrCreateTiny(t.Name())
+				ctx, cancel := context.WithTimeout(ratelimit.WithTinyInteractiveRead(t.Context()), erpProductDetailsTimeout)
+				defer cancel()
+				type result struct {
+					product *providers.ERPProduct
+					err     error
+				}
+				results := make(chan result, 6)
+				for range 6 {
+					p := auditTiny(t, transport)
+					p.StoreID, p.IntegrationID = t.Name(), "quota-audit"
+					p.RateLimiter = limiter
+					go func() {
+						product, err := getProductForImport(ctx, p, "123")
+						if err == nil {
+							err = validateImportStock(ctx, p, product)
+						}
+						results <- result{product: product, err: err}
+					}()
+				}
+				var known int
+				for range 6 {
+					out := <-results
+					if out.product == nil {
+						t.Fatalf("metadata lookup failed: %v", out.err)
+					}
+					if out.product.StockKnown {
+						if out.err != nil || out.product.Stock != 3 {
+							t.Fatalf("confirmed available stock changed: %+v err=%v", out.product, out.err)
+						}
+						known++
+						continue
+					}
+					if httpx.StatusFromError(out.err) != http.StatusServiceUnavailable || out.product.Stock != 0 {
+						t.Fatalf("unknown stock admitted as known zero or physical stock: %+v err=%v", out.product, out.err)
+					}
+				}
+				if metadata.Load() != 1 || stock.Load() != 2 || known != tc.wantKnown {
+					t.Fatalf("default quota changed: metadata=%d stock=%d admitted=%d", metadata.Load(), stock.Load(), known)
+				}
+			})
+		})
 	}
 }

@@ -6784,6 +6784,101 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/v1/stores/{storeId}/lives/{id}/comments/{commentId}/recover": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "Recover a no_product comment (owner/admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Event UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Internal comment UUID",
+                        "name": "commentId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Explicit merchant confirmation",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_live.RecoverCommentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.RecoverCommentResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/stores/{storeId}/lives/{id}/end": {
             "post": {
                 "security": [
@@ -14194,6 +14289,12 @@ const docTemplate = `{
                 "quantity": {
                     "type": "integer"
                 },
+                "recoveryReason": {
+                    "type": "string"
+                },
+                "recoveryStatus": {
+                    "type": "string"
+                },
                 "result": {
                     "description": "O desfecho cru; o front traduz para cor e frase.",
                     "type": "string"
@@ -14993,6 +15094,22 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "platformLiveId": {
+                    "type": "string"
+                }
+            }
+        },
+        "apps_api_internal_live.RecoverCommentRequest": {
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "apps_api_internal_live.RecoverCommentResponse": {
+            "type": "object",
+            "properties": {
+                "status": {
                     "type": "string"
                 }
             }

@@ -13,6 +13,10 @@ import (
 	"livecart/apps/api/lib/logger"
 )
 
+// ErrInvoiceObservationSuperseded means a newer observation is already durable.
+// Retrying this observation cannot make it current or change the invoice.
+var ErrInvoiceObservationSuperseded = errors.New("invoice observation superseded")
+
 // =============================================================================
 // CART NFe SYNC (ERP → carts.erp_invoice_*) — moved from internal/integration
 // (Bloco B2d). integration keeps a one-liner delegation; the call sites migrate
@@ -152,6 +156,14 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 		InvoiceStatus:   string(invoice.Status),
 		EmittedAt:       invoiceTimePtr(invoice.IssuedAt),
 	})
+	if errors.Is(err, ErrInvoiceObservationSuperseded) {
+		logger.From(ctx, s.logger).Info("older invoice observation superseded",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", externalOrderID),
+			zap.String("invoice_id", invoice.InvoiceID),
+		)
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("persisting order NFe: %w", err)
 	}

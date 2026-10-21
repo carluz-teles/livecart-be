@@ -61,7 +61,7 @@ func (r *Repository) UpsertCartERPInvoice(ctx context.Context, p UpsertCartERPIn
 		return 0, fmt.Errorf("retaining invoice observation: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return 0, fmt.Errorf("invoice observation superseded: %w", erp.ErrCartBusy)
+		return 0, erp.ErrInvoiceObservationSuperseded
 	}
 	var emitted pgtype.Timestamptz
 	if p.EmittedAt != nil {
@@ -125,7 +125,7 @@ func (s *Service) RecoverCartInvoices(ctx context.Context) {
 			return
 		}
 		count, err := s.repo.UpsertCartERPInvoice(ctx, p)
-		if errors.Is(err, erp.ErrCartBusy) {
+		if errors.Is(err, erp.ErrCartBusy) || errors.Is(err, erp.ErrInvoiceObservationSuperseded) {
 			continue // A newer observation or binding won the race.
 		}
 		if err != nil {

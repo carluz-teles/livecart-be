@@ -8,8 +8,8 @@ import (
 
 func TestCartERPBoundaryPreservesClosedPurchase(t *testing.T) {
 	requireDB(t)
-	statuses := []string{"", "em_aberto", "aprovado", "preparando_envio", "faturado",
-		"pronto_envio", "enviado", "entregue", "nao_entregue", "cancelado"}
+	statuses := []string{"", "em_aberto", "aberto", "dados_incompletos", "aprovado", "preparando_envio", "faturado",
+		"pronto_envio", "enviado", "entregue", "nao_entregue", "cancelado", "nao_encontrado"}
 	for _, vip := range []bool{false, true} {
 		for _, status := range statuses {
 			t.Run(status+map[bool]string{true: "_vip", false: "_regular"}[vip], func(t *testing.T) {

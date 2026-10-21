@@ -67,6 +67,7 @@ func (h *Handler) registerUnder(router fiber.Router, prefix string) {
 	g.Get("/:id/pulse", h.GetPulse)
 	g.Get("/:id/carts", h.ListCarts)
 	g.Get("/:id/comments", h.ListComments)
+	g.Post("/:id/comments/:commentId/recover", httpx.RequireRole("owner", "admin"), h.RecoverComment)
 	g.Post("/:id/carts/:cartId/resend-message", h.ResendCartMessage)
 	g.Get("/:id/active-checkouts", h.ListActiveCheckouts)
 	g.Get("/:id/products", h.ListProducts)
@@ -1052,6 +1053,8 @@ func (h *Handler) ListComments(c *fiber.Ctx) error {
 	responses := make([]CommentModerationResponse, len(comments))
 	for i, cm := range comments {
 		responses[i] = CommentModerationResponse{
+			RecoveryStatus:    cm.RecoveryStatus,
+			RecoveryReason:    cm.RecoveryReason,
 			ID:                cm.ID,
 			SessionID:         cm.SessionID,
 			PlatformCommentID: cm.PlatformCommentID,

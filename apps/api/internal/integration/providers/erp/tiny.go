@@ -314,7 +314,7 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 		fullURL += "?" + encoded
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodGet, fullURL, nil, t.authHeaders())
+	resp, body, err := t.readCatalog(ctx, fullURL)
 	if err != nil {
 		return nil, fmt.Errorf("listing products: %w", err)
 	}
@@ -622,7 +622,7 @@ func (t *Tiny) GetProductForImport(ctx context.Context, productID string) (*ERPP
 func (t *Tiny) getProduct(ctx context.Context, productID string, deferVariants bool) (*ERPProduct, error) {
 	endpoint := fmt.Sprintf("%s/produtos/%s", tinyAPIBaseURL, productID)
 
-	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	resp, body, err := t.readCatalog(ctx, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("getting product: %w", err)
 	}

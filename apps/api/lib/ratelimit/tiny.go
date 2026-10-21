@@ -242,6 +242,13 @@ func WithTinyInteractiveRead(ctx context.Context) context.Context {
 	return context.WithValue(ctx, tinyReadPriorityKey{}, tinyInteractiveRead)
 }
 
+// IsTinyInteractiveRead identifies catalogue reads that may share in-flight
+// metadata without making an operator wait behind a background scan.
+func IsTinyInteractiveRead(ctx context.Context) bool {
+	priority, _ := ctx.Value(tinyReadPriorityKey{}).(tinyReadPriority)
+	return priority == tinyInteractiveRead
+}
+
 // WithTinyCatalogRead marks resumable catalogue and periodic stock scans as deferrable.
 func WithTinyCatalogRead(ctx context.Context) context.Context {
 	return context.WithValue(ctx, tinyReadPriorityKey{}, tinyCatalogRead)

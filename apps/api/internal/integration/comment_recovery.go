@@ -65,19 +65,32 @@ func (r *Repository) BeginCommentWork(ctx context.Context, commentID string, pay
 
 func (r *Repository) FinishCommentWork(ctx context.Context, commentID, owner string, processingErr error) error {
 	var message any
+	var rejection *live.CommentRecoveryRejected
+	var reason any
+	if errors.As(processingErr, &rejection) {
+		reason = rejection.Reason
+	}
 	if processingErr != nil {
 		message = processingErr.Error()
 	}
 	_, err := r.pool.Exec(ctx, `WITH finished AS (UPDATE live_comment_work SET lease_owner=NULL,lease_until=NULL,last_error=$3,
         erp_blocked_at=CASE WHEN $4 THEN now() ELSE NULL END,
-		completed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,
+		completed_at=CASE WHEN $3::text IS NULL OR (manual_recovery IS NOT NULL AND $6::text IS NOT NULL)
+			THEN now() ELSE NULL END,
+		recovery_reason=CASE WHEN manual_recovery IS NOT NULL THEN $6::text ELSE recovery_reason END,
         next_attempt_at=CASE WHEN $5 THEN LEAST(now()+interval '10 seconds',binding_wait_until)
 			ELSE now()+make_interval(secs=>LEAST(900,5*power(2,LEAST(attempts,8)))::double precision) END
-        WHERE platform_comment_id=$1 AND lease_owner=$2 RETURNING platform_comment_id)
+        WHERE platform_comment_id=$1 AND lease_owner=$2
+		RETURNING platform_comment_id,manual_recovery,recovery_result,completed_at),
+		updated_comment AS (UPDATE live_comments lc SET result=COALESCE(f.recovery_result,
+			CASE WHEN EXISTS(SELECT 1 FROM cart_item_events e WHERE e.platform_comment_id=f.platform_comment_id)
+			THEN 'added_to_cart' ELSE f.manual_recovery->>'originalResult' END)
+			FROM finished f WHERE f.manual_recovery IS NOT NULL AND f.completed_at IS NOT NULL
+			AND lc.id=(f.manual_recovery->>'commentId')::uuid)
         UPDATE webhook_events SET processed=($3::text IS NULL),processed_at=CASE WHEN $3::text IS NULL THEN now() ELSE NULL END,error_message=$3
-		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished)`,
+		WHERE provider='instagram' AND event_id IN (SELECT platform_comment_id FROM finished WHERE manual_recovery IS NULL)`,
 		commentID, owner, message, errors.Is(processingErr, live.ErrCommentERPBlocked),
-		errors.Is(processingErr, live.ErrCommentAwaitingBinding))
+		errors.Is(processingErr, live.ErrCommentAwaitingBinding), reason)
 	return err
 }
 
