@@ -18,7 +18,7 @@ package integration
 // verdade. O comentario ao lado dizia "signature validation could be added"
 // enquanto o handler, dois arquivos adiante, ja a computava e jogava fora.
 //
-// A baseline congela os dois casos legitimamente sem assinatura hoje. Ela so
+// A baseline congela os casos conhecidos sem verificacao de assinatura. Ela so
 // pode ENCOLHER: um provider novo com `true` fixo quebra o teste, e um da lista
 // que passe a gravar o resultado real tambem — para a lista nao apodrecer.
 
@@ -36,13 +36,12 @@ import (
 
 // provider -> por que gravar `true` fixo ainda e aceitavel.
 //
-// Nenhum dos dois e "correto": os dois afirmam que uma verificacao passou onde
-// verificacao nenhuma aconteceu. Sao divida conhecida, fora do epico do Evento
+// Estes casos afirmam que uma verificacao passou onde verificacao nenhuma
+// aconteceu. Sao divida conhecida, fora do epico do Evento
 // Guarda-Chuva, e estao aqui para ficarem VISIVEIS em vez de virarem paragrafo
 // num relatorio.
 var hardcodedSignatureBaseline = map[string]string{
 	"mercado_pago": "E1: nunca teve validacao de assinatura. O webhook do Pagar.me, na mesma familia, ja grava o resultado real (authValid) — este e o unico de pagamento que ficou para tras.",
-	"tiny":         "O Tiny nao assina webhook. `true` aqui significa 'nao se aplica', e e por isso que ele engana: a coluna nao tem como dizer 'nao se aplica'.",
 }
 
 func TestNenhumWebhookNovoAfirmaAssinaturaValidaSemConferir(t *testing.T) {

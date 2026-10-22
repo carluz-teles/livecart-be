@@ -113,23 +113,28 @@ func (s *Service) refreshInstagramToken(ctx context.Context, integration *Integr
 	}
 	var refreshed *providers.Credentials
 	var refreshErr error
-	err = s.repo.withIntegrationRefreshLock(ctx, id, storeID, func(repo *Repository, owner *IntegrationRow) error {
-		if owner.Status != "active" || owner.Provider != "instagram" || owner.InstagramCredentialsSourceID != "" {
-			return httpx.ErrConflict("A conexão principal do Instagram não está ativa.")
-		}
-		latest, err := s.decryptCredentials(owner.Credentials)
-		if err != nil {
-			return err
-		}
-		if previous != nil && !latest.IsExpired() &&
-			(latest.AccessToken != previous.AccessToken || latest.ExpiresAt.After(previous.ExpiresAt)) {
-			refreshed = latest
+	err = s.repo.withIntegrationRefreshLock(
+		ctx,
+		id,
+		storeID,
+		func(refreshCtx context.Context, repo *Repository, owner *IntegrationRow) error {
+			if owner.Status != "active" || owner.Provider != "instagram" || owner.InstagramCredentialsSourceID != "" {
+				return httpx.ErrConflict("A conexão principal do Instagram não está ativa.")
+			}
+			latest, err := s.decryptCredentials(owner.Credentials)
+			if err != nil {
+				return err
+			}
+			if previous != nil && !latest.IsExpired() &&
+				(latest.AccessToken != previous.AccessToken || latest.ExpiresAt.After(previous.ExpiresAt)) {
+				refreshed = latest
+				return nil
+			}
+			refreshed, refreshErr = s.refreshTokenWithRepository(refreshCtx, repo, owner, latest)
+			// Commit a permanent authorization failure as well as successful rotation.
 			return nil
-		}
-		refreshed, refreshErr = s.refreshTokenWithRepository(ctx, repo, owner, latest)
-		// Commit a permanent authorization failure as well as successful rotation.
-		return nil
-	})
+		},
+	)
 	return refreshed, errors.Join(refreshErr, err)
 }
 
@@ -137,38 +142,43 @@ func (s *Service) refreshInstagramToken(ctx context.Context, integration *Integr
 // renewed for the same account, but cannot silently switch every linked store
 // to another Instagram account.
 func (s *Service) saveInstagramAuthorization(ctx context.Context, existing *IntegrationRow, encrypted []byte, expiresAt time.Time, metadata map[string]any) error {
-	return s.repo.withIntegrationRefreshLock(ctx, existing.ID, existing.StoreID, func(repo *Repository, current *IntegrationRow) error {
-		if current.InstagramCredentialsSourceID != "" || current.Provider != "instagram" {
-			return httpx.ErrConflict("Reconecte o Instagram pela conexão principal.")
-		}
-		id, err := parseUUID(current.ID)
-		if err != nil {
-			return err
-		}
-		shared, err := repo.queries.HasInstagramCredentialAliases(ctx, id)
-		if err != nil {
-			return fmt.Errorf("checking shared Instagram authorization: %w", err)
-		}
-		if shared {
-			oldID, _ := current.Metadata["instagram_user_id"].(string)
-			newID, _ := metadata["instagram_user_id"].(string)
-			if oldID == "" || oldID != newID {
-				return httpx.ErrConflict("O Instagram autorizado difere da conta compartilhada. Autorize o mesmo perfil.")
+	return s.repo.withIntegrationRefreshLock(
+		ctx,
+		existing.ID,
+		existing.StoreID,
+		func(saveCtx context.Context, repo *Repository, current *IntegrationRow) error {
+			if current.InstagramCredentialsSourceID != "" || current.Provider != "instagram" {
+				return httpx.ErrConflict("Reconecte o Instagram pela conexão principal.")
 			}
-		}
-		merged := make(map[string]any)
-		for k, v := range current.Metadata {
-			merged[k] = v
-		}
-		for k, v := range metadata {
-			merged[k] = v
-		}
-		if _, ok := merged["connected_at"]; !ok {
-			merged["connected_at"] = time.Now()
-		}
-		if err := repo.UpdateCredentials(ctx, current.ID, encrypted, &expiresAt); err != nil {
-			return fmt.Errorf("saving Instagram authorization: %w", err)
-		}
-		return repo.UpdateMetadata(ctx, current.ID, merged)
-	})
+			id, err := parseUUID(current.ID)
+			if err != nil {
+				return err
+			}
+			shared, err := repo.queries.HasInstagramCredentialAliases(saveCtx, id)
+			if err != nil {
+				return fmt.Errorf("checking shared Instagram authorization: %w", err)
+			}
+			if shared {
+				oldID, _ := current.Metadata["instagram_user_id"].(string)
+				newID, _ := metadata["instagram_user_id"].(string)
+				if oldID == "" || oldID != newID {
+					return httpx.ErrConflict("O Instagram autorizado difere da conta compartilhada. Autorize o mesmo perfil.")
+				}
+			}
+			merged := make(map[string]any)
+			for k, v := range current.Metadata {
+				merged[k] = v
+			}
+			for k, v := range metadata {
+				merged[k] = v
+			}
+			if _, ok := merged["connected_at"]; !ok {
+				merged["connected_at"] = time.Now()
+			}
+			if err := repo.UpdateCredentials(saveCtx, current.ID, encrypted, &expiresAt); err != nil {
+				return fmt.Errorf("saving Instagram authorization: %w", err)
+			}
+			return repo.UpdateMetadata(saveCtx, current.ID, merged)
+		},
+	)
 }
