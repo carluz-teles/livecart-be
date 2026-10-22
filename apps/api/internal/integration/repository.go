@@ -168,10 +168,12 @@ func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*Integrat
 // withIntegrationRefreshLock serializes rotating OAuth credentials across API
 // instances. All reads and writes inside fn use the connection holding the row
 // lock, so a refresh nested in cart finalisation cannot exhaust the pool by
-// acquiring a third connection.
+// acquiring a third connection. Waiting remains cancellable. After locking, the
+// exchange and commit have their own deadline: caller cancellation cannot throw
+// away a rotated token that has already invalidated its predecessor.
 func (r *Repository) withIntegrationRefreshLock(
 	ctx context.Context, id, storeID string,
-	fn func(*Repository, *IntegrationRow) error,
+	fn func(context.Context, *Repository, *IntegrationRow) error,
 ) (err error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -193,15 +195,20 @@ func (r *Repository) withIntegrationRefreshLock(
 	).Scan(&lockedID); err != nil {
 		return fmt.Errorf("locking integration for token refresh: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
 	lockedRepo := &Repository{queries: r.queries.WithTx(tx)}
-	row, err := lockedRepo.GetByID(ctx, id, storeID)
+	row, err := lockedRepo.GetByID(refreshCtx, id, storeID)
 	if err != nil {
 		return err
 	}
-	if err := fn(lockedRepo, row); err != nil {
+	if err := fn(refreshCtx, lockedRepo, row); err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(refreshCtx); err != nil {
 		return fmt.Errorf("committing token refresh: %w", err)
 	}
 	return nil

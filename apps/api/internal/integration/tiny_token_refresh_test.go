@@ -163,3 +163,92 @@ func TestTinyRefreshDoesNotReactivateDisconnectedIntegration(t *testing.T) {
 		t.Fatalf("disconnected state changed: %v", err)
 	}
 }
+
+func TestTinyRefreshPreservesRotationAfterCallerCancellation(t *testing.T) {
+	for _, cancelBeforeResponse := range []bool{true, false} {
+		name := "after provider response"
+		if cancelBeforeResponse {
+			name = "while provider responds"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc, row, old := seedTinyRefresh(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			calls := 0
+			svc.factory = providers.NewFactory(providers.FactoryConfig{
+				Logger: zap.NewNop(), TinyConstructor: func(providers.TinyConfig) (providers.ERPProvider, error) {
+					return refreshTestProvider{refresh: func(refreshCtx context.Context) (*providers.Credentials, error) {
+						calls++
+						// The provider has consumed the old refresh token. A browser
+						// disconnect must not discard its response or the DB commit.
+						cancel()
+						if cancelBeforeResponse && refreshCtx.Err() != nil {
+							return nil, refreshCtx.Err()
+						}
+						if _, bounded := refreshCtx.Deadline(); !bounded {
+							t.Error("OAuth exchange has no deadline")
+						}
+						return &providers.Credentials{
+							AccessToken: "new-access", RefreshToken: "rotated-refresh",
+							ExpiresAt: time.Now().Add(4 * time.Hour),
+						}, nil
+					}}, nil
+				},
+			})
+			if _, err := svc.refreshToken(ctx, row, old); err != nil {
+				t.Fatalf("caller cancellation lost rotation: %v", err)
+			}
+			current, err := testRepo.GetByID(t.Context(), row.ID, row.StoreID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := svc.decryptCredentials(current.Credentials)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.RefreshToken != "rotated-refresh" || current.Status != "active" {
+				t.Fatal("rotated credentials were not committed")
+			}
+			// A worker holding the old snapshot must reuse the committed result.
+			if _, err := svc.refreshToken(t.Context(), row, old); err != nil || calls != 1 {
+				t.Fatalf("old refresh token reused: calls=%d error=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestTinyRefreshCancelledBeforeLockDoesNotCallProvider(t *testing.T) {
+	svc, row, old := seedTinyRefresh(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := svc.refreshToken(ctx, row, old); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled caller started refresh: %v", err)
+	}
+}
+
+func TestTinyRefreshLockWaitRespectsCallerDeadline(t *testing.T) {
+	svc, row, old := seedTinyRefresh(t)
+	tx, err := testPool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background()) //nolint:errcheck
+	if _, err := tx.Exec(t.Context(), "SELECT id FROM integrations WHERE id=$1 FOR NO KEY UPDATE", row.ID); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, refreshErr := svc.refreshToken(ctx, row, old)
+		result <- refreshErr
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("waiting caller did not preserve deadline: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled waiter is still waiting for the row lock")
+	}
+}

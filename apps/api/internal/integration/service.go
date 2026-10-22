@@ -6271,8 +6271,11 @@ func (s *Service) refreshRotatingERPToken(ctx context.Context, integration *Inte
 	defer cancel()
 	var refreshed *providers.Credentials
 	var refreshErr error
-	err := s.repo.withIntegrationRefreshLock(ctx, integration.ID, integration.StoreID,
-		func(repo *Repository, current *IntegrationRow) error {
+	err := s.repo.withIntegrationRefreshLock(
+		ctx,
+		integration.ID,
+		integration.StoreID,
+		func(refreshCtx context.Context, repo *Repository, current *IntegrationRow) error {
 			if current.Status != "active" || current.Provider != integration.Provider {
 				return fmt.Errorf("ERP integration is not active or was replaced; reconnect before refreshing")
 			}
@@ -6290,11 +6293,12 @@ func (s *Service) refreshRotatingERPToken(ctx context.Context, integration *Inte
 			if tokenRefreshDeferred(current, time.Now()) {
 				return errTokenRefreshDeferred
 			}
-			refreshed, refreshErr = s.refreshTokenWithRepository(ctx, repo, current, latest)
+			refreshed, refreshErr = s.refreshTokenWithRepository(refreshCtx, repo, current, latest)
 			// Permanent OAuth failures update status inside this transaction.
 			// Commit that diagnostic while returning the provider error below.
 			return nil
-		})
+		},
+	)
 	if err != nil {
 		return nil, errors.Join(refreshErr, err)
 	}
