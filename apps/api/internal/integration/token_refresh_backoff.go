@@ -12,10 +12,10 @@ import (
 
 var errTokenRefreshDeferred = events.NewDeferredError("token refresh deferred until the provider cooldown ends")
 
-// Bling 401/403 responses without a permanent OAuth cause do not prove revoked
-// credentials. Keep the connection, sharing a cooldown across workers/deploys.
+// Temporary Tiny failures and Bling 401/403 responses without a permanent OAuth
+// cause keep the connection, sharing a cooldown across workers/deploys.
 func tokenRefreshDeferred(row *IntegrationRow, now time.Time) bool {
-	if row.Provider != "bling" {
+	if row.Provider != "bling" && row.Provider != "tiny" {
 		return false
 	}
 	failure, ok := row.Metadata["tokenRefreshFailure"].(map[string]any)
@@ -27,15 +27,18 @@ func tokenRefreshDeferred(row *IntegrationRow, now time.Time) bool {
 	return err == nil && now.Before(next)
 }
 
-func recordBlingTokenCooldown(
+func recordTokenRefreshCooldown(
 	ctx context.Context, repo *Repository, row *IntegrationRow, refreshErr error,
 ) error {
-	var status interface{ Status() int }
-	if row.Provider != "bling" || !errors.As(refreshErr, &status) {
+	if row.Provider != "bling" && row.Provider != "tiny" {
 		return nil
 	}
-	statusCode := status.Status()
-	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
+	var status interface{ Status() int }
+	var statusCode int
+	if errors.As(refreshErr, &status) {
+		statusCode = status.Status()
+	}
+	if row.Provider == "bling" && statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
 		return nil
 	}
 	var permanent interface{ Permanent() bool }
@@ -53,13 +56,19 @@ func recordBlingTokenCooldown(
 		metadata[key] = value
 	}
 	now := time.Now().UTC()
+	delay := time.Hour
+	if row.Provider == "tiny" {
+		// Shared with foreground calls: repeated failures cannot turn every
+		// webhook into another OAuth request. The worker retries after the pause.
+		delay = time.Minute * time.Duration(min(attempts, 15))
+	}
 	metadata["tokenRefreshFailure"] = map[string]any{
 		"attempts": attempts, "statusCode": statusCode,
 		"lastAttemptAt": now.Format(time.RFC3339),
-		"nextAttemptAt": now.Add(time.Hour).Format(time.RFC3339),
+		"nextAttemptAt": now.Add(delay).Format(time.RFC3339),
 	}
 	if err := repo.UpdateMetadata(ctx, row.ID, metadata); err != nil {
-		return fmt.Errorf("recording Bling token cooldown: %w", err)
+		return fmt.Errorf("recording ERP token cooldown: %w", err)
 	}
 	return nil
 }

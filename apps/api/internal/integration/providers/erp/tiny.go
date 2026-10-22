@@ -116,6 +116,10 @@ func (t *Tiny) ValidateCredentials(ctx context.Context) error {
 
 // RefreshToken refreshes the OAuth access token using the refresh token.
 func (t *Tiny) RefreshToken(ctx context.Context) (*Credentials, error) {
+	return t.refreshTokenAt(ctx, tinyTokenURL)
+}
+
+func (t *Tiny) refreshTokenAt(ctx context.Context, endpoint string) (*Credentials, error) {
 	if t.credentials.RefreshToken == "" {
 		return nil, fmt.Errorf("no refresh token available")
 	}
@@ -138,14 +142,12 @@ func (t *Tiny) RefreshToken(ctx context.Context) (*Credentials, error) {
 		return nil, fmt.Errorf("client_id or client_secret not available")
 	}
 
-	data := fmt.Sprintf(
-		"grant_type=refresh_token&client_id=%s&client_secret=%s&refresh_token=%s",
-		clientID,
-		clientSecret,
-		t.credentials.RefreshToken,
-	)
+	data := url.Values{
+		"grant_type": {"refresh_token"}, "client_id": {clientID},
+		"client_secret": {clientSecret}, "refresh_token": {t.credentials.RefreshToken},
+	}.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tinyTokenURL, strings.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("creating refresh request: %w", err)
 	}
@@ -158,10 +160,13 @@ func (t *Tiny) RefreshToken(ctx context.Context) (*Credentials, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, fmt.Errorf("reading Tiny token response: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh token failed: status %d, body: %s", resp.StatusCode, string(body))
+		return nil, newTinyOAuthError(resp.StatusCode, body)
 	}
 
 	var tokenResp struct {
@@ -172,7 +177,13 @@ func (t *Tiny) RefreshToken(ctx context.Context) (*Credentials, error) {
 	}
 
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("parsing token response: %w", err)
+		return nil, fmt.Errorf("invalid Tiny token response")
+	}
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("Tiny token response has no access token")
+	}
+	if tokenResp.RefreshToken == "" {
+		tokenResp.RefreshToken = t.credentials.RefreshToken
 	}
 
 	// Log token refresh result for debugging

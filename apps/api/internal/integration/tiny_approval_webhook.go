@@ -27,14 +27,11 @@ type TinyApprovalCommand struct {
 }
 
 func (s *Service) enqueueTinyApproval(ctx context.Context, storeID, orderID string) error {
-	row, err := s.repo.GetActiveERP(ctx, storeID)
-	if httpx.IsNotFound(err) {
-		return nil
-	}
+	row, err := s.tinyWebhookOwner(ctx, storeID)
 	if err != nil {
 		return err
 	}
-	if row.Provider != "tiny" {
+	if row == nil {
 		return nil
 	}
 	payload, err := json.Marshal(TinyApprovalCommand{StoreID: storeID, IntegrationID: row.ID, OrderID: orderID, Kind: "order_approved"})
@@ -48,14 +45,11 @@ func (s *Service) ProcessTinyApproval(ctx context.Context, command TinyApprovalC
 	if command.StoreID == "" || command.IntegrationID == "" || command.OrderID == "" || command.Kind != "order_approved" {
 		return fmt.Errorf("invalid Tiny approval: %w", asynq.SkipRetry)
 	}
-	row, err := s.repo.GetActiveERP(ctx, command.StoreID)
-	if httpx.IsNotFound(err) {
-		return nil
-	}
+	row, err := s.tinyWebhookConsumerOwner(ctx, command.StoreID, command.IntegrationID)
 	if err != nil {
 		return err
 	}
-	if row.Provider != "tiny" || row.ID != command.IntegrationID {
+	if row == nil {
 		return nil
 	}
 	cartID, err := s.repo.FindCartByExternalOrderID(ctx, command.OrderID, command.StoreID)

@@ -6215,10 +6215,12 @@ func (s *Service) refreshToken(ctx context.Context, integration *IntegrationRow,
 			}
 			return nil, errors.Join(fmt.Errorf("waiting for Bling token quota: %w", waitErr), lookupErr)
 		}
-		refreshed, err = s.refreshBlingToken(ctx, integration, creds)
+		refreshed, err = s.refreshRotatingERPToken(ctx, integration, creds)
 		if observeErr := s.factory.ObserveBlingTokenError(ctx, err); observeErr != nil {
 			err = errors.Join(err, observeErr)
 		}
+	} else if integration.Provider == string(providers.ProviderTiny) {
+		refreshed, err = s.refreshRotatingERPToken(ctx, integration, creds)
 	} else if integration.Provider == string(providers.ProviderInstagram) {
 		refreshed, err = s.refreshInstagramToken(ctx, integration, creds)
 	} else {
@@ -6264,15 +6266,15 @@ func (s *Service) reusableBlingCredentials(ctx context.Context, integration *Int
 	return nil, nil
 }
 
-func (s *Service) refreshBlingToken(ctx context.Context, integration *IntegrationRow, creds *providers.Credentials) (*providers.Credentials, error) {
+func (s *Service) refreshRotatingERPToken(ctx context.Context, integration *IntegrationRow, creds *providers.Credentials) (*providers.Credentials, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	var refreshed *providers.Credentials
 	var refreshErr error
 	err := s.repo.withIntegrationRefreshLock(ctx, integration.ID, integration.StoreID,
 		func(repo *Repository, current *IntegrationRow) error {
-			if current.Status != "active" {
-				return fmt.Errorf("bling integration is not active; reconnect before refreshing")
+			if current.Status != "active" || current.Provider != integration.Provider {
+				return fmt.Errorf("ERP integration is not active or was replaced; reconnect before refreshing")
 			}
 			latest, err := s.decryptCredentials(current.Credentials)
 			if err != nil {
@@ -6316,11 +6318,13 @@ func (s *Service) refreshTokenWithRepository(
 
 	newCreds, err := provider.RefreshToken(ctx)
 	if err != nil {
-		if cooldownErr := recordBlingTokenCooldown(ctx, repo, integration, err); cooldownErr != nil {
+		if cooldownErr := recordTokenRefreshCooldown(ctx, repo, integration, err); cooldownErr != nil {
 			return nil, errors.Join(err, cooldownErr)
 		}
 		permanent := true
-		if integration.Provider == string(providers.ProviderBling) || integration.Provider == string(providers.ProviderInstagram) {
+		if integration.Provider == string(providers.ProviderBling) ||
+			integration.Provider == string(providers.ProviderInstagram) ||
+			integration.Provider == string(providers.ProviderTiny) {
 			var classified interface{ Permanent() bool }
 			permanent = errors.As(err, &classified) && classified.Permanent()
 		}

@@ -1696,6 +1696,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 					}
 					return integrationSvc.ProcessTinyApproval(ctx, command)
 				}
+				if kind.Kind == "order_observation" {
+					var command integration.TinyOrderWebhookCommand
+					if err := json.Unmarshal(env.Payload, &command); err != nil {
+						return asynq.SkipRetry
+					}
+					return integrationSvc.ProcessTinyOrderWebhook(ctx, command)
+				}
 				var command integration.TinyProductWebhookCommand
 				if err := json.Unmarshal(env.Payload, &command); err != nil {
 					return asynq.SkipRetry

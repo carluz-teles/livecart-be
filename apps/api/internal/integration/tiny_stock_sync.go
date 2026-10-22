@@ -15,7 +15,6 @@ import (
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
-	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
@@ -34,14 +33,11 @@ var errERPStockReadBusy = events.NewDeferredError("stock read already in progres
 var errERPStockSnapshotInvalidated = events.NewDeferredError("ERP stock snapshot invalidated by concurrent change")
 
 func (s *Service) enqueueTinyProductWebhook(ctx context.Context, storeID, kind, productID string) error {
-	integration, err := s.repo.GetActiveERP(ctx, storeID)
-	if httpx.IsNotFound(err) {
-		return nil
-	}
+	integration, err := s.tinyWebhookOwner(ctx, storeID)
 	if err != nil {
 		return fmt.Errorf("resolving Tiny webhook owner: %w", err)
 	}
-	if integration.Provider != "tiny" {
+	if integration == nil {
 		return nil
 	}
 	command := TinyProductWebhookCommand{StoreID: storeID, IntegrationID: integration.ID, ProductID: productID, Kind: kind}
@@ -89,14 +85,11 @@ func (s *Service) ProcessTinyProductWebhook(ctx context.Context, command TinyPro
 	if command.StoreID == "" || command.IntegrationID == "" || command.ProductID == "" || (command.Kind != "estoque" && command.Kind != "produto") {
 		return fmt.Errorf("invalid Tiny product command: %w", asynq.SkipRetry)
 	}
-	integration, err := s.repo.GetActiveERP(ctx, command.StoreID)
-	if httpx.IsNotFound(err) {
-		return nil
-	}
+	integration, err := s.tinyWebhookConsumerOwner(ctx, command.StoreID, command.IntegrationID)
 	if err != nil {
 		return err
 	}
-	if integration.Provider != "tiny" || integration.ID != command.IntegrationID {
+	if integration == nil {
 		return nil
 	}
 	ctx = logger.WithStore(ctx, command.StoreID, "")
